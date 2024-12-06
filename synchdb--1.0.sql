@@ -39,6 +39,10 @@ CREATE OR REPLACE FUNCTION synchdb_restart_connector(text, text) RETURNS int
 AS '$libdir/synchdb'
 LANGUAGE C IMMUTABLE STRICT;
 
+CREATE OR REPLACE FUNCTION synchdb_log_jvm_meminfo(text) RETURNS int
+AS '$libdir/synchdb'
+LANGUAGE C IMMUTABLE STRICT;
+
 --CREATE TABLE IF NOT EXISTS synchdb_conninfo(name TEXT PRIMARY KEY, host TEXT NOT NULL, port INTEGER NOT NULL CHECK (port > 0 AND port <= 65535), username TEXT NOT NULL, password BYTEA);
 CREATE TABLE IF NOT EXISTS synchdb_conninfo(name TEXT PRIMARY KEY, isactive BOOL, data JSONB);
 

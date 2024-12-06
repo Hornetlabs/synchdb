@@ -79,6 +79,7 @@ typedef enum _connectorState
 	STATE_EXECUTING,	/* conversion done, try to execute it on pg */
 	STATE_OFFSET_UPDATE,/* in this state when user requests offset update */
 	STATE_RESTARTING,	/* connector is restarting with new snapshot mode */
+	STATE_MEMDUMP,		/* connector is dumping jvm heap memory info */
 } ConnectorState;
 
 /**
@@ -101,7 +102,8 @@ typedef struct _BatchInfo
 } BatchInfo;
 
 /**
- * ConnectionInfo - DBZ Connection info
+ * ConnectionInfo - DBZ Connection info. These are put in shared memory so
+ * connector background workers can access when they are spawned.
  */
 typedef struct _ConnectionInfo
 {
@@ -116,6 +118,20 @@ typedef struct _ConnectionInfo
     bool active;
     char rulefile[SYNCHDB_CONNINFO_RULEFILENAME_SIZE];
 } ConnectionInfo;
+
+/**
+ * ExtraConnectionInfo - Extra DBZ Connection info parameters read from the
+ * rule file (if specified). These won't be put in shared memory so they
+ * are declared as pointers.
+ */
+typedef struct _ExtraConnectionInfo
+{
+	char * ssl_mode;
+	char * ssl_keystore;
+	char * ssl_keystore_pass;
+	char * ssl_truststore;
+	char * ssl_truststore_pass;
+} ExtraConnectionInfo;
 
 /**
  * SynchdbRequest - Structure representing a request to change connector state
