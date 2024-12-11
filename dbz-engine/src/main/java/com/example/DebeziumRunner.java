@@ -17,7 +17,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.ExecutionException;
 import java.util.LinkedList;
 import java.util.Queue;
-
+import java.io.IOException;
 import java.io.File;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
@@ -34,6 +34,9 @@ import org.slf4j.LoggerFactory;
 import java.lang.management.ManagementFactory;
 import java.lang.management.MemoryMXBean;
 import java.lang.management.MemoryUsage;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 public class DebeziumRunner {
 	private static final Logger logger = LoggerFactory.getLogger(DebeziumRunner.class);
@@ -52,16 +55,182 @@ public class DebeziumRunner {
 	final int TYPE_SQLSERVER = 3;
 	final int BATCH_QUEUE_SIZE = 3;
 
+	/* MyParameters class - encapsulates all supported debezium parameters */
+	public class MyParameters
+	{
+		/* required parameters - needed to construct this class */
+		private String connectorName;
+		private int connectorType;
+		private String hostname;
+		private int port;
+		private String user;
+		private String password;
+		private String database;
+		private String table;
+		private String snapshotMode;
+
+		/* extended parameters - set incrementally */
+		private int batchSize;
+		private int queueSize;
+		private String skippedOperations;
+		private int connectTimeout;
+		private int queryTimeout;
+		private int snapshotThreadNum;
+		private int snapshotFetchSize;
+		private int snapshotMinRowToStreamResults;
+		private int incrementalSnapshotChunkSize;
+		private String incrementalSnapshotWatermarkingStrategy;
+		private int offsetFlushIntervalMs;
+		private boolean captureOnlySelectedTableDDL;
+		private String sslmode;
+		private String sslKeystore;
+		private String sslKeystorePass;
+		private String sslTruststore;
+		private String sslTruststorePass;
+
+		/* constructor requires all required parameters for a connector to work */
+		public MyParameters(String connectorName, int connectorType, String hostname, int port, String user, String password, String database, String table, String snapshotMode)
+		{
+			this.connectorName = connectorName;
+			this.connectorType = connectorType;
+			this.hostname = hostname;
+			this.port = port;
+			this.user = user;
+			this.password = password;
+			this.database = database;
+			this.table = table;
+			this.snapshotMode = snapshotMode;
+		}
+		public MyParameters setBatchSize(int batchSize)
+		{
+			this.batchSize = batchSize;
+			return this;
+		}
+		public MyParameters setQueueSize(int queueSize)
+		{
+			this.queueSize = queueSize;
+			return this;
+		}
+		public MyParameters setSkippedOperations(String skippedOperations)
+		{
+			this.skippedOperations = skippedOperations;
+			return this;
+		}
+		public MyParameters setConnectTimeout(int connectTimeout)
+		{
+			this.connectTimeout = connectTimeout;
+			return this;
+		}
+		public MyParameters setQueryTimeout(int queryTimeout)
+		{
+			this.queryTimeout = queryTimeout;
+			return this;
+		}
+		public MyParameters setSnapshotThreadNum(int snapshotThreadNum)
+		{
+			this.snapshotThreadNum = snapshotThreadNum;
+			return this;
+		}
+		public MyParameters setSnapshotFetchSize(int snapshotFetchSize)
+		{
+			this.snapshotFetchSize = snapshotFetchSize;
+			return this;
+		}
+		public MyParameters setSnapshotMinRowToStreamResults(int snapshotMinRowToStreamResults)
+		{
+			this.snapshotMinRowToStreamResults = snapshotMinRowToStreamResults;
+			return this;
+		}
+		public MyParameters setIncrementalSnapshotChunkSize(int incrementalSnapshotChunkSize)
+		{
+			this.incrementalSnapshotChunkSize = incrementalSnapshotChunkSize;
+			return this;
+		}
+		public MyParameters setIncrementalSnapshotWatermarkingStrategy(String incrementalSnapshotWatermarkingStrategy)
+		{
+			this.incrementalSnapshotWatermarkingStrategy = incrementalSnapshotWatermarkingStrategy;
+			return this;
+		}
+		public MyParameters setOffsetFlushIntervalMs(int offsetFlushIntervalMs)
+		{
+			this.offsetFlushIntervalMs = offsetFlushIntervalMs;
+			return this;
+		}
+		public MyParameters setCaptureOnlySelectedTableDDL(boolean captureOnlySelectedTableDDL)
+		{
+			this.captureOnlySelectedTableDDL = captureOnlySelectedTableDDL;
+			return this;
+		}
+		public MyParameters setSslmode(String sslmode)
+		{
+			this.sslmode = sslmode;
+			return this;
+		}
+		public MyParameters setSslKeystore(String sslKeystore)
+		{
+			this.sslKeystore = sslKeystore;
+			return this;
+		}
+		public MyParameters setSslKeystorePass(String sslKeystorePass)
+		{
+			this.sslKeystorePass = sslKeystorePass;
+			return this;
+		}
+		public MyParameters setSslTruststore(String sslTruststore)
+		{
+			this.sslTruststore = sslTruststore;
+			return this;
+		}
+		public MyParameters setSslTruststorePass(String sslTruststorePass)
+		{
+			this.sslTruststorePass = sslTruststorePass;
+			return this;
+		}
+
+		/* add more setters here to incrementally set parameters */
+		public void print()
+		{
+			logger.warn("connectorName = " + this.connectorName);
+			logger.warn("connectorType= " + this.connectorType);
+			logger.warn("hostname = " + this.hostname);
+			logger.warn("port = " + this.port);
+			logger.warn("user = " + this.user);
+			logger.warn("database = " + this.database);
+			logger.warn("table = " + this.table);
+			logger.warn("snapshotMode = " + this.snapshotMode);
+
+			logger.warn("batchSize = " + this.batchSize);
+			logger.warn("queueSize = " + this.queueSize);
+			logger.warn("skippedOperations = " + this.skippedOperations);
+			logger.warn("connectTimeout = " + this.connectTimeout);
+			logger.warn("queryTimeout = " + this.queryTimeout);
+			logger.warn("snapshotThreadNum = " + this.snapshotThreadNum);
+			logger.warn("snapshotFetchSize = " + this.snapshotFetchSize);
+			logger.warn("snapshotMinRowToStreamResults= " + this.snapshotMinRowToStreamResults);
+			logger.warn("incrementalSnapshotChunkSize = " + this.incrementalSnapshotChunkSize);
+			logger.warn("incrementalSnapshotWatermarkingStrategy = " + this.incrementalSnapshotWatermarkingStrategy);
+			logger.warn("offsetFlushIntervalMs = " + this.offsetFlushIntervalMs);
+			logger.warn("captureOnlySelectedTableDDL = " + this.captureOnlySelectedTableDDL);
+			logger.warn("sslmode = " + this.sslmode);
+			logger.warn("sslKeystore = " + this.sslKeystore);
+			logger.warn("sslKeystorePass = " + this.sslKeystorePass);
+			logger.warn("sslTruststore = " + this.sslTruststore);
+			logger.warn("sslTruststorePass = " + this.sslTruststorePass);
+		}
+
+	}
 	/* BatchMaanger represents a Batch request queue */
 	public class BatchManager
 	{
 		private Queue<ChangeRecordBatch> batchQueue;
 		private int batchid;
+		private boolean isShutdown;
 
 		public BatchManager()
 		{
 			this.batchQueue = new LinkedList<>();
 			this.batchid = 0;
+			this.isShutdown = false;
 		}
 
 		public synchronized int getQueueSize()
@@ -70,10 +239,17 @@ public class DebeziumRunner {
 		}
 		public synchronized void addBatch(ChangeRecordBatch batch) throws InterruptedException
 		{
-			while (batchQueue.size() >= BATCH_QUEUE_SIZE)
+			while (batchQueue.size() >= BATCH_QUEUE_SIZE && !this.isShutdown)
 			{
 				wait();
 			}
+
+			if (this.isShutdown)
+			{
+				logger.warn("BatchManager has been shutdown...");
+				return;
+			}
+
 			batch.batchid = this.batchid;
 			batchQueue.offer(batch);
 			this.batchid++;
@@ -90,14 +266,20 @@ public class DebeziumRunner {
         	}
 			return batch;
 		}
+
+		public synchronized void shutdown()
+		{
+			this.isShutdown = true;
+			notifyAll();
+		}
 	}
 	
 	/* ChangeRecordBatch represents a batch with our own identifier 'batchid' added to it */
 	public class ChangeRecordBatch
 	{
 		public int batchid;
-		public final List<ChangeEvent<String, String>> records;
-		public final DebeziumEngine.RecordCommitter committer;
+		public List<ChangeEvent<String, String>> records;
+		public DebeziumEngine.RecordCommitter committer;
 
 		public ChangeRecordBatch(List<ChangeEvent<String, String>> records, DebeziumEngine.RecordCommitter committer) 
 		{
@@ -106,98 +288,185 @@ public class DebeziumRunner {
 		}
 	}
 
-public void checkMemoryStatus() {
-    MemoryMXBean memoryMXBean = ManagementFactory.getMemoryMXBean();
-    MemoryUsage heapUsage = memoryMXBean.getHeapMemoryUsage();
-    MemoryUsage nonHeapUsage = memoryMXBean.getNonHeapMemoryUsage();
+	public void checkMemoryStatus()
+	{
+		MemoryMXBean memoryMXBean = ManagementFactory.getMemoryMXBean();
+	    MemoryUsage heapUsage = memoryMXBean.getHeapMemoryUsage();
+	    MemoryUsage nonHeapUsage = memoryMXBean.getNonHeapMemoryUsage();
 
-    logger.warn("Heap Memory:");
-    logger.warn("  Used: " + heapUsage.getUsed() + " bytes");
-    logger.warn("  Committed: " + heapUsage.getCommitted() + " bytes");
-    logger.warn("  Max: " + heapUsage.getMax() + " bytes");
+		logger.warn("Heap Memory:");
+	    logger.warn("  Used: " + heapUsage.getUsed() + " bytes");
+	    logger.warn("  Committed: " + heapUsage.getCommitted() + " bytes");
+	    logger.warn("  Max: " + heapUsage.getMax() + " bytes");
 
-    logger.warn("Non-Heap Memory:");
-    logger.warn("  Used: " + nonHeapUsage.getUsed() + " bytes");
-    logger.warn("  Committed: " + nonHeapUsage.getCommitted() + " bytes");
-    logger.warn("  Max: " + nonHeapUsage.getMax() + " bytes");
-}
+		logger.warn("Non-Heap Memory:");
+	    logger.warn("  Used: " + nonHeapUsage.getUsed() + " bytes");
+	    logger.warn("  Committed: " + nonHeapUsage.getCommitted() + " bytes");
+	    logger.warn("  Max: " + nonHeapUsage.getMax() + " bytes");
+	}
 
-	public void startEngine(String hostname, int port, String user, String password, String database, String table, int connectorType, String name, String snapshot_mode) throws Exception
+	public void startEngine(MyParameters myParameters) throws Exception
 	{
 		String offsetfile = "/dev/shm/offsets.dat";
 		String schemahistoryfile = "/dev/shm/schemahistory.dat";
-
+		String signalfile= "/dev/shm/signalfile.dat";
 		Properties props = new Properties();
+		myParameters.print();
 
         /* Setting connector specific properties */
         props.setProperty("name", "engine");
-		switch(connectorType)
+		switch(myParameters.connectorType)
 		{
 			case TYPE_MYSQL:
 			{
 		        props.setProperty("connector.class", "io.debezium.connector.mysql.MySqlConnector");
-				int hash = name.hashCode();
+				int hash = myParameters.connectorName.hashCode();
 				long unsignedhash = Integer.toUnsignedLong(hash);
 				long serverid = 1 + (unsignedhash % (4294967295L - 1));
 
 				logger.warn("derived server id " + serverid);
 				props.setProperty("database.server.id", String.valueOf(serverid));	/* todo: make configurable */
 
-				offsetfile = "pg_synchdb/mysql_" + name + "_offsets.dat";
-				schemahistoryfile = "pg_synchdb/mysql_" + name + "_schemahistory.dat";
+				offsetfile = "pg_synchdb/mysql_" + myParameters.connectorName + "_offsets.dat";
+				schemahistoryfile = "pg_synchdb/mysql_" + myParameters.connectorName + "_schemahistory.dat";
+				signalfile = "pg_synchdb/mysql_" + myParameters.connectorName + "_signal.dat";
+
+				if (myParameters.sslmode != null)
+					props.setProperty("database.ssl.mode", myParameters.sslmode);
+				if (myParameters.sslKeystore != null)
+					props.setProperty("database.ssl.keystore", myParameters.sslKeystore);
+				if (myParameters.sslKeystorePass != null)
+					props.setProperty("database.ssl.keystore.password", myParameters.sslKeystorePass);
+				if (myParameters.sslTruststore != null)
+					props.setProperty("database.ssl.truststore", myParameters.sslTruststore);
+				if (myParameters.sslTruststorePass != null)
+					props.setProperty("database.ssl.truststore.password", myParameters.sslTruststorePass);
 
 				break;
 			}
 			case TYPE_ORACLE:
 			{
 		        props.setProperty("connector.class", "io.debezium.connector.oracle.OracleConnector");
-				offsetfile = "pg_synchdb/oracle_" + name + "_offsets.dat";
-				schemahistoryfile = "pg_synchdb/oracle_" + name + "_schemahistory.dat";
+				offsetfile = "pg_synchdb/oracle_" + myParameters.connectorName + "_offsets.dat";
+				schemahistoryfile = "pg_synchdb/oracle_" + myParameters.connectorName + "_schemahistory.dat";
+				signalfile = "pg_synchdb/oracle_" + myParameters.connectorName + "_signal.dat";
 				break;
 			}
 			case TYPE_SQLSERVER:
 			{
 		        props.setProperty("connector.class", "io.debezium.connector.sqlserver.SqlServerConnector");
-				props.setProperty("database.encrypt", "false");	/* todo: enable tls */
-				offsetfile = "pg_synchdb/sqlserver_" + name + "_offsets.dat";
-				schemahistoryfile = "pg_synchdb/sqlserver_" + name + "_schemahistory.dat";
+				offsetfile = "pg_synchdb/sqlserver_" + myParameters.connectorName + "_offsets.dat";
+				schemahistoryfile = "pg_synchdb/sqlserver_" + myParameters.connectorName + "_schemahistory.dat";
+				signalfile = "pg_synchdb/sqlserver_" + myParameters.connectorName + "_signal.dat";
+				
+				if (myParameters.sslmode != null && !myParameters.sslmode.equals("disabled"))
+					props.setProperty("database.encrypt", "true");
+				else
+					props.setProperty("database.encrypt", "false");
+
+				if (myParameters.sslKeystore != null)
+					props.setProperty("database.ssl.keystore", myParameters.sslKeystore);
+				if (myParameters.sslKeystorePass != null)
+					props.setProperty("database.ssl.keystore.password", myParameters.sslKeystorePass);
+				if (myParameters.sslTruststore != null)
+					props.setProperty("database.ssl.truststore", myParameters.sslTruststore);
+				if (myParameters.sslTruststorePass != null)
+					props.setProperty("database.ssl.truststore.password", myParameters.sslTruststorePass);
 				break;
 			}
 		}
 		
 		/* setting common properties */
-		if (database.equals("null"))
+		if (myParameters.database.equals("null"))
 			logger.warn("database is null - skip setting database.include.list property");
 		else
 		{
-			props.setProperty("database.include.list", database);
-			props.setProperty("database.names", database);
+			props.setProperty("database.include.list", myParameters.database);
+			props.setProperty("database.names", myParameters.database);
 		}
 
-		if (table.equals("null"))
+		if (myParameters.table.equals("null"))
 			logger.warn("table is null - skip setting table.include.list property");
+		else if (myParameters.table.startsWith("file:"))
+		{
+			logger.warn("reading table list from file...");
+			String filepath = myParameters.table.substring(5);
+			File tablefile = new File(filepath);
+			if (tablefile.exists())
+			{
+				ObjectMapper objmapper = new ObjectMapper();
+				try
+				{
+					JsonNode js = objmapper.readTree(tablefile);
+					if (js.has("table_list") && js.get("table_list").isArray())
+					{
+						JsonNode tableListNode = js.get("table_list");
+						StringBuilder tablelist = new StringBuilder();
+						for (JsonNode table : tableListNode)
+						{
+							tablelist.append(table.asText()).append(",");
+						}
+						if (tablelist.length() > 0)
+							tablelist.setLength(tablelist.length() - 1);
+
+						logger.warn("tables to capture: " + tablelist.toString());
+						props.setProperty("table.include.list", tablelist.toString());
+					}
+					else
+					{
+						logger.warn("file has no array named 'table_list' - skip setting table.include.list property");
+					}
+				}
+				catch (IOException e)
+				{
+					logger.warn("table file fails to parse - skip setting table.include.list property");
+				}
+			}
+			else
+			{
+				logger.warn("table file does not exist - skip setting table.include.list property");
+			}
+		}
 		else
-			props.setProperty("table.include.list", table);
+			props.setProperty("table.include.list", myParameters.table);
 		
-		if (snapshot_mode.equals("null"))
+		if (myParameters.snapshotMode.equals("null"))
 			logger.warn("snapshot_mode is null - skip setting snapshot.mode property");
 		else
-			props.setProperty("snapshot.mode", snapshot_mode);
+			props.setProperty("snapshot.mode", myParameters.snapshotMode);
 
-		props.setProperty("database.hostname", hostname);
-		props.setProperty("database.port", String.valueOf(port));
-		props.setProperty("database.user", user);
-		props.setProperty("database.password", password);
+		if (myParameters.snapshotFetchSize == 0)
+			logger.warn("snapshotFetchSize is 0 - skip setting snapshot.fetch.size property");
+		else
+			props.setProperty("snapshot.fetch.size", String.valueOf(myParameters.snapshotFetchSize));
+
+		props.setProperty("database.hostname", myParameters.hostname);
+		props.setProperty("database.port", String.valueOf(myParameters.port));
+		props.setProperty("database.user", myParameters.user);
+		props.setProperty("database.password", myParameters.password);
 		props.setProperty("topic.prefix", "synchdb-connector");
 		props.setProperty("schema.history.internal", "io.debezium.storage.file.history.FileSchemaHistory");
 		props.setProperty("schema.history.internal.file.filename", schemahistoryfile);
 		props.setProperty("offset.storage", "org.apache.kafka.connect.storage.FileOffsetBackingStore");
 		props.setProperty("offset.storage.file.filename", offsetfile);
-		props.setProperty("offset.flush.interval.ms", "60000");
-		props.setProperty("schema.history.internal.store.only.captured.tables.ddl", "true");
-		props.setProperty("max.batch.size", "4096");
-		props.setProperty("max.queue.size", "8192");
+		props.setProperty("offset.flush.interval.ms", String.valueOf(myParameters.offsetFlushIntervalMs));
+		props.setProperty("schema.history.internal.store.only.captured.tables.ddl", myParameters.captureOnlySelectedTableDDL ? "true" : "false");
+		props.setProperty("max.batch.size", String.valueOf(myParameters.batchSize));
+		props.setProperty("max.queue.size", String.valueOf(myParameters.queueSize));
 		props.setProperty("record.processing.order", "ORDERED");
+		props.setProperty("skipped.operations", myParameters.skippedOperations);
+		props.setProperty("connect.timeout", String.valueOf(myParameters.connectTimeout));
+		props.setProperty("database.query.timeout", String.valueOf(myParameters.queryTimeout));
+		props.setProperty("snapshot.max.threads", String.valueOf(myParameters.snapshotThreadNum));
+		props.setProperty("signal.enabled.channels", "file");
+		props.setProperty("signal.file", signalfile);
+		//props.setProperty("signal.data.collection", "synchdb.dbzsignal");	/* todo: make it configurable */
+		props.setProperty("incremental.snapshot.chunk.size", String.valueOf(myParameters.incrementalSnapshotChunkSize));
+		props.setProperty("incremental.snapshot.watermarking.strategy", myParameters.incrementalSnapshotWatermarkingStrategy);
+		props.setProperty("incremental.snapshot.allow.schema.changes", "false");
+		props.setProperty("min.row.count.to.stream.results", String.valueOf(myParameters.snapshotMinRowToStreamResults));
+
+		//props.setProperty("read.only", "true");
 
 		logger.info("Hello from DebeziumRunner class!");
 
@@ -225,7 +494,6 @@ public void checkMemoryStatus() {
 							activeBatchHash = new HashMap<>();
 						}
 
-						/* throttle control */
 						try
 						{
 							batchManager.addBatch(new ChangeRecordBatch(records, committer));
@@ -239,7 +507,10 @@ public void checkMemoryStatus() {
 				})
 				.build();
 
-		executor = Executors.newSingleThreadExecutor();
+		if (myParameters.snapshotThreadNum > 1)
+			executor = Executors.newFixedThreadPool(myParameters.snapshotThreadNum);
+		else
+			executor = Executors.newSingleThreadExecutor();
 
 		logger.info("submit future to executor");
 		future = executor.submit(() ->
@@ -258,14 +529,21 @@ public void checkMemoryStatus() {
 
 	public void stopEngine() throws Exception
 	{
+		/* wake up any waiting threads about shutdown */
+		logger.warn("stopping Debezium engine...");
+		if (batchManager != null)
+		{
+			batchManager.shutdown();
+		}
 		if (engine != null)
 		{
+			logger.warn("closing Debezium engine...");
 			engine.close();
 			engine = null; // clear the reference to ensure it's properly garbage collected
 		}
 		if (executor != null)
 		{
-			logger.info("stopping executor...");
+			logger.warn("shutting down executor...");
             executor.shutdown();
             try
 			{
@@ -279,7 +557,7 @@ public void checkMemoryStatus() {
                 executor.shutdownNow();
             }
         }
-		logger.info("done...");
+		logger.warn("done...");
 	}
 
 	public List<String> getChangeEvents()
@@ -373,6 +651,12 @@ public void checkMemoryStatus() {
 			
 			/* remove hash entry at batch completion */
 			activeBatchHash.remove(batchid);
+
+			/* nullify the allocated objects for garbage collection */
+			myBatch.records.clear();
+			myBatch.records = null;
+			myBatch.committer = null;
+			myBatch = null;
 		}
 		else
 		{
@@ -511,7 +795,8 @@ public void checkMemoryStatus() {
 		writeOffsetFile(inputFile, rawData);
 	}
 	
-	public Map<ByteBuffer, ByteBuffer> readOffsetFile(File inputFile) {
+	public Map<ByteBuffer, ByteBuffer> readOffsetFile(File inputFile)
+	{
         Map<ByteBuffer, ByteBuffer> originalData = new HashMap<>();
 
         try (FileInputStream fileIn = new FileInputStream(inputFile);
@@ -533,7 +818,8 @@ public void checkMemoryStatus() {
         return originalData;
     }
 
-    public void writeOffsetFile(File outputFile, Map<byte[], byte[]> rawData) {
+    public void writeOffsetFile(File outputFile, Map<byte[], byte[]> rawData)
+	{
         try (FileOutputStream fileOut = new FileOutputStream(outputFile);
              ObjectOutputStream objectOut = new ObjectOutputStream(fileOut)) {
                 objectOut.writeObject(rawData);
@@ -541,6 +827,11 @@ public void checkMemoryStatus() {
             throw new RuntimeException(e);
         }
     }
+
+	public void jvmMemDump()
+	{
+		checkMemoryStatus();
+	}
 	public static void main(String[] args)
 	{
 		/* testing code can be put here */

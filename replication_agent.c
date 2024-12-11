@@ -194,7 +194,7 @@ spi_execute(const char * query, ConnectorType type)
 {
 	int ret = -1;
 	bool skiptx = false;
-	MemoryContext oldContext = CurrentMemoryContext;
+	MemoryContext oldContext, execContext;
 	/*
 	 * if we are already in transaction or transaction block, we can skip
 	 * the transaction and snapshot acquisition code below
@@ -210,6 +210,14 @@ spi_execute(const char * query, ConnectorType type)
 			StartTransactionCommand();
 			PushActiveSnapshot(GetTransactionSnapshot());
 		}
+
+		/* Create a temporary memory context for query execution */
+		execContext = AllocSetContextCreate(CurrentMemoryContext,
+											"synchdb_spi_exec_context",
+											ALLOCSET_DEFAULT_SIZES);
+
+		/* Switch to the temporary memory context */
+		oldContext = MemoryContextSwitchTo(execContext);
 
 		if (SPI_connect() != SPI_OK_CONNECT)
 		{
@@ -238,13 +246,19 @@ spi_execute(const char * query, ConnectorType type)
 			elog(ERROR, "SPI_finish failed");
 		}
 
+		/* Switch back to the original memory context and reset the temporary one */
+		MemoryContextSwitchTo(oldContext);
+		MemoryContextReset(execContext);
+
 		if (!skiptx)
 		{
 			/* Commit the transaction */
 			PopActiveSnapshot();
 			CommitTransactionCommand();
-			MemoryContextSwitchTo(oldContext);
 		}
+
+		/* Delete the temporary context */
+		MemoryContextDelete(execContext);
 	}
 	PG_CATCH();
 	{
@@ -256,6 +270,12 @@ spi_execute(const char * query, ConnectorType type)
 		FreeErrorData(errdata);
 		SPI_finish();
 		ret = -1;
+		/* Ensure the temporary memory context is cleaned up */
+		if (execContext)
+		{
+			MemoryContextSwitchTo(oldContext);
+			MemoryContextDelete(execContext);
+		}
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
@@ -348,6 +368,9 @@ synchdb_handle_insert(List * colval, Oid tableoid, ConnectorType type)
 
 		/* Do the insert. */
 		ExecSimpleRelationInsert(resultRelInfo, estate, slot);
+
+		/* increment command ID */
+		CommandCounterIncrement();
 
 		/* Cleanup. */
 		ExecCloseIndices(resultRelInfo);
@@ -534,6 +557,9 @@ synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, Con
 			ret = -1;
 		}
 
+		/* increment command ID */
+		CommandCounterIncrement();
+
 		/* Cleanup. */
 		ExecCloseIndices(resultRelInfo);
 		EvalPlanQualEnd(&epqstate);
@@ -685,6 +711,9 @@ synchdb_handle_delete(List * colvalbefore, Oid tableoid, ConnectorType type)
 			elog(DEBUG1, "tuple to delete not found");
 			ret = -1;
 		}
+
+		/* increment command ID */
+		CommandCounterIncrement();
 
 		/* Cleanup. */
 		ExecCloseIndices(resultRelInfo);

@@ -43,7 +43,9 @@
 
 extern bool synchdb_dml_use_spi;
 extern int myConnectorId;
+extern ExtraConnectionInfo extraConnInfo;
 
+static HTAB * dataCacheHash;
 static HTAB * objectMappingHash;
 static HTAB * transformExpressionHash;
 
@@ -1627,6 +1629,9 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 	}
 	else if (!strcmp(dbzddl->type, "DROP"))
 	{
+		DataCacheKey cachekey = {0};
+		bool found = false;
+
 		mappedObjName = transform_object_name(dbzddl->id, "table");
 		if (mappedObjName)
 		{
@@ -1657,6 +1662,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 			else if (!schema && table)
 			{
 				/* table stays as table but no schema */
+				schema = pstrdup("public");
 				appendStringInfo(&strinfo, "DROP TABLE IF EXISTS %s;", table);
 			}
 		}
@@ -1676,8 +1682,16 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 				/* trigger pg's error shutdown routine */
 				elog(ERROR, "%s", msg);
 			}
-			appendStringInfo(&strinfo, "DROP TABLE IF EXISTS %s.%s;", db, table);
+			/* make schema points to db */
+			schema = db;
+			appendStringInfo(&strinfo, "DROP TABLE IF EXISTS %s.%s;", schema, table);
 		}
+
+		/* drop data cache for schema.table if exists */
+		strlcpy(cachekey.schema, schema, SYNCHDB_CONNINFO_DB_NAME_SIZE);
+		strlcpy(cachekey.table, table, SYNCHDB_CONNINFO_DB_NAME_SIZE);
+		hash_search(dataCacheHash, &cachekey, HASH_REMOVE, &found);
+
 	}
 	else if (!strcmp(dbzddl->type, "ALTER"))
 	{
@@ -1687,6 +1701,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 		bool found = false, altered = false;
 		Relation rel;
 		TupleDesc tupdesc;
+		DataCacheKey cachekey = {0};
 
 		mappedObjName = transform_object_name(dbzddl->id, "table");
 		if (mappedObjName)
@@ -1750,6 +1765,11 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 			schema = db;
 			appendStringInfo(&strinfo, "ALTER TABLE %s.%s ", schema, table);
 		}
+
+		/* drop data cache for schema.table if exists */
+		strlcpy(cachekey.schema, schema, SYNCHDB_CONNINFO_DB_NAME_SIZE);
+		strlcpy(cachekey.table, table, SYNCHDB_CONNINFO_DB_NAME_SIZE);
+		hash_search(dataCacheHash, &cachekey, HASH_REMOVE, &found);
 
 		/*
 		 * For ALTER, we must obtain the current schema in PostgreSQL and identify
@@ -2082,7 +2102,7 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 		{
 			if (addquote)
 			{
-				escapeSingleQuote(in, addquote);
+				out = escapeSingleQuote(in, addquote);
 			}
 			else
 			{
@@ -2230,7 +2250,7 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 					 */
 					if (addquote)
 					{
-						escapeSingleQuote(in, addquote);
+						out = escapeSingleQuote(in, addquote);
 					}
 					else
 					{
@@ -2390,7 +2410,7 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 
 			if (addquote)
 			{
-				escapeSingleQuote(in, addquote);
+				out = escapeSingleQuote(in, addquote);
 			}
 			else
 			{
@@ -2713,7 +2733,7 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 					pgcolval_after->position = colval_after->position;
 					pgdml->columnValuesAfter = lappend(pgdml->columnValuesAfter, pgcolval_after);
 
-
+					data = processDataByType(colval_before, false, dbzdml->remoteObjectId);
 					if (data != NULL)
 					{
 						pgcolval_before->value = pstrdup(data);
@@ -2834,12 +2854,13 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 	Relation rel;
 	TupleDesc tupdesc;
 	int attnum, j = 0;
-	MemoryContext oldContext = CurrentMemoryContext;
 
 	HTAB * typeidhash;
 	HASHCTL hash_ctl;
 	NameOidEntry * entry;
 	bool found;
+	DataCacheKey cachekey = {0};
+	DataCacheEntry * cacheentry;
 
 	/* these are the components that compose of an object ID before transformation */
 	char * db = NULL, * schema = NULL, * table = NULL;
@@ -2875,7 +2896,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 
 	/* fetch table - required */
 	getPathElementString(jb, "payload.source.table", &strinfo, true);
-	if (!strcasecmp(strinfo.data, "NULL"))
+	if (!strcasecmp(strinfo.data, "NULL") || !strcasecmp(strinfo.data, "dbzsignal"))
 	{
 		elog(WARNING, "malformed DML change request - no table attribute specified");
 		destroyDBZDML(dbzdml);
@@ -2952,6 +2973,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 	}
 
 	dbzdml->op = op;
+
 	/*
 	 * before parsing, we need to make sure the target namespace and table
 	 * do exist in PostgreSQL, and also fetch their attribute type IDs. PG
@@ -2965,74 +2987,98 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 	for (j = 0; j < strlen(dbzdml->table); j++)
 		dbzdml->table[j] = (char) pg_tolower((unsigned char) dbzdml->table[j]);
 
-	schemaoid = get_namespace_oid(dbzdml->schema, false);
-	if (!OidIsValid(schemaoid))
-	{
-		char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
-		snprintf(msg, SYNCHDB_ERRMSG_SIZE, "no valid OID found for schema '%s'", dbzdml->schema);
-		set_shm_connector_errmsg(myConnectorId, msg);
+	/* prepare cache key */
+	strlcpy(cachekey.schema, dbzdml->schema, sizeof(cachekey.schema));
+	strlcpy(cachekey.table, dbzdml->table, sizeof(cachekey.table));
 
-		/* trigger pg's error shutdown routine */
-		elog(ERROR, "%s", msg);
+	cacheentry = (DataCacheEntry *) hash_search(dataCacheHash, &cachekey, HASH_ENTER, &found);
+	if (found)
+	{
+		/* use the cached data type hash for lookup later */
+		typeidhash = cacheentry->typeidhash;
+		dbzdml->tableoid = cacheentry->tableoid;
 	}
-
-	dbzdml->tableoid = get_relname_relid(dbzdml->table, schemaoid);
-	if (!OidIsValid(dbzdml->tableoid))
+	else
 	{
-		char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
-		snprintf(msg, SYNCHDB_ERRMSG_SIZE, "no valid OID found for table '%s'", dbzdml->table);
-		set_shm_connector_errmsg(myConnectorId, msg);
-
-		/* trigger pg's error shutdown routine */
-		elog(ERROR, "%s", msg);
-	}
-
-	elog(DEBUG1, "namespace %s.%s has PostgreSQL OID %d", dbzdml->schema, dbzdml->table, dbzdml->tableoid);
-
-	/* prepare a temporary hash table for datatype look up with column name */
-	memset(&hash_ctl, 0, sizeof(hash_ctl));
-	hash_ctl.keysize = NAMEDATALEN;
-	hash_ctl.entrysize = sizeof(NameOidEntry);
-	hash_ctl.hcxt = oldContext;
-
-	typeidhash = hash_create("Name to OID Hash Table",
-							 512, // limit to 512 columns max
-							 &hash_ctl,
-							 HASH_ELEM | HASH_CONTEXT);
-
-	/*
-	 * get the column data type IDs for all columns from PostgreSQL catalog
-	 * The type IDs are stored in typeidhash temporarily for the parser
-	 * below to look up
-	 */
-	rel = table_open(dbzdml->tableoid, NoLock);
-	tupdesc = RelationGetDescr(rel);
-
-	for (attnum = 1; attnum <= tupdesc->natts; attnum++)
-	{
-		Form_pg_attribute attr = TupleDescAttr(tupdesc, attnum - 1);
-		elog(DEBUG2, "column %d: name %s, type %u, length %d",
-				attnum,
-				NameStr(attr->attname),
-				attr->atttypid,
-				attr->attlen);
-
-		entry = (NameOidEntry *) hash_search(typeidhash, NameStr(attr->attname), HASH_ENTER, &found);
-		if (!found)
+		schemaoid = get_namespace_oid(dbzdml->schema, false);
+		if (!OidIsValid(schemaoid))
 		{
-			strncpy(entry->name, NameStr(attr->attname), NAMEDATALEN);
-			entry->oid = attr->atttypid;
-			entry->position = attnum;
-			entry->typemod = attr->atttypmod;
-			elog(DEBUG2, "Inserted name '%s' with OID %u and position %d", entry->name, entry->oid, entry->position);
-		}
-		else
-		{
-			elog(DEBUG2, "Name '%s' already exists with OID %u and position %d", entry->name, entry->oid, entry->position);
-		}
-	}
-	table_close(rel, NoLock);
+			char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
+			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "no valid OID found for schema '%s'", dbzdml->schema);
+			set_shm_connector_errmsg(myConnectorId, msg);
 
+			/* trigger pg's error shutdown routine */
+			elog(ERROR, "%s", msg);
+		}
+
+		dbzdml->tableoid = get_relname_relid(dbzdml->table, schemaoid);
+		if (!OidIsValid(dbzdml->tableoid))
+		{
+			char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
+			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "no valid OID found for table '%s'", dbzdml->table);
+			set_shm_connector_errmsg(myConnectorId, msg);
+
+			/* trigger pg's error shutdown routine */
+			elog(ERROR, "%s", msg);
+		}
+
+		elog(DEBUG1, "namespace %s.%s has PostgreSQL OID %d", dbzdml->schema, dbzdml->table, dbzdml->tableoid);
+
+		/* populate cached information */
+		strlcpy(cacheentry->key.schema, dbzdml->schema, sizeof(cachekey.schema));
+		strlcpy(cacheentry->key.table, dbzdml->table, sizeof(cachekey.table));
+		cacheentry->tableoid = dbzdml->tableoid;
+
+		/* prepare a cached hash table for datatype look up with column name */
+		memset(&hash_ctl, 0, sizeof(hash_ctl));
+		hash_ctl.keysize = NAMEDATALEN;
+		hash_ctl.entrysize = sizeof(NameOidEntry);
+		hash_ctl.hcxt = TopMemoryContext;
+
+		cacheentry->typeidhash = hash_create("Name to OID Hash Table",
+											 512, // limit to 512 columns max
+											 &hash_ctl,
+											 HASH_ELEM | HASH_CONTEXT);
+
+		/* point to the cached datatype hash */
+		typeidhash = cacheentry->typeidhash;
+
+		/*
+		 * get the column data type IDs for all columns from PostgreSQL catalog
+		 * The type IDs are stored in typeidhash temporarily for the parser
+		 * below to look up
+		 */
+		rel = table_open(dbzdml->tableoid, NoLock);
+		tupdesc = RelationGetDescr(rel);
+
+		/* cache tupdesc */
+		cacheentry->tupdesc = CreateTupleDescCopy(tupdesc);
+
+		for (attnum = 1; attnum <= tupdesc->natts; attnum++)
+		{
+			Form_pg_attribute attr = TupleDescAttr(tupdesc, attnum - 1);
+			elog(DEBUG2, "column %d: name %s, type %u, length %d",
+					attnum,
+					NameStr(attr->attname),
+					attr->atttypid,
+					attr->attlen);
+
+			entry = (NameOidEntry *) hash_search(typeidhash, NameStr(attr->attname), HASH_ENTER, &found);
+			if (!found)
+			{
+				strncpy(entry->name, NameStr(attr->attname), NAMEDATALEN);
+				entry->oid = attr->atttypid;
+				entry->position = attnum;
+				entry->typemod = attr->atttypmod;
+				elog(DEBUG2, "Inserted name '%s' with OID %u and position %d", entry->name, entry->oid, entry->position);
+			}
+			else
+			{
+				elog(DEBUG2, "Name '%s' already exists with OID %u and position %d", entry->name, entry->oid, entry->position);
+			}
+		}
+		table_close(rel, NoLock);
+	}
 	switch(op)
 	{
 		case 'c':	/* create: data created after initial sync (INSERT) */
@@ -3187,7 +3233,6 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 							/* replace the column name with looked up value here */
 							pfree(colval->name);
 							colval->name = pstrdup(mappedColumnName);
-							/* to test pfree(mappedColumnName) */
 						}
 						if (colNameObjId.data)
 							pfree(colNameObjId.data);
@@ -3199,13 +3244,6 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 							colval->datatype = entry->oid;
 							colval->position = entry->position;
 							colval->typemod = entry->typemod;
-
-							/*
-							 * get additional parameters if applicable - this assumes the position
-							 * in dbz json array is the same as the position created in PostgreSQL
-							 * table. If later we introduced column mappings or both have different
-							 * number of columns. This part needs update too - todo
-							 */
 							get_additional_parameters(jb, colval, false, entry->position - 1);
 						}
 						else
@@ -3361,7 +3399,6 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 							/* replace the column name with looked up value here */
 							pfree(colval->name);
 							colval->name = pstrdup(mappedColumnName);
-							/* to test pfree(mappedColumnName) */
 						}
 						if (colNameObjId.data)
 							pfree(colNameObjId.data);
@@ -3545,7 +3582,6 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 								/* replace the column name with looked up value here */
 								pfree(colval->name);
 								colval->name = pstrdup(mappedColumnName);
-								/* to test pfree(mappedColumnName) */
 							}
 							if (colNameObjId.data)
 								pfree(colNameObjId.data);
@@ -3723,6 +3759,18 @@ init_sqlserver(void)
 void
 fc_initFormatConverter(ConnectorType connectorType)
 {
+	/* init data cache hash */
+	HASHCTL	info;
+
+	info.keysize = sizeof(DataCacheKey);
+	info.entrysize = sizeof(DataCacheEntry);
+	info.hcxt = CurrentMemoryContext;
+
+	dataCacheHash = hash_create("data cache hash",
+							 256,
+							 &info,
+							 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+
 	switch (connectorType)
 	{
 		case TYPE_MYSQL:
@@ -3791,6 +3839,7 @@ fc_load_rules(ConnectorType connectorType, const char * rulefile)
 	char * key = NULL;
 	char * value = NULL;
 	bool found = 0;
+	StringInfoData strinfo;
 
 	HTAB * rulehash = NULL;
 	DatatypeHashEntry hashentry;
@@ -4193,6 +4242,33 @@ fc_load_rules(ConnectorType connectorType, const char * rulefile)
 			value = NULL;
 		}
 	}
+
+	/* load extra per-connector parameters here if specified */
+	initStringInfo(&strinfo);
+
+	getPathElementString(jb, "ssl_rules.ssl_mode", &strinfo, true);
+	if (strcasecmp(strinfo.data, "NULL"))
+		extraConnInfo.ssl_mode = pstrdup(strinfo.data);
+
+	getPathElementString(jb, "ssl_rules.ssl_keystore", &strinfo, true);
+	if (strcasecmp(strinfo.data, "NULL"))
+		extraConnInfo.ssl_keystore = pstrdup(strinfo.data);
+
+	getPathElementString(jb, "ssl_rules.ssl_keystore_pass", &strinfo, true);
+	if (strcasecmp(strinfo.data, "NULL"))
+		extraConnInfo.ssl_keystore_pass = pstrdup(strinfo.data);
+
+	getPathElementString(jb, "ssl_rules.ssl_truststore", &strinfo, true);
+	if (strcasecmp(strinfo.data, "NULL"))
+		extraConnInfo.ssl_truststore = pstrdup(strinfo.data);
+
+	getPathElementString(jb, "ssl_rules.ssl_truststore_pass", &strinfo, true);
+	if (strcasecmp(strinfo.data, "NULL"))
+		extraConnInfo.ssl_truststore_pass = pstrdup(strinfo.data);
+
+	if (strinfo.data)
+		pfree(strinfo.data);
+
 	return true;
 }
 
@@ -4220,11 +4296,9 @@ fc_processDBZChangeEvent(const char * event)
 
     /* Get connector type */
     getPathElementString(jb, "payload.source.connector", &strinfo, true);
-
     type = fc_get_connector_type(strinfo.data);
 
     /* Check if it's a DDL or DML event */
-    getPathElementString(jb, "payload.ddl", &strinfo, true);
     getPathElementString(jb, "payload.source.snapshot", &strinfo, true);
     if (!strcmp(strinfo.data, "true") || !strcmp(strinfo.data, "last"))
     {
@@ -4338,7 +4412,7 @@ fc_processDBZChangeEvent(const char * event)
     		return -1;
     	}
 
-       	/* (5) clean up */
+       	/* (4) clean up */
     	set_shm_connector_state(myConnectorId, STATE_SYNCING);
     	elog(DEBUG1, "execution completed. Clean up...");
     	destroyDBZDML(dbzdml);

@@ -19,6 +19,7 @@
 #ifndef SYNCHDB_FORMAT_CONVERTER_H_
 #define SYNCHDB_FORMAT_CONVERTER_H_
 
+#include "utils/hsearch.h"
 #include "nodes/pg_list.h"
 #include "replication_agent.h"
 #include "synchdb.h"
@@ -99,6 +100,20 @@ typedef struct dbz_dml
 	List * columnValuesBefore;	/* list of DBZ_DML_COLUMN_VALUE */
 	List * columnValuesAfter;	/* list of DBZ_DML_COLUMN_VALUE */
 } DBZ_DML;
+
+/* dml cache structure */
+typedef struct dataCacheKey
+{
+	char schema[SYNCHDB_CONNINFO_DB_NAME_SIZE];
+	char table[SYNCHDB_CONNINFO_DB_NAME_SIZE];
+} DataCacheKey;
+typedef struct dataCacheEntry
+{
+	DataCacheKey key;
+	TupleDesc tupdesc;
+	Oid tableoid;
+	HTAB * typeidhash;
+} DataCacheEntry;
 
 typedef struct datatypeHashKey
 {
