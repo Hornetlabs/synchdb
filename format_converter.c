@@ -37,6 +37,7 @@
 #include "utils/memutils.h"
 #include "access/table.h"
 #include <time.h>
+#include <sys/time.h>
 #include "synchdb.h"
 #include "common/base64.h"
 #include "port/pg_bswap.h"
@@ -304,8 +305,6 @@ bytearray_to_escaped_string(const unsigned char *byte_array, size_t length, char
 		sprintf(ptr, "%02X", byte_array[i]);
 		ptr += 2;
 	}
-
-	// Close the string with a single quote
 	strcat(ptr, "'");
 }
 
@@ -613,13 +612,6 @@ transform_object_name(const char * objid, const char * objtype)
 	entry = (ObjMapHashEntry *) hash_search(objectMappingHash, &key, HASH_FIND, &found);
 	if (!found)
 	{
-		/* no object mapping found, so no transformation done */
-		elog(DEBUG1, "no object name transformation done for %s", objid);
-	}
-	else
-	{
-		/* return the mapped object mapped value */
-		elog(DEBUG1, "transform %s to %s", key.extObjName, entry->pgsqlObjName);
 		res = pstrdup(entry->pgsqlObjName);
 	}
 	return res;
@@ -758,7 +750,7 @@ getPathElementString(Jsonb * jb, char * path, StringInfoData * strinfoout, bool 
 	Datum * datum_elems = NULL;
 	char * str_elems = NULL, * p = path;
 	int numPaths = 0, curr = 0;
-	char * pathcopy = pstrdup(path);
+	char * pathcopy = path;
 	Datum res;
 	bool isnull;
 
@@ -769,7 +761,7 @@ getPathElementString(Jsonb * jb, char * path, StringInfoData * strinfoout, bool 
 	}
 
     /* Count the number of elements in the path */
-	if (strstr(pathcopy, "."))
+	if (strchr(pathcopy, '.'))
 	{
 		while (*p != '\0')
 		{
@@ -780,6 +772,7 @@ getPathElementString(Jsonb * jb, char * path, StringInfoData * strinfoout, bool 
 			p++;
 		}
 		numPaths++; /* Add the last one */
+		pathcopy = pstrdup(path);
 	}
 	else
 	{
@@ -789,7 +782,7 @@ getPathElementString(Jsonb * jb, char * path, StringInfoData * strinfoout, bool 
 	datum_elems = palloc0(sizeof(Datum) * numPaths);
 
     /* Parse the path into elements */
-	if (strstr(pathcopy, "."))
+	if (numPaths > 1)
 	{
 		str_elems= strtok(pathcopy, ".");
 		if (str_elems)
@@ -815,7 +808,6 @@ getPathElementString(Jsonb * jb, char * path, StringInfoData * strinfoout, bool 
     {
     	resetStringInfo(strinfoout);
     	appendStringInfoString(strinfoout, "NULL");
-    	elog(DEBUG1, "%s = NULL", path);
     }
     else
     {
@@ -832,11 +824,11 @@ getPathElementString(Jsonb * jb, char * path, StringInfoData * strinfoout, bool 
 
 		if (resjb)
 			pfree(resjb);
-		elog(DEBUG1, "%s = %s", path, strinfoout->data);
     }
 
 	pfree(datum_elems);
-	pfree(pathcopy);
+	if (pathcopy != path)
+		pfree(pathcopy);
 	return 0;
 }
 
@@ -851,12 +843,12 @@ getPathElementJsonb(Jsonb * jb, char * path)
 	Datum * datum_elems = NULL;
 	char * str_elems = NULL, * p = path;
 	int numPaths = 0, curr = 0;
-	char * pathcopy = pstrdup(path);
+	char * pathcopy = path;
 	bool isnull;
 	Datum datout;
 	Jsonb * out = NULL;
 
-	if (strstr(pathcopy, "."))
+	if (strchr(pathcopy, '.'))
 	{
 		/* count how many elements are in path*/
 		while (*p != '\0')
@@ -869,6 +861,7 @@ getPathElementJsonb(Jsonb * jb, char * path)
 		}
 		/* add the last one */
 		numPaths++;
+		pathcopy = pstrdup(path);
 	}
 	else
 	{
@@ -877,7 +870,7 @@ getPathElementJsonb(Jsonb * jb, char * path)
 
 	datum_elems = palloc0(sizeof(Datum) * numPaths);
 
-	if (strstr(pathcopy, "."))
+	if (numPaths > 1)
 	{
 		/* multi level paths, */
 		str_elems= strtok(pathcopy, ".");
@@ -904,13 +897,11 @@ getPathElementJsonb(Jsonb * jb, char * path)
 		datum_elems[curr] = CStringGetTextDatum(pathcopy);
 	}
 	datout = jsonb_get_element(jb, datum_elems, numPaths, &isnull, false);
-	if (isnull)
-		out = NULL;
-	else
-		out = DatumGetJsonbP(datout);
+	out = isnull ? NULL : DatumGetJsonbP(datout);
 
 	pfree(datum_elems);
-	pfree(pathcopy);
+	if (pathcopy != path)
+		pfree(pathcopy);
 	return out;
 }
 
@@ -934,10 +925,10 @@ build_schema_jsonpos_hash(Jsonb * jb)
 	memset(&hash_ctl, 0, sizeof(hash_ctl));
 	hash_ctl.keysize = NAMEDATALEN;
 	hash_ctl.entrysize = sizeof(NameJsonposEntry);
-	hash_ctl.hcxt = CurrentMemoryContext;
+	hash_ctl.hcxt = TopMemoryContext;
 
 	jsonposhash = hash_create("Name to jsonpos Hash Table",
-							512, // limit to 512 columns max
+							512,
 							&hash_ctl,
 							HASH_ELEM | HASH_CONTEXT);
 
@@ -950,21 +941,16 @@ build_schema_jsonpos_hash(Jsonb * jb)
 			switch (r)
 			{
 				case WJB_BEGIN_OBJECT:
-					elog(DEBUG1, "start of object (%s)", key ? key : "null");
 					break;
 				case WJB_END_OBJECT:
-					elog(DEBUG1, "end of object (%s)", key ? key : "null");
 					break;
 				case WJB_BEGIN_ARRAY:
-					elog(DEBUG1, "start of array (%s)",
-							key ? key : "null");
 					if (inarray == false)
 						inarray = true;
 					else
 						pause = true;
 					break;
 				case WJB_END_ARRAY:
-					elog(DEBUG1, "end of array (%s)", key ? key : "null");
 					if (pause)
 						pause = false;
 					break;
@@ -972,7 +958,6 @@ build_schema_jsonpos_hash(Jsonb * jb)
 					if (pause)
 						break;
 					key = pnstrdup(v.val.string.val, v.val.string.len);
-					elog(DEBUG1, "Key: %s", key);
 					break;
 				case WJB_VALUE:
 				case WJB_ELEM:
@@ -981,33 +966,27 @@ build_schema_jsonpos_hash(Jsonb * jb)
 					switch (v.type)
 					{
 						case jbvNull:
-							elog(DEBUG1, "Value: NULL");
-							value = pnstrdup("NULL", strlen("NULL"));
+							value = pstrdup("NULL");
 							break;
 						case jbvString:
 							value = pnstrdup(v.val.string.val, v.val.string.len);
-							elog(DEBUG1, "String Value: %s", value);
 							break;
 						case jbvNumeric:
 						{
 							value = DatumGetCString(DirectFunctionCall1(numeric_out, PointerGetDatum(v.val.numeric)));
-							elog(DEBUG1, "Numeric Value: %s", value);
 							break;
 						}
 						case jbvBool:
-							elog(DEBUG1, "Boolean Value: %s", v.val.boolean ? "true" : "false");
 							if (v.val.boolean)
-								value = pnstrdup("true", strlen("true"));
+								value = pstrdup("true");
 							else
-								value = pnstrdup("false", strlen("false"));
+								value = pstrdup("false");
 							break;
 						case jbvBinary:
-							elog(DEBUG1, "Binary Value: not handled yet");
-							value = pnstrdup("NULL", strlen("NULL"));
+							value = pstrdup("NULL");
 							break;
 						default:
-							elog(DEBUG1, "Unknown value type: %d", v.type);
-							value = pnstrdup("NULL", strlen("NULL"));
+							value = pstrdup("NULL");
 							break;
 					}
 				break;
@@ -1022,8 +1001,6 @@ build_schema_jsonpos_hash(Jsonb * jb)
 				/* we are only interested in column name and their position in the schema section */
 				if (!strcasecmp(key, "field"))
 				{
-					elog(DEBUG1, "CONSUMING field = %s", value);
-
 					for (j = 0; j < strlen(value); j++)
 						value[j] = (char) pg_tolower((unsigned char) value[j]);
 
@@ -1032,11 +1009,6 @@ build_schema_jsonpos_hash(Jsonb * jb)
 					{
 						strlcpy(entry->name, value, NAMEDATALEN);
 						entry->jsonpos = jsonpos;
-						elog(DEBUG1, "Inserted name '%s' with jsonos %d", entry->name, entry->jsonpos);
-					}
-					else
-					{
-						elog(DEBUG1, "Name '%s' already exists with jsonpos %d", entry->name, entry->jsonpos);
 					}
 					jsonpos++;
 				}
@@ -1165,7 +1137,7 @@ destroyDBZDML(DBZ_DML * dmlinfo)
  * @return DBZ_DDL structure
  */
 static DBZ_DDL *
-parseDBZDDL(Jsonb * jb)
+parseDBZDDL(Jsonb * jb, bool isfirst, bool islast)
 {
 	Jsonb * ddlpayload = NULL;
 	JsonbIterator *it;
@@ -1182,9 +1154,24 @@ parseDBZDDL(Jsonb * jb)
 	initStringInfo(&strinfo);
 
 	/*
-	 * todo: we only support parsing 1 set of DDL for now using hardcoded
-	 * array index 0. Need to remove this limitation later
+	 * payload.ts_ms and payload.source.ts_ms- read only on the first or last
+	 * change event of a batch for statistic display purpose
 	 */
+	if (isfirst || islast)
+	{
+		getPathElementString(jb, "payload.ts_ms", &strinfo, true);
+		if (!strcasecmp(strinfo.data, "NULL"))
+			ddlinfo->dbz_ts_ms = 0;
+		else
+			ddlinfo->dbz_ts_ms = strtoull(strinfo.data, NULL, 10);
+
+		getPathElementString(jb, "payload.source.ts_ms", &strinfo, true);
+		if (!strcasecmp(strinfo.data, "NULL"))
+			ddlinfo->src_ts_ms = 0;
+		else
+			ddlinfo->src_ts_ms = strtoull(strinfo.data, NULL, 10);
+	}
+
     getPathElementString(jb, "payload.tableChanges.0.id", &strinfo, true);
     ddlinfo->id = pstrdup(strinfo.data);
 
@@ -3719,33 +3706,28 @@ get_additional_parameters(Jsonb * jb, DBZ_DML_COLUMN_VALUE * colval, bool isbefo
 		return;
 
 	initStringInfo(&strinfo);
-
-	/* find the position in schema from namejsonposhash using untransformed remoteColumnName */
-	entry = (NameJsonposEntry *) hash_search(namejsonposhash, colval->remoteColumnName, HASH_FIND, &found);
-	if (found)
-		pos = entry->jsonpos;
-	else
-	{
-		/* dump the JSON change event as additional detail if available */
-		if (synchdb_log_event_on_error && g_eventStr != NULL)
-			elog(LOG, "%s", g_eventStr);
-
-		elog(ERROR, "cannot find schema info for column %s in JSON change event", colval->remoteColumnName);
-	}
-
 	switch (colval->datatype)
 	{
-
 		case NUMERICOID:
 		{
-			/* spcial numeric case: need to obtain scale and precision from json */
-			elog(DEBUG1, "numeric: retrieving additional scale and precision parameters");
+			/* find the position in schema from namejsonposhash using untransformed remoteColumnName */
+			entry = (NameJsonposEntry *) hash_search(namejsonposhash, colval->remoteColumnName, HASH_FIND, &found);
+			if (found)
+				pos = entry->jsonpos;
+			else
+			{
+				/* dump the JSON change event as additional detail if available */
+				if (synchdb_log_event_on_error && g_eventStr != NULL)
+					elog(LOG, "%s", g_eventStr);
+
+				elog(ERROR, "cannot find schema info for column %s in JSON change event", colval->remoteColumnName);
+			}
 
 			snprintf(path, SYNCHDB_JSON_PATH_SIZE, "schema.fields.%d.fields.%d.parameters.scale",
 					isbefore ? 0 : 1, pos);
 
+			/* spcial numeric case: need to obtain scale and precision from json */
 			getPathElementString(jb, path, &strinfo, true);
-
 			if (!strcasecmp(strinfo.data, "NULL"))
 				colval->scale = -1;	/* has no scale */
 			else
@@ -3777,6 +3759,19 @@ get_additional_parameters(Jsonb * jb, DBZ_DML_COLUMN_VALUE * colval, bool isbefo
 		case TIMETZOID:
 		case INTERVALOID:
 		{
+			/* find the position in schema from namejsonposhash using untransformed remoteColumnName */
+			entry = (NameJsonposEntry *) hash_search(namejsonposhash, colval->remoteColumnName, HASH_FIND, &found);
+			if (found)
+				pos = entry->jsonpos;
+			else
+			{
+				/* dump the JSON change event as additional detail if available */
+				if (synchdb_log_event_on_error && g_eventStr != NULL)
+					elog(LOG, "%s", g_eventStr);
+
+				elog(ERROR, "cannot find schema info for column %s in JSON change event", colval->remoteColumnName);
+			}
+
 			snprintf(path, SYNCHDB_JSON_PATH_SIZE, "schema.fields.%d.fields.%d.name",
 					isbefore ? 0 : 1, pos);
 
@@ -3823,7 +3818,7 @@ get_additional_parameters(Jsonb * jb, DBZ_DML_COLUMN_VALUE * colval, bool isbefo
  * this function parses a Jsonb that represents DML operation and produce a DBZ_DML structure
  */
 static DBZ_DML *
-parseDBZDML(Jsonb * jb, char op, ConnectorType type)
+parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirst, bool islast)
 {
 	StringInfoData strinfo, objid;
 	Jsonb * dmlpayload = NULL;
@@ -3853,50 +3848,82 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 
 	initStringInfo(&strinfo);
 	initStringInfo(&objid);
-
 	dbzdml = (DBZ_DML *) palloc0(sizeof(DBZ_DML));
 
-	/* fetch database - required */
-	getPathElementString(jb, "payload.source.db", &strinfo, true);
-	if (!strcasecmp(strinfo.data, "NULL"))
+	if (source)
 	{
-		elog(WARNING, "malformed DML change request - no database attribute specified");
+		JsonbValue * v = NULL;
+		JsonbValue vbuf;
+
+		/* payload.source.db - required */
+		v = getKeyJsonValueFromContainer(&source->root, "db", strlen("db"), &vbuf);
+		if (!v)
+		{
+			elog(WARNING, "malformed DML change request - no database attribute specified");
+			destroyDBZDML(dbzdml);
+			dbzdml = NULL;
+			goto end;
+		}
+		db = pnstrdup(v->val.string.val, v->val.string.len);
+		appendStringInfo(&objid, "%s.", db);
+		memset(&vbuf, 0, sizeof(JsonbValue));
+
+		/*
+		 * payload.source.ts_ms - read only on the first or last change event of a batch
+		 * for statistic display purpose
+		 */
+		if (isfirst || islast)
+		{
+			v = getKeyJsonValueFromContainer(&source->root, "ts_ms", strlen("ts_ms"), &vbuf);
+			if (!v)
+				dbzdml->src_ts_ms = 0;
+			else
+				dbzdml->src_ts_ms = DatumGetUInt64(DirectFunctionCall1(numeric_int8, PointerGetDatum(v->val.numeric)));
+		}
+
+		/* payload.source.schema - optional */
+		v = getKeyJsonValueFromContainer(&source->root, "schema", strlen("schema"), &vbuf);
+		if (v)
+		{
+			schema = pnstrdup(v->val.string.val, v->val.string.len);
+			appendStringInfo(&objid, "%s.", schema);
+		}
+
+		/* payload.source.table - required */
+		v = getKeyJsonValueFromContainer(&source->root, "table", strlen("table"), &vbuf);
+		if (!v)
+		{
+			elog(WARNING, "malformed DML change request - no table attribute specified");
+			destroyDBZDML(dbzdml);
+			dbzdml = NULL;
+			goto end;
+		}
+		table = pnstrdup(v->val.string.val, v->val.string.len);
+		appendStringInfo(&objid, "%s", table);
+	}
+	else
+	{
+		elog(WARNING, "malformed DML change request - no source element");
 		destroyDBZDML(dbzdml);
-
-		if(strinfo.data)
-			pfree(strinfo.data);
-
-		return NULL;
+		dbzdml = NULL;
+		goto end;
 	}
-	db = pstrdup(strinfo.data);
-	appendStringInfo(&objid, "%s.", db);
 
-	/* fetch schema - optional */
-	getPathElementString(jb, "payload.source.schema", &strinfo, true);
-	if (strcasecmp(strinfo.data, "NULL"))
+	/*
+	 * payload.ts_ms - read only on the first or last change event of a batch
+	 * for statistic display purpose
+	 */
+	if (isfirst || islast)
 	{
-		/* append schema to objid if present */
-		schema = pstrdup(strinfo.data);
-		appendStringInfo(&objid, "%s.", schema);
+		getPathElementString(jb, "payload.ts_ms", &strinfo, true);
+		if (!strcasecmp(strinfo.data, "NULL"))
+			dbzdml->dbz_ts_ms = 0;
+		else
+			dbzdml->dbz_ts_ms = strtoull(strinfo.data, NULL, 10);
 	}
 
-	/* fetch table - required */
-	getPathElementString(jb, "payload.source.table", &strinfo, true);
-	if (!strcasecmp(strinfo.data, "NULL") || !strcasecmp(strinfo.data, "dbzsignal"))
-	{
-		elog(WARNING, "malformed DML change request - no table attribute specified");
-		destroyDBZDML(dbzdml);
-
-		if(strinfo.data)
-			pfree(strinfo.data);
-
-		return NULL;
-	}
-	table = pstrdup(strinfo.data);
-	appendStringInfo(&objid, "%s", table);
-
+	/* table name transformation */
 	dbzdml->remoteObjectId = pstrdup(objid.data);
-
 	dbzdml->mappedObjectId = transform_object_name(objid.data, "table");
 	if (dbzdml->mappedObjectId)
 	{
@@ -3904,7 +3931,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 		char * db2 = NULL, * table2 = NULL, * schema2 = NULL;
 
 		splitIdString(objectIdCopy, &db2, &schema2, &table2, false);
-		if (!table)
+		if (!table2)
 		{
 			/* save the error */
 			char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
@@ -3915,17 +3942,13 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 			/* trigger pg's error shutdown routine */
 			elog(ERROR, "%s", msg);
 		}
-		elog(DEBUG1, "transformed table object ID '%s' to '%s'",
-				objid.data, dbzdml->mappedObjectId);
+		else
+			dbzdml->table = pstrdup(table2);
 
-		/* save the individual components for sanity check below */
 		if (schema2)
 			dbzdml->schema = pstrdup(schema2);
 		else
 			dbzdml->schema = pstrdup("public");
-
-		if (table2)
-			dbzdml->table = pstrdup(table2);
 	}
 	else
 	{
@@ -3936,10 +3959,6 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 		resetStringInfo(&strinfo);
 		appendStringInfo(&strinfo, "%s.%s", dbzdml->schema, dbzdml->table);
 		dbzdml->mappedObjectId = pstrdup(strinfo.data);
-
-		/* use the untransformed object id and components */
-		elog(DEBUG1, "no object ID transformation done for '%s'",
-				dbzdml->mappedObjectId);
 	}
 	/* free the temporary pointers */
 	if (db)
@@ -3983,6 +4002,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 		/* use the cached data type hash for lookup later */
 		typeidhash = cacheentry->typeidhash;
 		dbzdml->tableoid = cacheentry->tableoid;
+		namejsonposhash = cacheentry->namejsonposhash;
 	}
 	else
 	{
@@ -4008,8 +4028,6 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 			elog(ERROR, "%s", msg);
 		}
 
-		elog(DEBUG1, "namespace %s.%s has PostgreSQL OID %d", dbzdml->schema, dbzdml->table, dbzdml->tableoid);
-
 		/* populate cached information */
 		strlcpy(cacheentry->key.schema, dbzdml->schema, sizeof(cachekey.schema));
 		strlcpy(cacheentry->key.table, dbzdml->table, sizeof(cachekey.table));
@@ -4022,7 +4040,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 		hash_ctl.hcxt = TopMemoryContext;
 
 		cacheentry->typeidhash = hash_create("Name to OID Hash Table",
-											 512, // limit to 512 columns max
+											 512,
 											 &hash_ctl,
 											 HASH_ELEM | HASH_CONTEXT);
 
@@ -4039,13 +4057,6 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 
 		/* get primary key bitmapset */
 		pkattrs = RelationGetIndexAttrBitmap(rel, INDEX_ATTR_BITMAP_PRIMARY_KEY);
-		if (!pkattrs)
-		{
-			/* should it be ERROR? */
-			elog(WARNING, "No primary key found for relation %s. Please use synchdb.dml_use_spi = "
-					"false to support UPDATE and DELETE without primary key",
-					RelationGetRelationName(rel));
-		}
 
 		/* cache tupdesc */
 		cacheentry->tupdesc = CreateTupleDescCopy(tupdesc);
@@ -4053,12 +4064,6 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 		for (attnum = 1; attnum <= tupdesc->natts; attnum++)
 		{
 			Form_pg_attribute attr = TupleDescAttr(tupdesc, attnum - 1);
-			elog(DEBUG2, "column %d: name %s, type %u, length %d",
-					attnum,
-					NameStr(attr->attname),
-					attr->atttypid,
-					attr->attlen);
-
 			entry = (NameOidEntry *) hash_search(typeidhash, NameStr(attr->attname), HASH_ENTER, &found);
 			if (!found)
 			{
@@ -4068,27 +4073,25 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 				entry->typemod = attr->atttypmod;
 				if (pkattrs && bms_is_member(attnum - FirstLowInvalidHeapAttributeNumber, pkattrs))
 					entry->ispk =true;
-
-				elog(DEBUG2, "Inserted name '%s' with OID %u and position %d", entry->name, entry->oid, entry->position);
-			}
-			else
-			{
-				elog(DEBUG2, "Name '%s' already exists with OID %u and position %d", entry->name, entry->oid, entry->position);
 			}
 		}
 		bms_free(pkattrs);
 		table_close(rel, NoLock);
-	}
 
-	/* build another hash to store json value's locations of schema data for correct additional param lookups */
-	namejsonposhash = build_schema_jsonpos_hash(jb);
-	if (!namejsonposhash)
-	{
-		/* dump the JSON change event as additional detail if available */
-		if (synchdb_log_event_on_error && g_eventStr != NULL)
-			elog(LOG, "%s", g_eventStr);
+		/*
+		 * build another hash to store json value's locations of schema data for correct additional param lookups
+		 * todo: combine this hash with typeidhash above to save one hash
+		 */
+		cacheentry->namejsonposhash = build_schema_jsonpos_hash(jb);
+		namejsonposhash = cacheentry->namejsonposhash;
+		if (!namejsonposhash)
+		{
+			/* dump the JSON change event as additional detail if available */
+			if (synchdb_log_event_on_error && g_eventStr != NULL)
+				elog(LOG, "%s", g_eventStr);
 
-		elog(ERROR, "cannot parse schema section of change event JSON. Abort");
+			elog(ERROR, "cannot parse schema section of change event JSON. Abort");
+		}
 	}
 
 	switch(op)
@@ -4136,26 +4139,19 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 					switch (r)
 					{
 						case WJB_BEGIN_OBJECT:
-							elog(DEBUG1, "start of object (%s) --------------------", key ? key : "null");
-
 							if (key != NULL)
 							{
-								elog(DEBUG1, "sub element detected, skip subsequent parsing");
 								pause = 1;
 							}
 							break;
 						case WJB_END_OBJECT:
 							if (pause)
 							{
-								elog(DEBUG1, "sub element ended, resume parsing operation");
 								pause = 0;
 								if (key)
 								{
 									int pathsize = strlen("payload.after.") + strlen(key) + 1;
 									char * tmpPath = (char *) palloc0 (pathsize);
-
-									elog(DEBUG1, "parse the entire sub element under %s as string", key);
-
 									snprintf(tmpPath, pathsize, "payload.after.%s", key);
 									getPathElementString(jb, tmpPath, &strinfo, false);
 									value = pstrdup(strinfo.data);
@@ -4163,11 +4159,8 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 										pfree(tmpPath);
 								}
 							}
-							elog(DEBUG1, "end of object (%s) --------------------", key ? key : "null");
 							break;
 						case WJB_BEGIN_ARRAY:
-							elog(DEBUG1, "start of array (%s) --- array type not expected or handled yet",
-									key ? key : "null");
 							if (key)
 							{
 								pfree(key);
@@ -4175,15 +4168,12 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 							}
 							break;
 						case WJB_END_ARRAY:
-							elog(DEBUG1, "end of array (%s) --- array type not expected or handled yet",
-																key ? key : "null");
 							break;
 						case WJB_KEY:
 							if (pause)
 								break;
 
 							key = pnstrdup(v.val.string.val, v.val.string.len);
-							elog(DEBUG2, "Key: %s", key);
 							break;
 						case WJB_VALUE:
 						case WJB_ELEM:
@@ -4192,33 +4182,25 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 							switch (v.type)
 							{
 								case jbvNull:
-									elog(DEBUG2, "Value: NULL");
-									value = pnstrdup("NULL", strlen("NULL"));
+									value = pstrdup("NULL");
 									break;
 								case jbvString:
 									value = pnstrdup(v.val.string.val, v.val.string.len);
-									elog(DEBUG2, "String Value: %s", value);
 									break;
 								case jbvNumeric:
-								{
 									value = DatumGetCString(DirectFunctionCall1(numeric_out, PointerGetDatum(v.val.numeric)));
-									elog(DEBUG2, "Numeric Value: %s", value);
 									break;
-								}
 								case jbvBool:
-									elog(DEBUG2, "Boolean Value: %s", v.val.boolean ? "true" : "false");
 									if (v.val.boolean)
-										value = pnstrdup("true", strlen("true"));
+										value = pstrdup("true");
 									else
-										value = pnstrdup("false", strlen("false"));
+										value = pstrdup("false");
 									break;
 								case jbvBinary:
-									elog(WARNING, "Binary Value: not handled yet");
-									value = pnstrdup("NULL", strlen("NULL"));
+									value = pstrdup("NULL");
 									break;
 								default:
-									elog(WARNING, "Unknown value type: %d", v.type);
-									value = pnstrdup("NULL", strlen("NULL"));
+									value = pstrdup("NULL");
 									break;
 							}
 						break;
@@ -4250,8 +4232,6 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 						mappedColumnName = transform_object_name(colNameObjId.data, "column");
 						if (mappedColumnName)
 						{
-							elog(DEBUG1, "transformed column object ID '%s'to '%s'",
-									colNameObjId.data, mappedColumnName);
 							/* replace the column name with looked up value here */
 							pfree(colval->name);
 							colval->name = pstrdup(mappedColumnName);
@@ -4272,9 +4252,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 						else
 							elog(ERROR, "cannot find data type for column %s. None-existent column?", colval->name);
 
-						elog(DEBUG1, "consumed %s = %s, type %d", colval->name, colval->value, colval->datatype);
 						dbzdml->columnValuesAfter = lappend(dbzdml->columnValuesAfter, colval);
-
 						pfree(key);
 						pfree(value);
 						key = NULL;
@@ -4307,26 +4285,19 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 					switch (r)
 					{
 						case WJB_BEGIN_OBJECT:
-							elog(DEBUG1, "start of object (%s) --------------------", key ? key : "null");
-
 							if (key != NULL)
 							{
-								elog(DEBUG1, "sub element detected, skip subsequent parsing");
 								pause = 1;
 							}
 							break;
 						case WJB_END_OBJECT:
 							if (pause)
 							{
-								elog(DEBUG1, "sub element ended, resume parsing operation");
 								pause = 0;
 								if (key)
 								{
 									int pathsize = strlen("payload.before.") + strlen(key) + 1;
 									char * tmpPath = (char *) palloc0 (pathsize);
-
-									elog(DEBUG1, "parse the entire sub element under %s as string", key);
-
 									snprintf(tmpPath, pathsize, "payload.before.%s", key);
 									getPathElementString(jb, tmpPath, &strinfo, false);
 									value = pstrdup(strinfo.data);
@@ -4334,11 +4305,8 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 										pfree(tmpPath);
 								}
 							}
-							elog(DEBUG1, "end of object (%s) --------------------", key ? key : "null");
 							break;
 						case WJB_BEGIN_ARRAY:
-							elog(DEBUG1, "start of array (%s) --- array type not expected or handled yet",
-									key ? key : "null");
 							if (key)
 							{
 								pfree(key);
@@ -4346,15 +4314,12 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 							}
 							break;
 						case WJB_END_ARRAY:
-							elog(DEBUG1, "end of array (%s) --- array type not expected or handled yet",
-																key ? key : "null");
 							break;
 						case WJB_KEY:
 							if (pause)
 								break;
 
 							key = pnstrdup(v.val.string.val, v.val.string.len);
-							elog(DEBUG2, "Key: %s", key);
 							break;
 						case WJB_VALUE:
 						case WJB_ELEM:
@@ -4363,32 +4328,24 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 							switch (v.type)
 							{
 								case jbvNull:
-									elog(DEBUG2, "Value: NULL");
 									value = pnstrdup("NULL", strlen("NULL"));
 									break;
 								case jbvString:
 									value = pnstrdup(v.val.string.val, v.val.string.len);
-									elog(DEBUG2, "String Value: %s", value);
 									break;
 								case jbvNumeric:
-								{
 									value = DatumGetCString(DirectFunctionCall1(numeric_out, PointerGetDatum(v.val.numeric)));
-									elog(DEBUG2, "Numeric Value: %s", value);
 									break;
-								}
 								case jbvBool:
-									elog(DEBUG2, "Boolean Value: %s", v.val.boolean ? "true" : "false");
 									if (v.val.boolean)
 										value = pnstrdup("true", strlen("true"));
 									else
 										value = pnstrdup("false", strlen("false"));
 									break;
 								case jbvBinary:
-									elog(WARNING, "Binary Value: not handled yet");
 									value = pnstrdup("NULL", strlen("NULL"));
 									break;
 								default:
-									elog(WARNING, "Unknown value type: %d", v.type);
 									value = pnstrdup("NULL", strlen("NULL"));
 									break;
 							}
@@ -4422,8 +4379,6 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 
 						if (mappedColumnName)
 						{
-							elog(DEBUG1, "transformed column object ID '%s'to '%s'",
-									colNameObjId.data, mappedColumnName);
 							/* replace the column name with looked up value here */
 							pfree(colval->name);
 							colval->name = pstrdup(mappedColumnName);
@@ -4443,10 +4398,6 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 						}
 						else
 							elog(ERROR, "cannot find data type for column %s. None-existent column?", colval->name);
-
-						elog(DEBUG1, "consumed %s = %s, type %d", colval->name, colval->value, colval->datatype);
-						dbzdml->columnValuesBefore = lappend(dbzdml->columnValuesBefore, colval);
-
 						pfree(key);
 						pfree(value);
 						key = NULL;
@@ -4493,26 +4444,20 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 						switch (r)
 						{
 							case WJB_BEGIN_OBJECT:
-								elog(DEBUG1, "start of object (%s) --------------------", key ? key : "null");
-
 								if (key != NULL)
 								{
-									elog(DEBUG1, "sub element detected, skip subsequent parsing");
 									pause = 1;
 								}
 								break;
 							case WJB_END_OBJECT:
 								if (pause)
 								{
-									elog(DEBUG1, "sub element ended, resume parsing operation");
 									pause = 0;
 									if (key)
 									{
 										int pathsize = (i == 0 ? strlen("payload.before.") + strlen(key) + 1 :
 												strlen("payload.after.") + strlen(key) + 1);
 										char * tmpPath = (char *) palloc0 (pathsize);
-
-										elog(DEBUG1, "parse the entire sub element under %s as string", key);
 										if (i == 0)
 											snprintf(tmpPath, pathsize, "payload.before.%s", key);
 										else
@@ -4523,11 +4468,8 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 											pfree(tmpPath);
 									}
 								}
-								elog(DEBUG1, "end of object (%s) --------------------", key ? key : "null");
 								break;
 							case WJB_BEGIN_ARRAY:
-								elog(DEBUG1, "start of array (%s) --- array type not expected or handled yet",
-										key ? key : "null");
 								if (key)
 								{
 									pfree(key);
@@ -4535,15 +4477,12 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 								}
 								break;
 							case WJB_END_ARRAY:
-								elog(DEBUG1, "end of array (%s) --- array type not expected or handled yet",
-																	key ? key : "null");
 								break;
 							case WJB_KEY:
 								if (pause)
 									break;
 
 								key = pnstrdup(v.val.string.val, v.val.string.len);
-								elog(DEBUG2, "Key: %s", key);
 								break;
 							case WJB_VALUE:
 							case WJB_ELEM:
@@ -4552,32 +4491,24 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 								switch (v.type)
 								{
 									case jbvNull:
-										elog(DEBUG2, "Value: NULL");
 										value = pnstrdup("NULL", strlen("NULL"));
 										break;
 									case jbvString:
 										value = pnstrdup(v.val.string.val, v.val.string.len);
-										elog(DEBUG2, "String Value: %s", value);
 										break;
 									case jbvNumeric:
-									{
 										value = DatumGetCString(DirectFunctionCall1(numeric_out, PointerGetDatum(v.val.numeric)));
-										elog(DEBUG2, "Numeric Value: %s", value);
 										break;
-									}
 									case jbvBool:
-										elog(DEBUG2, "Boolean Value: %s", v.val.boolean ? "true" : "false");
 										if (v.val.boolean)
 											value = pnstrdup("true", strlen("true"));
 										else
 											value = pnstrdup("false", strlen("false"));
 										break;
 									case jbvBinary:
-										elog(WARNING, "Binary Value: not handled yet");
 										value = pnstrdup("NULL", strlen("NULL"));
 										break;
 									default:
-										elog(WARNING, "Unknown value type: %d", v.type);
 										value = pnstrdup("NULL", strlen("NULL"));
 										break;
 								}
@@ -4610,8 +4541,6 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 							mappedColumnName = transform_object_name(colNameObjId.data, "column");
 							if (mappedColumnName)
 							{
-								elog(DEBUG1, "transformed column object ID '%s'to '%s'",
-										colNameObjId.data, mappedColumnName);
 								/* replace the column name with looked up value here */
 								pfree(colval->name);
 								colval->name = pstrdup(mappedColumnName);
@@ -4635,7 +4564,6 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 							else
 								elog(ERROR, "cannot find data type for column %s. None-existent column?", colval->name);
 
-							elog(DEBUG1, "consumed %s = %s, type %d", colval->name, colval->value, colval->datatype);
 							if (i == 0)
 								dbzdml->columnValuesBefore = lappend(dbzdml->columnValuesBefore, colval);
 							else
@@ -4672,6 +4600,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 	if (dbzdml->columnValuesAfter != NULL)
 		list_sort(dbzdml->columnValuesAfter, list_sort_cmp);
 
+end:
 	if (strinfo.data)
 		pfree(strinfo.data);
 
@@ -5889,14 +5818,18 @@ fc_load_objmap(const char * name, ConnectorType connectorType)
  * Main function to process Debezium change event
  */
 int
-fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats, bool schemasync, const char * name)
+fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
+		bool schemasync, const char * name, bool isfirst, bool islast)
 {
 	Datum jsonb_datum;
-	Jsonb *jb;
+	Jsonb * jb;
+	Jsonb * source = NULL;
 	StringInfoData strinfo;
 	ConnectorType type;
 	MemoryContext tempContext, oldContext;
 	bool islastsnapshot = false;
+	int ret = -1;
+	struct timeval tv;
 
 	tempContext = AllocSetContextCreate(TopMemoryContext,
 										"FORMAT_CONVERTER",
@@ -5910,33 +5843,71 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats, b
     jsonb_datum = DirectFunctionCall1(jsonb_in, CStringGetDatum(event));
     jb = DatumGetJsonbP(jsonb_datum);
 
-    /* Get connector type */
-    getPathElementString(jb, "payload.source.connector", &strinfo, true);
-    type = fc_get_connector_type(strinfo.data);
-
-    /* Check if it's a DDL or DML event */
-    getPathElementString(jb, "payload.source.snapshot", &strinfo, true);
-    if (!strcmp(strinfo.data, "true") || !strcmp(strinfo.data, "last"))
+    /* Obtain source element - required */
+    source = getPathElementJsonb(jb, "payload.source");
+    if (source)
     {
-    	if (schemasync)
-    	{
-        	if (get_shm_connector_stage_enum(myConnectorId) != STAGE_SCHEMA_SYNC)
-        		set_shm_connector_stage(myConnectorId, STAGE_SCHEMA_SYNC);
-    	}
-    	else
-    	{
-        	if (get_shm_connector_stage_enum(myConnectorId) != STAGE_INITIAL_SNAPSHOT)
-        		set_shm_connector_stage(myConnectorId, STAGE_INITIAL_SNAPSHOT);
-    	}
-    	if (!strcmp(strinfo.data, "last"))
-    		islastsnapshot = true;
+		JsonbValue * v = NULL;
+		JsonbValue vbuf;
+		char * tmp = NULL;
+
+		/* payload.source.connector - required */
+		v = getKeyJsonValueFromContainer(&source->root, "connector", strlen("connector"), &vbuf);
+		if (!v)
+		{
+			elog(WARNING, "malformed change request - no connector attribute specified");
+	    	increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
+	    	MemoryContextSwitchTo(oldContext);
+	    	MemoryContextDelete(tempContext);
+			return -1;
+		}
+		tmp = pnstrdup(v->val.string.val, v->val.string.len);
+		type = fc_get_connector_type(tmp);
+		pfree(tmp);
+
+		/* payload.source.snapshot - required */
+		v = getKeyJsonValueFromContainer(&source->root, "snapshot", strlen("snapshot"), &vbuf);
+		if (!v)
+		{
+			elog(WARNING, "malformed DML change request - no snapshot attribute specified");
+			increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
+	    	MemoryContextSwitchTo(oldContext);
+	    	MemoryContextDelete(tempContext);
+			return -1;
+		}
+		tmp = pnstrdup(v->val.string.val, v->val.string.len);
+	    if (!strcmp(tmp, "true") || !strcmp(tmp, "last"))
+	    {
+	    	if (schemasync)
+	    	{
+	        	if (get_shm_connector_stage_enum(myConnectorId) != STAGE_SCHEMA_SYNC)
+	        		set_shm_connector_stage(myConnectorId, STAGE_SCHEMA_SYNC);
+	    	}
+	    	else
+	    	{
+	        	if (get_shm_connector_stage_enum(myConnectorId) != STAGE_INITIAL_SNAPSHOT)
+	        		set_shm_connector_stage(myConnectorId, STAGE_INITIAL_SNAPSHOT);
+	    	}
+	    	if (!strcmp(tmp, "last"))
+	    		islastsnapshot = true;
+	    }
+	    else
+	    {
+	    	if (get_shm_connector_stage_enum(myConnectorId) != STAGE_CHANGE_DATA_CAPTURE)
+	    		set_shm_connector_stage(myConnectorId, STAGE_CHANGE_DATA_CAPTURE);
+	    }
+	    pfree(tmp);
     }
     else
     {
-    	if (get_shm_connector_stage_enum(myConnectorId) != STAGE_CHANGE_DATA_CAPTURE)
-    		set_shm_connector_stage(myConnectorId, STAGE_CHANGE_DATA_CAPTURE);
+    	elog(WARNING, "malformed change request - no source element");
+    	increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
+    	MemoryContextSwitchTo(oldContext);
+    	MemoryContextDelete(tempContext);
+		return -1;
     }
 
+    /* Check if it's a DDL or DML event */
     getPathElementString(jb, "payload.op", &strinfo, true);
     if (!strcmp(strinfo.data, "NULL"))
     {
@@ -5948,12 +5919,10 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats, b
     	increment_connector_statistics(myBatchStats, STATS_DDL, 1);
 
     	/* (1) parse */
-    	elog(DEBUG1, "parsing DBZ DDL change event...");
     	set_shm_connector_state(myConnectorId, STATE_PARSING);
-    	dbzddl = parseDBZDDL(jb);
+    	dbzddl = parseDBZDDL(jb, isfirst, islast);
     	if (!dbzddl)
     	{
-    		elog(DEBUG1, "malformed DDL event");
     		set_shm_connector_state(myConnectorId, STATE_SYNCING);
     		increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
     		MemoryContextSwitchTo(oldContext);
@@ -5961,13 +5930,11 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats, b
     		return -1;
     	}
 
-    	elog(DEBUG1, "converting to PG DDL change event...");
     	/* (2) convert */
     	set_shm_connector_state(myConnectorId, STATE_CONVERTING);
     	pgddl = convert2PGDDL(dbzddl, type);
     	if (!pgddl)
     	{
-    		elog(DEBUG1, "failed to convert DBZ DDL to PG DDL change event");
     		set_shm_connector_state(myConnectorId, STATE_SYNCING);
     		increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
     		destroyDBZDDL(dbzddl);
@@ -5977,11 +5944,10 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats, b
     	}
 
     	/* (3) execute */
-    	elog(DEBUG1, "executing PG DDL change event...");
     	set_shm_connector_state(myConnectorId, STATE_EXECUTING);
-    	if(ra_executePGDDL(pgddl, type))
+    	ret = ra_executePGDDL(pgddl, type);
+    	if(ret)
     	{
-    		elog(WARNING, "failed to execute PG DDL change event");
     		set_shm_connector_state(myConnectorId, STATE_SYNCING);
     		increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
     		destroyDBZDDL(dbzddl);
@@ -5990,13 +5956,30 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats, b
     		MemoryContextDelete(tempContext);
     		return -1;
     	}
+
 		/* (4) update attribute map table */
     	updateSynchdbAttribute(dbzddl, pgddl, type, name);
 
-		/* (5) clean up */
+    	/* (5) record only the first and last change event's processing timestamps only */
+    	if (islast && !isfirst)
+    	{
+			myBatchStats->stats_last_src_ts = dbzddl->src_ts_ms;
+			myBatchStats->stats_last_dbz_ts = dbzddl->dbz_ts_ms;
+			gettimeofday(&tv, NULL);
+			myBatchStats->stats_last_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
+    	}
+
+    	if (!islast && isfirst)
+    	{
+			myBatchStats->stats_first_src_ts = dbzddl->src_ts_ms;
+			myBatchStats->stats_first_dbz_ts = dbzddl->dbz_ts_ms;
+			gettimeofday(&tv, NULL);
+			myBatchStats->stats_first_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
+    	}
+
+		/* (6) clean up */
     	set_shm_connector_state(myConnectorId, (islastsnapshot && schemasync ?
     			STATE_SCHEMA_SYNC_DONE : STATE_SYNCING));
-    	elog(DEBUG1, "execution completed. Clean up...");
     	destroyDBZDDL(dbzddl);
     	destroyPGDDL(pgddl);
     }
@@ -6011,10 +5994,9 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats, b
 
     	/* (1) parse */
     	set_shm_connector_state(myConnectorId, STATE_PARSING);
-    	dbzdml = parseDBZDML(jb, strinfo.data[0], type);
+    	dbzdml = parseDBZDML(jb, strinfo.data[0], type, source, isfirst, islast);
     	if (!dbzdml)
 		{
-			elog(WARNING, "malformed DNL event");
 			set_shm_connector_state(myConnectorId, STATE_SYNCING);
 			increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
 			MemoryContextSwitchTo(oldContext);
@@ -6027,7 +6009,6 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats, b
     	pgdml = convert2PGDML(dbzdml, type);
     	if (!pgdml)
     	{
-    		elog(WARNING, "failed to convert DBZ DML to PG DML change event");
     		set_shm_connector_state(myConnectorId, STATE_SYNCING);
     		increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
     		destroyDBZDML(dbzdml);
@@ -6038,10 +6019,9 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats, b
 
     	/* (3) execute */
     	set_shm_connector_state(myConnectorId, STATE_EXECUTING);
-    	elog(DEBUG1, "executing PG DML change event...");
-    	if(ra_executePGDML(pgdml, type, myBatchStats))
+    	ret = ra_executePGDML(pgdml, type, myBatchStats);
+    	if(ret)
     	{
-    		elog(WARNING, "failed to execute PG DML change event");
     		set_shm_connector_state(myConnectorId, STATE_SYNCING);
     		increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
         	destroyDBZDML(dbzdml);
@@ -6051,9 +6031,25 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats, b
     		return -1;
     	}
 
-       	/* (4) clean up */
+    	/* (4) record only the first and last change event's processing timestamps only */
+    	if (islast && !isfirst)
+    	{
+			myBatchStats->stats_last_src_ts = dbzdml->src_ts_ms;
+			myBatchStats->stats_last_dbz_ts = dbzdml->dbz_ts_ms;
+			gettimeofday(&tv, NULL);
+			myBatchStats->stats_last_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
+    	}
+
+    	if (!islast && isfirst)
+    	{
+			myBatchStats->stats_first_src_ts = dbzdml->src_ts_ms;
+			myBatchStats->stats_first_dbz_ts = dbzdml->dbz_ts_ms;
+			gettimeofday(&tv, NULL);
+			myBatchStats->stats_first_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
+    	}
+
+       	/* (5) clean up */
     	set_shm_connector_state(myConnectorId, STATE_SYNCING);
-    	elog(DEBUG1, "execution completed. Clean up...");
     	destroyDBZDML(dbzdml);
     	destroyPGDML(pgdml);
     }

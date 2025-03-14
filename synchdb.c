@@ -76,7 +76,7 @@ int myConnectorId = -1;	/* Global index number to SynchdbSharedState in shared m
 const char * g_eventStr = NULL;	/* global pointer to the JSON event currently working on */
 
 /* GUC variables */
-int synchdb_worker_naptime = 500;
+int synchdb_worker_naptime = 10;
 bool synchdb_dml_use_spi = false;
 bool synchdb_auto_launcher = true;
 int dbz_batch_size = 2048;
@@ -118,11 +118,17 @@ static const struct config_enum_entry dbz_log_levels[] =
 	{NULL, 0, false}
 };
 
-/* JNI-related variables */
+/* JNI-related objects */
 static JavaVM *jvm = NULL; /* represents java vm instance */
 static JNIEnv *env = NULL; /* represents JNI run-time environment */
 static jclass cls;		   /* represents debezium runner java class */
 static jobject obj;		   /* represents debezium runner java class object */
+static jmethodID getChangeEvents;
+static jmethodID sizeMethod;
+static jmethodID getMethod;
+static jclass listClass;
+static jmethodID markBatchComplete;
+static jmethodID getoffsets;
 
 /* Function declarations */
 PGDLLEXPORT void synchdb_engine_main(Datum main_arg);
@@ -631,7 +637,6 @@ processCompletionMessage(const char * eventStr, int myConnectorId, bool * dbzExi
 	if (successflag && strlen(successflag) > 0)
 	{
 		/* presence of successflag indicates that the DBZ connector in java has exited */
-		elog(DEBUG1, "successflag = %s", successflag);
 		*dbzExitSignal = true;
 	}
 
@@ -668,10 +673,8 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 		bool * dbzExitSignal, BatchInfo * batchinfo, SynchdbStatistics * myBatchStats,
 		bool schemasync)
 {
-	jmethodID getChangeEvents, sizeMethod, getMethod;
 	jobject changeEventsList;
 	jint size;
-	jclass listClass;
 	jobject event;
 	const char *eventStr;
 
@@ -682,17 +685,19 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 		return -1;
 	}
 
-	/* Get the getChangeEvents method */
-	getChangeEvents = (*env)->GetMethodID(env, *cls, "getChangeEvents", "()Ljava/util/List;");
-	if (getChangeEvents == NULL)
+	/* Get the getChangeEvents method if needed */
+	if (!getChangeEvents)
 	{
-		elog(WARNING, "Failed to find getChangeEvents method");
-		return -1;
+		getChangeEvents = (*env)->GetMethodID(env, *cls, "getChangeEvents", "()Ljava/util/List;");
+		if (getChangeEvents == NULL)
+		{
+			elog(WARNING, "Failed to find getChangeEvents method");
+			return -1;
+		}
 	}
 
 	/* Call getChangeEvents method */
 	changeEventsList = (*env)->CallObjectMethod(env, *obj, getChangeEvents);
-
 	if ((*env)->ExceptionCheck(env))
 	{
 		(*env)->ExceptionDescribe(env);
@@ -700,42 +705,44 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 		elog(WARNING, "Exception occurred while calling getChangeEvents");
 		return -1;
 	}
-
 	if (changeEventsList == NULL)
 	{
-		elog(WARNING, "dbz_engine_get_change: getChangeEvents returned null");
 		return -1;
 	}
 
-	/* Get List class and methods */
-	listClass = (*env)->FindClass(env, "java/util/List");
-	if (listClass == NULL)
+	/* Get List class, size and get methods if needed */
+	if (!listClass)
 	{
-		elog(WARNING, "Failed to find java list class");
-		(*env)->DeleteLocalRef(env, changeEventsList);
-		return -1;
+		listClass = (*env)->FindClass(env, "java/util/List");
+		if (listClass == NULL)
+		{
+			elog(WARNING, "Failed to find java list class");
+			(*env)->DeleteLocalRef(env, changeEventsList);
+			return -1;
+		}
 	}
-
-	sizeMethod = (*env)->GetMethodID(env, listClass, "size", "()I");
-	if (sizeMethod == NULL)
+	if (!sizeMethod)
 	{
-		elog(WARNING, "Failed to find java list.size method");
-		(*env)->DeleteLocalRef(env, changeEventsList);
-		(*env)->DeleteLocalRef(env, listClass);
-		return -1;
+		sizeMethod = (*env)->GetMethodID(env, listClass, "size", "()I");
+		if (sizeMethod == NULL)
+		{
+			elog(WARNING, "Failed to find java list.size method");
+			(*env)->DeleteLocalRef(env, changeEventsList);
+			return -1;
+		}
 	}
-
-	getMethod = (*env)->GetMethodID(env, listClass, "get", "(I)Ljava/lang/Object;");
-	if (getMethod == NULL)
+	if (!getMethod)
 	{
-		elog(WARNING, "Failed to find java list.get method");
-		return -1;
+		getMethod = (*env)->GetMethodID(env, listClass, "get", "(I)Ljava/lang/Object;");
+		if (getMethod == NULL)
+		{
+			elog(WARNING, "Failed to find java list.get method");
+			return -1;
+		}
 	}
 
-	/* Process change events */
+	/* Process change event size */
 	size = (*env)->CallIntMethod(env, changeEventsList, sizeMethod);
-	elog(DEBUG1, "dbz_engine_get_change: Retrieved %d change events", size);
-
 	if (size == 0 || size < 0)
 	{
 		/* nothing to process, set proper stage and return */
@@ -743,7 +750,6 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 			set_shm_connector_stage(myConnectorId, STAGE_CHANGE_DATA_CAPTURE);
 
 		(*env)->DeleteLocalRef(env, changeEventsList);
-		(*env)->DeleteLocalRef(env, listClass);
 		return -1;
 	}
 	batchinfo->batchSize = size - 1;	/* minus the metadata record */
@@ -752,18 +758,16 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 	event = (*env)->CallObjectMethod(env, changeEventsList, getMethod, 0);
 	if (event == NULL)
 	{
-		elog(WARNING, "dbz_engine_get_change: missing metadata element at index 0");
+		elog(WARNING, "change event is missing metadata element at index 0. Skipping");
 		(*env)->DeleteLocalRef(env, changeEventsList);
-		(*env)->DeleteLocalRef(env, listClass);
 		return -1;
 	}
 	eventStr = (*env)->GetStringUTFChars(env, (jstring)event, 0);
 	if (eventStr == NULL)
 	{
-		elog(WARNING, "dbz_engine_get_change: Failed to convert metadata element to string");
+		elog(WARNING, "Failed to convert metadata element to string. Skipping");
 		(*env)->DeleteLocalRef(env, event);
 		(*env)->DeleteLocalRef(env, changeEventsList);
-		(*env)->DeleteLocalRef(env, listClass);
 		return -1;
 	}
 
@@ -779,18 +783,17 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
         (*env)->ReleaseStringUTFChars(env, (jstring)event, eventStr);
         (*env)->DeleteLocalRef(env, event);
         (*env)->DeleteLocalRef(env, changeEventsList);
-        (*env)->DeleteLocalRef(env, listClass);
 		return 0;
 	}
 	/* check if it is a batch change request */
 	else if (eventStr[0] == 'B' && eventStr[1] == '-')
 	{
+		int firstgoodevent = 1;
 		/*
 		 * obtain the batch id as we will need it to commit debezium offsets
 		 * as we process the batch
 		 */
 		batchinfo->batchId = atoi(&eventStr[2]);
-		elog(DEBUG1, "Synchdb received batchid(%d) with size(%d)", batchinfo->batchId, size-1);
 
 		/* free reference to metadata element at index 0 */
 		(*env)->ReleaseStringUTFChars(env, (jstring)event, eventStr);
@@ -805,29 +808,29 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 			event = (*env)->CallObjectMethod(env, changeEventsList, getMethod, i);
 			if (event == NULL)
 			{
-				elog(DEBUG1, "dbz_engine_get_change: Received NULL event at index %d", i);
 				increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
+				firstgoodevent++;
 				continue;
 			}
 
 			eventStr = (*env)->GetStringUTFChars(env, (jstring)event, 0);
 			if (eventStr == NULL)
 			{
-				elog(WARNING, "dbz_engine_get_change: Failed to get string for event at index %d", i);
+				elog(WARNING, "Failed to convert event string at index %d", i);
 				(*env)->DeleteLocalRef(env, event);
 				increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
+				firstgoodevent++;
 				continue;
 			}
 
-			elog(DEBUG1, "Processing DBZ Event: %s", eventStr);
 			if (synchdb_log_event_on_error)
 				g_eventStr = eventStr;
 
 			/* change event message, send to format converter */
-			if (fc_processDBZChangeEvent(eventStr, myBatchStats, schemasync, get_shm_connector_name_by_id(myConnectorId)) != 0)
-			{
-				elog(DEBUG1, "dbz_engine_get_change: Failed to process event at index %d", i);
-			}
+			fc_processDBZChangeEvent(eventStr, myBatchStats, schemasync,
+					get_shm_connector_name_by_id(myConnectorId),
+					(i == firstgoodevent),
+					(i == size - 1));
 
 			(*env)->ReleaseStringUTFChars(env, (jstring)event, eventStr);
 			(*env)->DeleteLocalRef(env, event);
@@ -835,7 +838,6 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 
 		PopActiveSnapshot();
 		CommitTransactionCommand();
-
 		increment_connector_statistics(myBatchStats, STATS_TOTAL_CHANGE_EVENT, size-1);
 
 		/* read offset currently flushed to file for displaying to user */
@@ -847,7 +849,6 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 	}
 
 	(*env)->DeleteLocalRef(env, changeEventsList);
-	(*env)->DeleteLocalRef(env, listClass);
 	return 0;
 }
 
@@ -977,7 +978,6 @@ cleanup:
 static char *
 dbz_engine_get_offset(int connectorId)
 {
-	jmethodID getoffsets;
 	jstring jdb, result, jName;
 	char *resultStr = NULL;
 	char *db = NULL, *name = NULL;
@@ -1014,12 +1014,15 @@ dbz_engine_get_offset(int connectorId)
 		return NULL;
 	}
 
-	getoffsets = (*env)->GetMethodID(env, cls, "getConnectorOffset",
-									 "(ILjava/lang/String;Ljava/lang/String;)Ljava/lang/String;");
-	if (getoffsets == NULL)
+	if (!getoffsets)
 	{
-		elog(WARNING, "Failed to find getConnectorOffset method");
-		return NULL;
+		getoffsets = (*env)->GetMethodID(env, cls, "getConnectorOffset",
+										 "(ILjava/lang/String;Ljava/lang/String;)Ljava/lang/String;");
+		if (getoffsets == NULL)
+		{
+			elog(WARNING, "Failed to find getConnectorOffset method");
+			return NULL;
+		}
 	}
 
 	jdb = (*env)->NewStringUTF(env, db);
@@ -1135,7 +1138,7 @@ static TupleDesc
 synchdb_stats_tupdesc(void)
 {
 	TupleDesc tupdesc;
-	AttrNumber attrnum = 11;
+	AttrNumber attrnum = 17;
 	AttrNumber a = 0;
 
 	tupdesc = CreateTemplateTupleDesc(attrnum);
@@ -1152,6 +1155,12 @@ synchdb_stats_tupdesc(void)
 	TupleDescInitEntry(tupdesc, ++a, "total_events", INT8OID, -1, 0);
 	TupleDescInitEntry(tupdesc, ++a, "batches_done", INT8OID, -1, 0);
 	TupleDescInitEntry(tupdesc, ++a, "average_batch_size", INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, ++a, "first_src_ts", INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, ++a, "first_dbz_ts", INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, ++a, "first_pg_ts", INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, ++a, "last_src_ts", INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, ++a, "last_dbz_ts", INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, ++a, "last_pg_ts", INT8OID, -1, 0);
 
 	Assert(a == maxattr);
 	return BlessTupleDesc(tupdesc);
@@ -1423,6 +1432,10 @@ processRequestInterrupt(const ConnectionInfo *connInfo, ConnectorType type, int 
 	currstate = &(sdb_state->connectors[connectorId].state);
 	srcdb = sdb_state->connectors[connectorId].conninfo.srcdb;
 
+	/* no requests, do nothing */
+	if (req->reqstate == STATE_UNDEF)
+		return;
+
 	/*
 	 * make a copy of requested state, its data and curr state to avoid holding locks
 	 * for too long. Currently we support 1 request at any one time.
@@ -1436,11 +1449,7 @@ processRequestInterrupt(const ConnectionInfo *connInfo, ConnectorType type, int 
 	LWLockRelease(&sdb_state->lock);
 
 	/* Process the request based on current and requested states */
-	if (reqcopy->reqstate == STATE_UNDEF)
-	{
-		/* no requests, do nothing */
-	}
-	else if (reqcopy->reqstate == STATE_PAUSED && *currstatecopy == STATE_SYNCING)
+	if (reqcopy->reqstate == STATE_PAUSED && *currstatecopy == STATE_SYNCING)
 	{
 		/* we can only transition to STATE_PAUSED from STATE_SYNCING */
 		elog(LOG, "Pausing %s connector. Current state: %s, Requested state: %s",
@@ -1980,14 +1989,9 @@ get_shm_connector_id_by_name(const char * name)
 static int
 dbz_mark_batch_complete(int batchid)
 {
-	jmethodID markBatchComplete;
 	jthrowable exception;
 	jboolean jmarkall = JNI_TRUE;
 
-	/*
-	 * todo: markfrom and markto are no longer supported because we no longer
-	 * support partial batch completion. To be deleted later.
-	 */
 	if (!jvm)
 	{
 		elog(WARNING, "jvm not initialized");
@@ -2000,13 +2004,16 @@ dbz_mark_batch_complete(int batchid)
 		return -1;
 	}
 
-	/* Find the markBatchComplete method */
-	markBatchComplete = (*env)->GetMethodID(env, cls, "markBatchComplete",
-									 "(IZII)V");
-	if (markBatchComplete == NULL)
+	/* Find the markBatchComplete method if needed */
+	if (!markBatchComplete)
 	{
-		elog(WARNING, "Failed to find markBatchComplete method");
-		return -1;
+		markBatchComplete = (*env)->GetMethodID(env, cls, "markBatchComplete",
+										 "(IZII)V");
+		if (markBatchComplete == NULL)
+		{
+			elog(WARNING, "Failed to find markBatchComplete method");
+			return -1;
+		}
 	}
 
 	/* Call the Java method */
@@ -2021,7 +2028,6 @@ dbz_mark_batch_complete(int batchid)
 		elog(WARNING, "Exception occurred while calling markBatchComplete");
 		return -1;
 	}
-	elog(DEBUG1, "Synchdb -> Debezium: sent batchid(%d) completion request", batchid);
 	return 0;
 }
 
@@ -2313,6 +2319,21 @@ set_shm_connector_statistics(int connectorId, SynchdbStatistics * stats)
 			stats->stats_total_change_event;
 	sdb_state->connectors[connectorId].stats.stats_batch_completion +=
 			stats->stats_batch_completion;
+
+	/* the following should be overwritten \n */
+	sdb_state->connectors[connectorId].stats.stats_first_src_ts =
+			stats->stats_first_src_ts;
+	sdb_state->connectors[connectorId].stats.stats_first_dbz_ts =
+			stats->stats_first_dbz_ts;
+	sdb_state->connectors[connectorId].stats.stats_first_pg_ts =
+			stats->stats_first_pg_ts;
+	sdb_state->connectors[connectorId].stats.stats_last_src_ts =
+			stats->stats_last_src_ts;
+	sdb_state->connectors[connectorId].stats.stats_last_dbz_ts =
+			stats->stats_last_dbz_ts;
+	sdb_state->connectors[connectorId].stats.stats_last_pg_ts =
+			stats->stats_last_pg_ts;
+
 	LWLockRelease(&sdb_state->lock);
 }
 
@@ -2567,7 +2588,7 @@ _PG_init(void)
 							"Duration between each data polling (in milliseconds).",
 							NULL,
 							&synchdb_worker_naptime,
-							100,
+							10,
 							1,
 							30000,
 							PGC_SIGHUP,
@@ -3204,8 +3225,8 @@ synchdb_get_stats(PG_FUNCTION_ARGS)
 
 	if (*idx < count_active_connectors())
 	{
-		Datum values[11];
-		bool nulls[11] = {0};
+		Datum values[17];
+		bool nulls[17] = {0};
 		HeapTuple tuple;
 
 		LWLockAcquire(&sdb_state->lock, LW_SHARED);
@@ -3223,6 +3244,12 @@ synchdb_get_stats(PG_FUNCTION_ARGS)
 					Int64GetDatum(sdb_state->connectors[*idx].stats.stats_total_change_event /
 							sdb_state->connectors[*idx].stats.stats_batch_completion) :
 					Int64GetDatum(0);
+		values[11] = Int64GetDatum(sdb_state->connectors[*idx].stats.stats_first_src_ts);
+		values[12] = Int64GetDatum(sdb_state->connectors[*idx].stats.stats_first_dbz_ts);
+		values[13] = Int64GetDatum(sdb_state->connectors[*idx].stats.stats_first_pg_ts);
+		values[14] = Int64GetDatum(sdb_state->connectors[*idx].stats.stats_last_src_ts);
+		values[15] = Int64GetDatum(sdb_state->connectors[*idx].stats.stats_last_dbz_ts);
+		values[16] = Int64GetDatum(sdb_state->connectors[*idx].stats.stats_last_pg_ts);
 		LWLockRelease(&sdb_state->lock);
 
 		*idx += 1;
