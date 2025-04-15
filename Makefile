@@ -7,6 +7,7 @@ DATA = synchdb--1.0.sql
 PGFILEDESC = "synchdb - allows logical replication with heterogeneous databases"
 
 REGRESS = synchdb
+REGRESS_OPTS = --load-extension=pgcrypto
 
 OBJS = synchdb.o \
        format_converter.o \
@@ -36,6 +37,7 @@ endif
 JDK_LIB_PATH := $(JDK_HOME_PATH)/lib/server
 
 PG_CFLAGS = -I$(JDK_INCLUDE_PATH) -I$(JDK_INCLUDE_PATH_OS)
+PG_CPPFLAGS = -I$(JDK_INCLUDE_PATH) -I$(JDK_INCLUDE_PATH_OS)
 PG_LDFLAGS = -L$(JDK_LIB_PATH) -ljvm
 
 ifdef USE_PGXS
@@ -81,5 +83,21 @@ install_dbz:
 	rm -rf $(libdir)/dbz_engine
 	install -d $(libdir)/dbz_engine
 	cp -rp $(DBZ_ENGINE_PATH)/target/* $(libdir)/dbz_engine
-#	chown -R root:root $(libdir)/dbz_engine
-# append new recipe to the original all and clean as defined by global Makefile
+
+.PHONY: dbcheck mysqlcheck sqlservercheck oraclecheck
+dbcheck:
+	@command -v pytest >/dev/null 2>&1 || { echo >&2 "❌ pytest not found in PATH."; exit 1; }
+	@command -v docker >/dev/null 2>&1 || { echo >&2 "❌ docker not found in PATH."; exit 1; }
+	@command -v docker-compose >/dev/null 2>&1 || command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1 || { echo >&2 "❌ docker-compose not found in PATH"; exit 1; }
+	@echo "Running tests against dbvendor=$(DB)"
+	PYTHONPATH=./test/synchdb_tests/ pytest -v -s --dbvendor=$(DB) --capture=tee-sys ./test/synchdb_tests/
+	rm -r .pytest_cache ./test/synchdb_tests/__pycache__ ./test/synchdb_tests/t/__pycache__
+
+mysqlcheck:
+	$(MAKE) dbcheck DB=mysql
+
+sqlservercheck:
+	$(MAKE) dbcheck DB=sqlserver
+
+oraclecheck:
+	$(MAKE) dbcheck DB=oracle

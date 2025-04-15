@@ -1,18 +1,31 @@
 name: SynchDB CI
-
 on:
+  workflow_dispatch:
   push:
-    branches: [ main, synchdb-devel ]
+    branches: [ main, synchdb-devel]
   pull_request:
-    branches: [ main, synchdb-devel ]
-
+    branches: [ main, synchdb-devel]
 jobs:
-  build:
+  params:
     runs-on: ubuntu-22.04
-    
+    name: Initialize parameters
+    outputs:
+      pg16_version: '{ "major": "16", "full": "16.8" }'
+      pg17_version: '{ "major": "17", "full": "17.4" }'
+    steps:
+      - name: set up parameters
+        run: echo 'noop'
+  build:
+    needs: params
+    name: Build for PG${{ fromJson(matrix.pg_version).major }}
+    strategy:
+      matrix:
+        pg_version:
+          - ${{ needs.params.outputs.pg16_version }}
+          - ${{ needs.params.outputs.pg17_version }}
+    runs-on: ubuntu-22.04
     steps:
     - uses: actions/checkout@v2
-    
     - name: Set up JDK 22
       uses: actions/setup-java@v2
       with:
@@ -20,81 +33,65 @@ jobs:
         distribution: 'temurin'
         architecture: x64
         check-latest: true
-    
     - name: Set up Maven
       uses: stCarolas/setup-maven@v4.5
       with:
         maven-version: 3.9.8
-    
-    - name: Install PostgreSQL build dependencies
+    - name: Install pg
       run: |
-        echo "Install PostgreSQL build dependencies"
         sudo apt-get update
-        sudo apt-get install -y build-essential libreadline-dev zlib1g-dev flex bison libxml2-dev libxslt-dev libssl-dev libxml2-utils xsltproc ccache
-    
-    - name: Check OpenSSL
+        echo -ne "\n" | sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh
+        sudo apt-get install -y postgresql-client-${{ fromJson(matrix.pg_version).major }}
+        sudo apt-get install -y postgresql-${{ fromJson(matrix.pg_version).major }}
+        sudo apt-get install -y postgresql-server-dev-${{ fromJson(matrix.pg_version).major }}
+    - name: Expose $PG_MAJOR to Github Env
+      run: echo "PG_MAJOR=$(echo '${{ matrix.pg_version }}' | jq -r .major)" >> $GITHUB_ENV
+      shell: bash
+    - name: Build
+      run: "./ci/build-synchdb.sh"
+      shell: bash
+    - uses: actions/upload-artifact@v4
+      with:
+        name: synchdb-install-${{ env.PG_MAJOR }}
+        path: |-
+          ./synchdb-install-${{ fromJson(matrix.pg_version).major }}.tar.gz
+  test-synchdb:
+    name: PG${{ fromJson(matrix.pg_version).major }}-${{ matrix.dbtypes }} Tests
+    strategy:
+      matrix:
+        pg_version:
+          - ${{ needs.params.outputs.pg16_version }}
+          - ${{ needs.params.outputs.pg17_version }}
+        dbtypes:
+          - mysql
+          - oracle
+          - sqlserver
+    runs-on: ubuntu-22.04
+    needs:
+    - params
+    - build
+    steps:
+    - uses: actions/checkout@v2
+    - uses: actions/download-artifact@v4
+      with:
+        name: synchdb-install-${{ fromJson(matrix.pg_version).major }}
+    - name: Set up JDK 22
+      uses: actions/setup-java@v2
+      with:
+        java-version: '22'
+        distribution: 'temurin'
+        architecture: x64
+        check-latest: true
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.10"
+    - name: Install pytest
       run: |
-        openssl version
-        ldconfig -p | grep libssl
-        ls -l /usr/lib/x86_64-linux-gnu/libssl.so*
-        
-    - name: Clone and build PostgreSQL
-      timeout-minutes: 30
-      run: |
-        git clone https://github.com/postgres/postgres.git
-        cd postgres
-        git checkout REL_16_3
-        echo "Build PostgreSQL "
-        ./configure --prefix=/usr/local/pgsql --with-openssl LDFLAGS="-L/usr/lib/x86_64-linux-gnu" CPPFLAGS="-I/usr/include/openssl"
-        make
-        sudo make install
-        cd contrib
-        make
-        sudo make install
-        echo "Adding PostgreSQL binaries to PATH"
-        echo "/usr/local/pgsql/bin" >> $GITHUB_PATH
-        echo "export PATH=/usr/local/pgsql/bin:$PATH" >> ~/.bashrc
-        echo "export LD_LIBRARY_PATH=/usr/local/pgsql/lib:/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH" >> ~/.bashrc
-        source ~/.bashrc
-
-    - name: Verify pgcrypto
-      run: |
-        ls -l /usr/local/pgsql/lib/pgcrypto.so
-        ldd /usr/local/pgsql/lib/pgcrypto.so
-        nm -D /usr/local/pgsql/lib/pgcrypto.so | grep EVP_cast5_cbc
-          
-    - name: Clone SynchDB
-      run: |
-        cd postgres/contrib
-        git clone https://x-access-token:${GITHUB_TOKEN}@github.com/Hornetlabs/synchdb.git -b synchdb-devel
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    
-    - name: Build and install Debezium Runner Engine
-      run: |
-        echo "build DBZ"
-        cd postgres/contrib/synchdb
-        make build_dbz
-        sudo make install_dbz
-    
-    - name: Build and install SynchDB PostgreSQL Extension
-      run: |
-        echo "install SynchDB "
-        cd postgres/contrib/synchdb
-        make || exit 1
-        sudo make install || exit 1
-        
-    - name: Build and install PostgreSQL pgcrypto Extension
-      run: |
-        echo "install PostgreSQL Extension pgcrypto "
-        cd postgres/contrib/pgcrypto
-        make || exit 1
-        sudo make install || exit 1  
-        ls -l /usr/local/pgsql/lib/pgcrypto.so
-        ldd /usr/local/pgsql/lib/pgcrypto.so
-        nm -D /usr/local/pgsql/lib/pgcrypto.so | grep EVP_cast5_cbc
-    
-    - name: Configure linker
+        pip install pytest psycopg2
+        python --version
+        pytest --version
+    - name: Configure Linker
       run: |
         echo "configure Java"
         JAVA_PATH=$(which java)
@@ -103,244 +100,27 @@ jobs:
         echo $JDK_LIB_PATH | sudo tee -a /etc/ld.so.conf.d/x86_64-linux-gnu.conf
         echo $JDK_LIB_PATH/server | sudo tee -a /etc/ld.so.conf.d/x86_64-linux-gnu.conf
         sudo ldconfig
-    
-    - name: Set up test environment
+    - name: Install Base PG and SynchDB
       run: |
+        sudo apt-get update
+        echo -ne "\n" | sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh
+        sudo apt-get install -y postgresql-client-${{ fromJson(matrix.pg_version).major }}
+        sudo apt-get install -y postgresql-${{ fromJson(matrix.pg_version).major }}
+        sudo tar xzvf synchdb-install-${{ fromJson(matrix.pg_version).major }}.tar.gz -C /
         sudo apt-get install -y docker-compose
-        echo "Docker Compose version:"
         docker-compose --version
-        echo "Starting MySQL container..."
-        docker-compose -f postgres/contrib/synchdb/testenv/mysql/synchdb-mysql-test.yaml up -d
-        echo "Starting SQL Server container..."
-        docker-compose -f postgres/contrib/synchdb/testenv/sqlserver/synchdb-sqlserver-test.yaml up -d
-        echo "Waiting for containers to be ready..."
-        sleep 30  # Give containers time to fully start
-        echo "Docker container status:"
-        docker ps -a
-        echo "Docker logs for MySQL:"
-        docker logs mysql || echo "No MySQL container found"
-        id=$(docker ps | grep sqlserver | awk '{print $1}')
-        echo "check docker $id sqlcmd command"
-        docker exec -i $id ls -l /opt/mssql-tools18/bin/sqlcmd || { echo "sqlcmd not found on the sqlserver docker"; exit 1; }
-        
-    - name: Check Docker daemon
+    - name: Expose $DBTYPE to Github Env
+      run: echo "DBTYPE=${{ matrix.dbtypes }}" >> $GITHUB_ENV
+      shell: bash
+    - name: synchdb test
       run: |
-        sudo systemctl status docker
-        docker info
-        docker ps
-        docker-compose -f postgres/contrib/synchdb/testenv/mysql/synchdb-mysql-test.yaml ps
-        docker-compose -f postgres/contrib/synchdb/testenv/sqlserver/synchdb-sqlserver-test.yaml ps
-
-    - name: Prepare MySQL test database
-      run: |
-        echo "MySQL container status:"
-        docker ps | grep mysql
-        echo "Attempting to connect to MySQL..."
-        docker exec -i mysql mysql -uroot -pmysqlpwdroot -e "SELECT VERSION();" || { echo "Failed to connect to MySQL"; docker logs mysql; exit 1; }
-        docker exec -i mysql mysql -uroot -pmysqlpwdroot << EOF
-        GRANT replication client ON *.* TO mysqluser;
-        GRANT replication slave ON *.* TO mysqluser;
-        GRANT RELOAD ON *.* TO 'mysqluser'@'%';
-        FLUSH PRIVILEGES;
-        EOF
-
-        echo "Showing grants for mysqluser:"
-        docker exec -i mysql mysql -uroot -pmysqlpwdroot -e "SHOW GRANTS FOR mysqluser;"
-
-    - name: Prepare SQL Server test database
-      run: |
-        docker ps
-        id=$(docker ps | grep sqlserver | awk '{print $1}')
-        echo "copy inventory SQL "
-        docker cp postgres/contrib/synchdb/inventory.sql $id:/
-        echo "SQL Server logs:"
-        docker logs $id
-        echo "Attempting to connect to SQL Server without SSL verification:"
-        docker exec -i $id /opt/mssql-tools18/bin/sqlcmd -U sa -P 'Password!' -C -Q "SELECT @@VERSION"
-        echo "Executing inventory.sql:"
-        docker exec -i $id /opt/mssql-tools18/bin/sqlcmd -U sa -P 'Password!' -C -i /inventory.sql
-        echo "Checking orders table:"
-        docker exec -i $id /opt/mssql-tools18/bin/sqlcmd -U sa -P 'Password!' -C -d testDB -Q "SELECT COUNT(*) from orders"
-        
-    - name: Check installation
-      run: |
-        ldd postgres/contrib/synchdb/synchdb.so
-
-    - name: Initialize and start PostgreSQL
-      timeout-minutes: 5
-      run: |
-        echo "PostgreSQL binaries location:"
-        which psql
-        which initdb
-        which pg_ctl
-        echo "Creating database directory:"
-        mkdir synchdbtest
-        echo "Initializing database:"
-        initdb -D synchdbtest
-        echo "Configuring PostgreSQL:"
-        echo "shared_preload_libraries = 'synchdb'" >> synchdbtest/postgresql.conf
-        echo "max_connections = 100" >> synchdbtest/postgresql.conf
-        echo "shared_buffers = 128MB" >> synchdbtest/postgresql.conf
-        echo "dynamic_shared_memory_type = posix" >> synchdbtest/postgresql.conf
-        echo "Starting PostgreSQL @ $PWD:"
-        pg_ctl -D synchdbtest -l logfile start
-        echo "Creating test database:"
-        createdb test_db
-        echo "PostgreSQL status:"
-        pg_ctl -D synchdbtest status
-
-    - name: Check system resources
-      run: |
-        echo "Available memory:"
-        free -h
-        echo "Disk space:"
-        df -h
-        echo "Current user and permissions:"
-        id
-        ls -l synchdbtest
-    
-    - name: Install SynchDB extension
-      timeout-minutes: 2
-      run: |
-        echo "PostgreSQL version:"
-        psql --version
-        echo "OpenSSL version:"
-        openssl version
-        echo "LD_LIBRARY_PATH:"
-        echo $LD_LIBRARY_PATH
-        echo "Installing pgcrypto extension on test_db:"
-        psql -d test_db -c "CREATE EXTENSION IF NOT EXISTS pgcrypto;" || { echo "pgcrypto installation failed"; cat logfile; exit 1; }
-        echo "Installing synchdb extension on test_db:"
-        psql -d test_db -c "CREATE EXTENSION synchdb;" || { echo "synchdb installation failed"; cat logfile; exit 1; }
-    
-    - name: Verify PostgreSQL installation
-      run: |
-        echo "PostgreSQL version:"
-        psql --version
-        echo "=================="
-        echo "List of databases:"
-        psql -l
-        echo "=================="
-        echo "PostgreSQL server version:"
-        psql -d postgres -c "SELECT version();"
-    
-    - name: Create connection information and start connectors
-      run: |
-        psql -d test_db << EOF || { echo "Failed to create connections or start connectors"; cat logfile; exit 1; }
-        SELECT synchdb_add_conninfo('mysqlconn', '127.0.0.1', 3306, 'mysqluser', 'mysqlpwd', 'inventory', 'test_db', '', 'mysql');
-        SELECT synchdb_add_conninfo('sqlserverconn', '127.0.0.1', 1433, 'sa', 'Password!', 'testDB', 'test_db', '', 'sqlserver');
-        SELECT synchdb_start_engine_bgw('mysqlconn');
-        SELECT synchdb_start_engine_bgw('sqlserverconn');
-        EOF
-
-    - name: Check PostgreSQL logs
-      run: |
-        echo "check postgres process:"
-        ps -ef | grep -i postgres
-        echo "Recent PostgreSQL logs:"
-        tail -n 100 logfile
-        echo "======================="
-        
-    - name: View connector states and validate
-      run: |
-        max_attempts=10
-        attempt=1
-        docker ps
-        id=$(docker ps | grep sqlserver | awk '{print $1}')
-        
-        while [ $attempt -le $max_attempts ]; do
-          echo "Attempt $attempt of $max_attempts"
-          # Debug: Print raw output
-          echo "Raw SQL Server output:"
-          docker exec -i $id /opt/mssql-tools18/bin/sqlcmd -U sa -P 'Password!' -d testDB -C -Q "SELECT COUNT(*) from orders" -h -1
-
-          # Check if the table exists in PostgreSQL
-          table_exists=$(psql -d test_db -t -c "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'testdb' AND table_name = 'orders';" | tr -d ' \n')
-          
-          echo "SQL Server count: ['$syncing_src_count']"
-          echo "Table exists in PostgreSQL: $table_exists"
-          
-          if [ "$table_exists" -eq "0" ]; then
-            echo "The 'orders' table doesn't exist in PostgreSQL yet. Waiting for replication..."
-            sleep 10  # Increased wait time
-            attempt=$((attempt+1))
-            continue
-          fi
-      
-          echo "Raw PostgreSQL output:"
-          psql -d test_db -t -c "SELECT COUNT(*) from testDB.orders;"
-          
-          # Capture and clean the outputs
-          syncing_src_count=$(docker exec -i $id /opt/mssql-tools18/bin/sqlcmd -U sa -P 'Password!' -d testDB -C -Q "SELECT COUNT(*) from orders" -h -1 | sed -n '1p' | tr -d ' \r\n')
-          syncing_dst_count=$(psql -d test_db -t -c "SELECT COUNT(*) from testDB.orders;" | tr -d ' \n')
-
-          # Debug: Print cleaned variables
-          echo "Cleaned src_count: ['$syncing_src_count']"
-          echo "Cleaned dst_count: ['$syncing_dst_count']"
-      
-          if [ "$syncing_src_count" -eq "$syncing_dst_count" ]; then
-            echo "Initial sync complete. Adding new record to source."
-            docker exec -i $id /opt/mssql-tools18/bin/sqlcmd -U sa -P 'Password!' -d testDB -C -Q "INSERT INTO orders(order_date, purchaser, quantity, product_id) VALUES ('2024-01-01', 1003, 2, 107)"
-            
-            inner_max_attempts=10
-            inner_attempt=1
-            while [ $inner_attempt -le $inner_max_attempts ]; do
-              echo "Attempt $inner_attempt of $inner_max_attempts for new record sync"
-              new_syncing_src_count=$(docker exec -i $id /opt/mssql-tools18/bin/sqlcmd -U sa -P 'Password!' -d testDB -C -Q "SELECT COUNT(*) from orders" -h -1 | sed -n '1p' | tr -d ' \r\n')
-              new_syncing_dst_count=$(psql -d test_db -t -c "SELECT COUNT(*) from testDB.orders;" | tr -d ' \n')
-              
-              echo "New src_count: ['$new_syncing_src_count']"
-              echo "New dst_count: ['$new_syncing_dst_count']"
-              
-              if [ "$new_syncing_dst_count" -eq "$new_syncing_src_count" ]; then
-                echo "Both connectors are in syncing state"
-                psql -d test_db -c "SELECT * FROM synchdb_state_view;"
-                exit 0
-              else
-                echo "Waiting for last record to sync (current count: $new_syncing_dst_count vs $new_syncing_src_count)"
-                sleep 10
-              fi
-              inner_attempt=$((inner_attempt+1))
-            done
-            
-            echo "Timeout: Last record did not sync"
-            exit 1
-          else
-            echo "Waiting for initial sync (current count: $syncing_dst_count vs $syncing_src_count)"
-            sleep 10
-          fi
-          attempt=$((attempt+1))
-        done
-        
-        echo "Timeout: Initial sync did not complete"
-        psql -d test_db -c "SELECT * FROM synchdb_state_view;"
-        exit 1
-
-    # Add any additional tests or checks here
-    - name: Check PostgreSQL logs
-      if: failure()
-      run: |
-        echo "check PG log @ $PWD"
-        cat logfile
-    
-    - name: Cleanup
+        export PATH=$PATH:/usr/lib/postgresql/${{ fromJson(matrix.pg_version).major }}/bin
+        mkdir -p /var/run/postgresql
+        sudo chown -R $(whoami) /var/run/postgresql
+        make USE_PGXS=1 ${{ matrix.dbtypes }}check
+    - uses: actions/upload-artifact@v4
       if: always()
-      run: |
-        echo "Stopping and removing MySQL container"
-        docker-compose -f postgres/contrib/synchdb/testenv/mysql/synchdb-mysql-test.yaml down --remove-orphans || true
-        
-        echo "Stopping and removing SQL Server container"
-        docker-compose -f postgres/contrib/synchdb/testenv/sqlserver/synchdb-sqlserver-test.yaml down --remove-orphans || true
-        
-        echo "Removing any leftover containers"
-        docker rm -f $(docker ps -aq) || true
-        
-        echo "Removing any leftover networks"
-        docker network prune -f
-        
-        echo "Stopping PostgreSQL"
-        pg_ctl -D synchdbtest stop || true
-        
-        echo "Cleanup complete"
-        
-
+      with:
+        name: synchdb-test-outputs-${{ fromJson(matrix.pg_version).major }}-${{ matrix.dbtypes }}
+        path: |-
+          ./synchdb_testdir

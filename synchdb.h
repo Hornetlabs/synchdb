@@ -35,7 +35,7 @@
 #define SYNCHDB_OFFSET_SIZE 256
 #define SYNCHDB_ERRMSG_SIZE 256
 #define SYNCHDB_SNAPSHOT_MODE_SIZE 32
-
+#define SYNCHDB_METADATA_PATH_SIZE 256
 #define SYNCHDB_DATATYPE_NAME_SIZE 64
 #define SYNCHDB_OBJ_NAME_SIZE 128
 #define SYNCHDB_OBJ_TYPE_SIZE 32
@@ -183,6 +183,7 @@ typedef struct _ConnectionInfo
     char table[SYNCHDB_CONNINFO_TABLELIST_SIZE];
     bool active;
     bool isShcemaSync;
+    bool isOraCompat; /* added to support ivorysql's oracle compatible mode */
     ExtraConnectionInfo extra;
 } ConnectionInfo;
 
@@ -224,8 +225,12 @@ typedef struct _SynchdbStatistics
 	unsigned long long stats_total_change_event;/* number of total change events */
 	unsigned long long stats_batch_completion;	/* number of batches completed */
 	unsigned long long stats_average_batch_size;/* calculated average batch size: */
-
-	/* todo: more stats to be added */
+	unsigned long long stats_first_src_ts;	/* timestamp(ms) of last batch's first event generation in source db */
+	unsigned long long stats_first_dbz_ts;	/* timestamp(ms) of last batch's first event processed by dbz */
+	unsigned long long stats_first_pg_ts;	/* timestamp(ms) of last batch's first event processed by postgresql */
+	unsigned long long stats_last_src_ts;	/* timestamp(ms) of last batch's last event generation in source db */
+	unsigned long long stats_last_dbz_ts;	/* timestamp(ms) of last batch's last event processed by dbz */
+	unsigned long long stats_last_pg_ts;	/* timestamp(ms) of last batch's last event processed by postgresql */
 } SynchdbStatistics;
 
 /**

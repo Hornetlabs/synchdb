@@ -59,6 +59,7 @@ typedef struct pg_dml
 
 	char op;
 	Oid tableoid;
+	int natts;					/* number of columns of this pg table */
 	List * columnValuesBefore;	/* list of PG_DML_COLUMN_VALUE */
 	List * columnValuesAfter;	/* list of PG_DML_COLUMN_VALUE */
 } PG_DML;

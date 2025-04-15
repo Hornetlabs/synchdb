@@ -37,15 +37,16 @@
 #include "utils/memutils.h"
 #include "access/table.h"
 #include <time.h>
+#include <sys/time.h>
 #include "synchdb.h"
 #include "common/base64.h"
 #include "port/pg_bswap.h"
 #include "utils/datetime.h"
+#include "utils/typcache.h"
 
 /* global external variables */
 extern bool synchdb_dml_use_spi;
 extern int myConnectorId;
-extern ExtraConnectionInfo extraConnInfo;
 extern bool synchdb_log_event_on_error;
 extern char * g_eventStr;
 
@@ -304,8 +305,6 @@ bytearray_to_escaped_string(const unsigned char *byte_array, size_t length, char
 		sprintf(ptr, "%02X", byte_array[i]);
 		ptr += 2;
 	}
-
-	// Close the string with a single quote
 	strcat(ptr, "'");
 }
 
@@ -314,10 +313,10 @@ bytearray_to_escaped_string(const unsigned char *byte_array, size_t length, char
  *
  * computes the int value from given byte
  */
-static long
+static long long
 derive_value_from_byte(const unsigned char * bytes, int len)
 {
-	long value = 0;
+	long long value = 0;
 	int i;
 
 	/* Convert the byte array to an integer */
@@ -332,7 +331,7 @@ derive_value_from_byte(const unsigned char * bytes, int len)
 	 */
 	if ((bytes[0] & 0x80))
 	{
-		value |= -((long) 1 << (len * 8));
+		value |= -((long long) 1 << (len * 8));
 	}
 	return value;
 }
@@ -451,7 +450,7 @@ bytes_to_binary_string(const unsigned char * bytes, size_t len, char * binary_st
  * Function to find exact match from given line
  */
 static bool
-find_exact_string_match(char * line, char * wordtofind)
+find_exact_string_match(const char * line, const char * wordtofind)
 {
 	char * p = strstr(line, wordtofind);
 	if ((p == line) || (p != NULL && !isalnum((unsigned char)p[-1])))
@@ -613,13 +612,6 @@ transform_object_name(const char * objid, const char * objtype)
 	entry = (ObjMapHashEntry *) hash_search(objectMappingHash, &key, HASH_FIND, &found);
 	if (!found)
 	{
-		/* no object mapping found, so no transformation done */
-		elog(DEBUG1, "no object name transformation done for %s", objid);
-	}
-	else
-	{
-		/* return the mapped object mapped value */
-		elog(DEBUG1, "transform %s to %s", key.extObjName, entry->pgsqlObjName);
 		res = pstrdup(entry->pgsqlObjName);
 	}
 	return res;
@@ -758,18 +750,15 @@ getPathElementString(Jsonb * jb, char * path, StringInfoData * strinfoout, bool 
 	Datum * datum_elems = NULL;
 	char * str_elems = NULL, * p = path;
 	int numPaths = 0, curr = 0;
-	char * pathcopy = pstrdup(path);
+	char * pathcopy = path;
 	Datum res;
 	bool isnull;
 
 	if (!strinfoout)
-	{
-		elog(WARNING, "strinfo is null");
 		return -1;
-	}
 
     /* Count the number of elements in the path */
-	if (strstr(pathcopy, "."))
+	if (strchr(pathcopy, '.'))
 	{
 		while (*p != '\0')
 		{
@@ -780,6 +769,7 @@ getPathElementString(Jsonb * jb, char * path, StringInfoData * strinfoout, bool 
 			p++;
 		}
 		numPaths++; /* Add the last one */
+		pathcopy = pstrdup(path);
 	}
 	else
 	{
@@ -789,7 +779,7 @@ getPathElementString(Jsonb * jb, char * path, StringInfoData * strinfoout, bool 
 	datum_elems = palloc0(sizeof(Datum) * numPaths);
 
     /* Parse the path into elements */
-	if (strstr(pathcopy, "."))
+	if (numPaths > 1)
 	{
 		str_elems= strtok(pathcopy, ".");
 		if (str_elems)
@@ -815,7 +805,6 @@ getPathElementString(Jsonb * jb, char * path, StringInfoData * strinfoout, bool 
     {
     	resetStringInfo(strinfoout);
     	appendStringInfoString(strinfoout, "NULL");
-    	elog(DEBUG1, "%s = NULL", path);
     }
     else
     {
@@ -832,86 +821,80 @@ getPathElementString(Jsonb * jb, char * path, StringInfoData * strinfoout, bool 
 
 		if (resjb)
 			pfree(resjb);
-		elog(DEBUG1, "%s = %s", path, strinfoout->data);
     }
 
 	pfree(datum_elems);
-	pfree(pathcopy);
+	if (pathcopy != path)
+		pfree(pathcopy);
 	return 0;
 }
 
-/*
- * getPathElementJsonb
- *
- * Function to get a JSONB element from a path
- */
-static Jsonb *
-getPathElementJsonb(Jsonb * jb, char * path)
+static DbzType
+getDbzTypeFromString(const char * typestring)
 {
-	Datum * datum_elems = NULL;
-	char * str_elems = NULL, * p = path;
-	int numPaths = 0, curr = 0;
-	char * pathcopy = pstrdup(path);
-	bool isnull;
-	Datum datout;
-	Jsonb * out = NULL;
+	if (!typestring)
+		return DBZTYPE_UNDEF;
 
-	if (strstr(pathcopy, "."))
-	{
-		/* count how many elements are in path*/
-		while (*p != '\0')
-		{
-			if (*p == '.')
-			{
-				numPaths++;
-			}
-			p++;
-		}
-		/* add the last one */
-		numPaths++;
-	}
-	else
-	{
-		numPaths = 1;
-	}
+	if (!strcmp(typestring, "float32"))
+		return DBZTYPE_FLOAT32;
+	if (!strcmp(typestring, "float64"))
+		return DBZTYPE_FLOAT64;
+	if (!strcmp(typestring, "float"))
+		return DBZTYPE_FLOAT;
+	if (!strcmp(typestring, "double"))
+		return DBZTYPE_DOUBLE;
+	if (!strcmp(typestring, "bytes"))
+		return DBZTYPE_BYTES;
+	if (!strcmp(typestring, "int8"))
+		return DBZTYPE_INT8;
+	if (!strcmp(typestring, "int16"))
+		return DBZTYPE_INT16;
+	if (!strcmp(typestring, "int32"))
+		return DBZTYPE_INT32;
+	if (!strcmp(typestring, "int64"))
+		return DBZTYPE_INT64;
+	if (!strcmp(typestring, "struct"))
+		return DBZTYPE_STRUCT;
+	if (!strcmp(typestring, "string"))
+		return DBZTYPE_STRING;
 
-	datum_elems = palloc0(sizeof(Datum) * numPaths);
+	elog(DEBUG1, "unexpected dbz type %s", typestring);
+	return DBZTYPE_UNDEF;
+}
 
-	if (strstr(pathcopy, "."))
-	{
-		/* multi level paths, */
-		str_elems= strtok(pathcopy, ".");
-		if (str_elems)
-		{
-			datum_elems[curr] = CStringGetTextDatum(str_elems);
-			curr++;
-			while (str_elems)
-			{
-				/* parse the remaining elements */
-				str_elems = strtok(NULL, ".");
+static TimeRep
+getTimerepFromString(const char * typestring)
+{
+	if (!typestring)
+		return TIME_UNDEF;
 
-				if (str_elems == NULL)
-					break;
+	if (find_exact_string_match(typestring, "io.debezium.time.Date"))
+		return TIME_DATE;
+	else if (find_exact_string_match(typestring, "io.debezium.time.Time"))
+		return TIME_TIME;
+	else if (find_exact_string_match(typestring, "io.debezium.time.MicroTime"))
+		return TIME_MICROTIME;
+	else if (find_exact_string_match(typestring, "io.debezium.time.NanoTime"))
+		return TIME_NANOTIME;
+	else if (find_exact_string_match(typestring, "io.debezium.time.Timestamp"))
+		return TIME_TIMESTAMP;
+	else if (find_exact_string_match(typestring, "io.debezium.time.MicroTimestamp"))
+		return TIME_MICROTIMESTAMP;
+	else if (find_exact_string_match(typestring, "io.debezium.time.NanoTimestamp"))
+		return TIME_NANOTIMESTAMP;
+	else if (find_exact_string_match(typestring, "io.debezium.time.ZonedTimestamp"))
+		return TIME_ZONEDTIMESTAMP;
+	else if (find_exact_string_match(typestring, "io.debezium.time.MicroDuration"))
+		return TIME_MICRODURATION;
+	else if (find_exact_string_match(typestring, "io.debezium.data.VariableScaleDecimal"))
+		return DATA_VARIABLE_SCALE;
+	else if (find_exact_string_match(typestring, "io.debezium.data.geometry.Geometry"))
+		return DATA_VARIABLE_SCALE;
+	else if (find_exact_string_match(typestring, "io.debezium.data.Enum"))
+		return DATA_ENUM;
 
-				datum_elems[curr] = CStringGetTextDatum(str_elems);
-				curr++;
-			}
-		}
-	}
-	else
-	{
-		/* only one level, just use pathcopy*/
-		datum_elems[curr] = CStringGetTextDatum(pathcopy);
-	}
-	datout = jsonb_get_element(jb, datum_elems, numPaths, &isnull, false);
-	if (isnull)
-		out = NULL;
-	else
-		out = DatumGetJsonbP(datout);
-
-	pfree(datum_elems);
-	pfree(pathcopy);
-	return out;
+	elog(DEBUG1, "unhandled dbz type %s", typestring);
+	return TIME_UNDEF;
 }
 
 static HTAB *
@@ -920,132 +903,109 @@ build_schema_jsonpos_hash(Jsonb * jb)
 	HTAB * jsonposhash;
 	HASHCTL hash_ctl;
 	Jsonb * schemadata = NULL;
-	JsonbIterator *it;
-	JsonbValue v;
-	JsonbIteratorToken r;
-	char * key = NULL;
-	char * value = NULL;
-	bool inarray = false, pause = false;
 	int jsonpos = 0;
 	NameJsonposEntry * entry;
+	NameJsonposEntry tmprecord = {0};
 	bool found = false;
-	int j = 0;
+	int i = 0, j = 0;
+	unsigned int contsize = 0;
+	Datum datum_elems[4] ={CStringGetTextDatum("schema"), CStringGetTextDatum("fields"),
+			CStringGetTextDatum("0"), CStringGetTextDatum("fields")};
+	bool isnull;
 
 	memset(&hash_ctl, 0, sizeof(hash_ctl));
 	hash_ctl.keysize = NAMEDATALEN;
 	hash_ctl.entrysize = sizeof(NameJsonposEntry);
-	hash_ctl.hcxt = CurrentMemoryContext;
+	hash_ctl.hcxt = TopMemoryContext;
 
 	jsonposhash = hash_create("Name to jsonpos Hash Table",
-							512, // limit to 512 columns max
+							512,
 							&hash_ctl,
 							HASH_ELEM | HASH_CONTEXT);
 
-	schemadata = getPathElementJsonb(jb, "schema.fields.0.fields");
+	schemadata = DatumGetJsonbP(jsonb_get_element(jb, &datum_elems[0], 4, &isnull, false));
 	if (schemadata)
 	{
-		it = JsonbIteratorInit(&schemadata->root);
-		while ((r = JsonbIteratorNext(&it, &v, false)) != WJB_DONE)
+		contsize = JsonContainerSize(&schemadata->root);
+		for (i = 0; i < contsize; i++)
 		{
-			switch (r)
+			JsonbValue * v = NULL, * v2 = NULL, *v3 = NULL;
+			JsonbValue vbuf;
+			char * tmpstr = NULL;
+
+			memset(&tmprecord, 0, sizeof(NameJsonposEntry));
+			v = getIthJsonbValueFromContainer(&schemadata->root, i);
+			if (v->type == jbvBinary)
 			{
-				case WJB_BEGIN_OBJECT:
-					elog(DEBUG1, "start of object (%s)", key ? key : "null");
-					break;
-				case WJB_END_OBJECT:
-					elog(DEBUG1, "end of object (%s)", key ? key : "null");
-					break;
-				case WJB_BEGIN_ARRAY:
-					elog(DEBUG1, "start of array (%s)",
-							key ? key : "null");
-					if (inarray == false)
-						inarray = true;
-					else
-						pause = true;
-					break;
-				case WJB_END_ARRAY:
-					elog(DEBUG1, "end of array (%s)", key ? key : "null");
-					if (pause)
-						pause = false;
-					break;
-				case WJB_KEY:
-					if (pause)
-						break;
-					key = pnstrdup(v.val.string.val, v.val.string.len);
-					elog(DEBUG1, "Key: %s", key);
-					break;
-				case WJB_VALUE:
-				case WJB_ELEM:
-					if (pause)
-						break;
-					switch (v.type)
+				v2 = getKeyJsonValueFromContainer(v->val.binary.data, "field", strlen("field"), &vbuf);
+				if (v2)
+				{
+					strncpy(tmprecord.name, v2->val.string.val, v2->val.string.len); /* todo check overflow */
+					for (j = 0; j < strlen(tmprecord.name); j++)
+						tmprecord.name[j] = (char) pg_tolower((unsigned char) tmprecord.name[j]);
+				}
+				else
+				{
+					elog(WARNING, "field is missing from dbz schema...");
+					continue;
+				}
+				v2 = getKeyJsonValueFromContainer(v->val.binary.data, "type", strlen("type"), &vbuf);
+				if (v2)
+				{
+					tmpstr = pnstrdup(v2->val.string.val, v2->val.string.len);
+					tmprecord.dbztype = getDbzTypeFromString(tmpstr);
+					pfree(tmpstr);
+				}
+				else
+				{
+					elog(WARNING, "type is missing from dbz schema...");
+					continue;
+				}
+				v2 = getKeyJsonValueFromContainer(v->val.binary.data, "name", strlen("name"), &vbuf);
+				if (v2)
+				{
+					tmpstr = pnstrdup(v2->val.string.val, v2->val.string.len);
+					tmprecord.timerep = getTimerepFromString(tmpstr);
+					pfree(tmpstr);
+				}
+
+				/* check if parameters group exists */
+				v2 = getKeyJsonValueFromContainer(v->val.binary.data, "parameters", strlen("parameters"), &vbuf);
+				if (v2)
+				{
+					if (v->type == jbvBinary)
 					{
-						case jbvNull:
-							elog(DEBUG1, "Value: NULL");
-							value = pnstrdup("NULL", strlen("NULL"));
-							break;
-						case jbvString:
-							value = pnstrdup(v.val.string.val, v.val.string.len);
-							elog(DEBUG1, "String Value: %s", value);
-							break;
-						case jbvNumeric:
+						v3 = getKeyJsonValueFromContainer(v2->val.binary.data, "scale", strlen("scale"), &vbuf);
+						if (v3)
 						{
-							value = DatumGetCString(DirectFunctionCall1(numeric_out, PointerGetDatum(v.val.numeric)));
-							elog(DEBUG1, "Numeric Value: %s", value);
-							break;
+							tmpstr = pnstrdup(v3->val.string.val, v3->val.string.len);
+							tmprecord.scale = atoi(tmpstr);
+							pfree(tmpstr);
 						}
-						case jbvBool:
-							elog(DEBUG1, "Boolean Value: %s", v.val.boolean ? "true" : "false");
-							if (v.val.boolean)
-								value = pnstrdup("true", strlen("true"));
-							else
-								value = pnstrdup("false", strlen("false"));
-							break;
-						case jbvBinary:
-							elog(DEBUG1, "Binary Value: not handled yet");
-							value = pnstrdup("NULL", strlen("NULL"));
-							break;
-						default:
-							elog(DEBUG1, "Unknown value type: %d", v.type);
-							value = pnstrdup("NULL", strlen("NULL"));
-							break;
 					}
-				break;
-				default:
-					elog(WARNING, "Unknown token: %d", r);
-					break;
+				}
+				tmprecord.jsonpos = jsonpos;
+				jsonpos++;
+			}
+			else
+			{
+				elog(WARNING, "unexpected container type %d", v->type);
+				continue;
 			}
 
-			/* check if we have a key - value pair */
-			if (key != NULL && value != NULL)
+			entry = (NameJsonposEntry *) hash_search(jsonposhash, tmprecord.name, HASH_ENTER, &found);
+			if (!found)
 			{
-				/* we are only interested in column name and their position in the schema section */
-				if (!strcasecmp(key, "field"))
-				{
-					elog(DEBUG1, "CONSUMING field = %s", value);
-
-					for (j = 0; j < strlen(value); j++)
-						value[j] = (char) pg_tolower((unsigned char) value[j]);
-
-					entry = (NameJsonposEntry *) hash_search(jsonposhash, value, HASH_ENTER, &found);
-					if (!found)
-					{
-						strlcpy(entry->name, value, NAMEDATALEN);
-						entry->jsonpos = jsonpos;
-						elog(DEBUG1, "Inserted name '%s' with jsonos %d", entry->name, entry->jsonpos);
-					}
-					else
-					{
-						elog(DEBUG1, "Name '%s' already exists with jsonpos %d", entry->name, entry->jsonpos);
-					}
-					jsonpos++;
-				}
-				pfree(key);
-				pfree(value);
-				key = NULL;
-				value = NULL;
+				strlcpy(entry->name, tmprecord.name, NAMEDATALEN);
+				entry->jsonpos = tmprecord.jsonpos;
+				entry->dbztype = tmprecord.dbztype;
+				entry->timerep = tmprecord.timerep;
+				entry->scale = tmprecord.scale;
+				elog(DEBUG1, "new jsonpos entry name=%s pos=%d dbztype=%d timerep=%d scale=%d",
+						entry->name, entry->jsonpos, entry->dbztype, entry->timerep, entry->scale);
 			}
 		}
+
 	}
 	return jsonposhash;
 }
@@ -1165,7 +1125,7 @@ destroyDBZDML(DBZ_DML * dmlinfo)
  * @return DBZ_DDL structure
  */
 static DBZ_DDL *
-parseDBZDDL(Jsonb * jb)
+parseDBZDDL(Jsonb * jb, bool isfirst, bool islast)
 {
 	Jsonb * ddlpayload = NULL;
 	JsonbIterator *it;
@@ -1173,6 +1133,7 @@ parseDBZDDL(Jsonb * jb)
 	JsonbIteratorToken r;
 	char * key = NULL;
 	char * value = NULL;
+	int j = 0;
 
 	DBZ_DDL * ddlinfo = (DBZ_DDL*) palloc0(sizeof(DBZ_DDL));
 	DBZ_DDL_COLUMN * ddlcol = NULL;
@@ -1182,9 +1143,24 @@ parseDBZDDL(Jsonb * jb)
 	initStringInfo(&strinfo);
 
 	/*
-	 * todo: we only support parsing 1 set of DDL for now using hardcoded
-	 * array index 0. Need to remove this limitation later
+	 * payload.ts_ms and payload.source.ts_ms- read only on the first or last
+	 * change event of a batch for statistic display purpose
 	 */
+	if (isfirst || islast)
+	{
+		getPathElementString(jb, "payload.ts_ms", &strinfo, true);
+		if (!strcasecmp(strinfo.data, "NULL"))
+			ddlinfo->dbz_ts_ms = 0;
+		else
+			ddlinfo->dbz_ts_ms = strtoull(strinfo.data, NULL, 10);
+
+		getPathElementString(jb, "payload.source.ts_ms", &strinfo, true);
+		if (!strcasecmp(strinfo.data, "NULL"))
+			ddlinfo->src_ts_ms = 0;
+		else
+			ddlinfo->src_ts_ms = strtoull(strinfo.data, NULL, 10);
+	}
+
     getPathElementString(jb, "payload.tableChanges.0.id", &strinfo, true);
     ddlinfo->id = pstrdup(strinfo.data);
 
@@ -1204,11 +1180,18 @@ parseDBZDDL(Jsonb * jb)
     	return NULL;
     }
 
+    /* once we are done checking ddlinfo->id, we turn it to lowercase */
+	for (j = 0; j < strlen(ddlinfo->id); j++)
+		ddlinfo->id[j] = (char) pg_tolower((unsigned char) ddlinfo->id[j]);
+
     if (!strcmp(ddlinfo->type, "CREATE") || !strcmp(ddlinfo->type, "ALTER"))
     {
 		/* fetch payload.tableChanges.0.table.columns as jsonb */
-		ddlpayload = getPathElementJsonb(jb, "payload.tableChanges.0.table.columns");
+    	Datum datum_elems[5] ={CStringGetTextDatum("payload"), CStringGetTextDatum("tableChanges"),
+    			CStringGetTextDatum("0"), CStringGetTextDatum("table"), CStringGetTextDatum("columns")};
+    	bool isnull;
 
+    	ddlpayload = DatumGetJsonbP(jsonb_get_element(jb, &datum_elems[0], 5, &isnull, false));
 		/*
 		 * following parser expects this json array named 'columns' from DBZ embedded:
 		 * "columns": [
@@ -1335,7 +1318,6 @@ parseDBZDDL(Jsonb * jb)
 				{
 					if (!strcmp(key, "name"))
 					{
-						int j = 0;
 						elog(DEBUG1, "consuming %s = %s", key, value);
 						ddlcol->name = pstrdup(value);
 
@@ -1360,7 +1342,6 @@ parseDBZDDL(Jsonb * jb)
 					}
 					if (!strcmp(key, "typeName"))
 					{
-						int j = 0;
 						elog(DEBUG1, "consuming %s = %s", key, value);
 						ddlcol->typeName = pstrdup(value);
 
@@ -2599,6 +2580,903 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 	elog(DEBUG1, "pgsql: %s ", pgddl->ddlquery);
 	return pgddl;
 }
+/*
+ * this function handles and expands a value with dbztype struct.
+ * We currently assumes it has strucutre like this:
+ *       "ID":
+ *       {
+ *			"scale": 0,
+ *			"value": "AQ=="
+ *		 }
+ * in Oracle's variable scale case. There are also other cases
+ * such as MySQL's geometry data, that we do not support yet.
+ */
+static void
+expand_struct_value(char * in, DBZ_DML_COLUMN_VALUE * colval, ConnectorType conntype)
+{
+	StringInfoData strinfo;
+	Datum jsonb_datum;
+	Jsonb *jb;
+
+	switch (conntype)
+	{
+		case TYPE_ORACLE:
+		{
+			/*
+			 * variable scale struct in Oracle looks like:
+			 * 	"ID":
+			 *	{
+			 *		"scale": 0,
+			 *		"value": "AQ=="
+			 *	}
+			 */
+			if (colval->timerep == DATA_VARIABLE_SCALE)
+			{
+				initStringInfo(&strinfo);
+				jsonb_datum = DirectFunctionCall1(jsonb_in, CStringGetDatum(in));
+				jb = DatumGetJsonbP(jsonb_datum);
+
+				getPathElementString(jb, "scale", &strinfo, true);
+				if (!strcasecmp(strinfo.data, "null"))
+					colval->scale = 0;
+				else
+					colval->scale = atoi(strinfo.data);
+
+				elog(DEBUG1, "colval->scale is set to %d", colval->scale);
+				getPathElementString(jb, "value", &strinfo, true);
+				if (!strcasecmp(strinfo.data, "null"))
+				{
+					elog(WARNING, "JSON has scale but with no value");
+				}
+				else
+				{
+					/* replace colval->value with the new value derived from the JSON */
+					pfree(colval->value);
+					colval->value = pstrdup(strinfo.data);
+
+					/* make "in" points to colval->value for subsequent processing */
+					in = colval->value;
+					elog(DEBUG1, "colval->value is set to %s", colval->value);
+				}
+				if(strinfo.data)
+					pfree(strinfo.data);
+			}
+			break;
+		}
+		case TYPE_MYSQL:
+		case TYPE_SQLSERVER:
+		default:
+		{
+			/* todo */
+			elog(WARNING, "struct parsing for mysql and sqlserver are TBD");
+			break;
+		}
+	}
+}
+static char *
+handle_base64_to_numeric_with_scale(const char * in, int scale)
+{
+	int newlen = 0, decimalpos = 0;
+	long long value = 0;
+	char buffer[32] = {0};
+	int tmpoutlen = pg_b64_dec_len(strlen(in));
+	unsigned char * tmpout = (unsigned char *) palloc0(tmpoutlen + 1);
+	char * out = NULL;
+
+	tmpoutlen = pg_b64_decode(in, strlen(in), (char *)tmpout, tmpoutlen);
+	value = derive_value_from_byte(tmpout, tmpoutlen);
+	snprintf(buffer, sizeof(buffer), "%lld", value);
+	if (scale > 0)
+	{
+		if (strlen(buffer) > scale)
+		{
+			/* ex: 123 -> 1.23*/
+			newlen = strlen(buffer) + 1;	/* plus 1 decimal */
+			out = (char *) palloc0(newlen + 1);	/* plus 1 terminating null */
+			decimalpos = strlen(buffer) - scale;
+			strncpy(out, buffer, decimalpos);
+			out[decimalpos] = '.';
+			strcpy(out + decimalpos + 1, buffer + decimalpos);
+		}
+		else if (strlen(buffer) == scale)
+		{
+			/* ex: 123 -> 0.123 */
+			newlen = strlen(buffer) + 2;	/* plus 1 decimal and 1 zero */
+			out = (char *) palloc0(newlen + 1);	/* plus 1 terminating null */
+			snprintf(out, newlen + 1, "0.%s", buffer);
+		}
+		else
+		{
+			/* ex: 1 -> 0.001*/
+			int scale_factor = 1, i = 0;
+			double res = 0.0;
+
+			/* plus 1 decimal and 1 zero and the zeros as a result of left shift */
+			newlen = strlen(buffer) + (scale - strlen(buffer)) + 2;
+			out = (char *) palloc0(newlen + 1);	/* plus 1 terminating null */
+
+			for (i = 0; i< scale; i++)
+				scale_factor *= 10;
+
+			res = (double)value / (double)scale_factor;
+			snprintf(out, newlen + 1, "%g", res);
+		}
+	}
+	else
+	{
+		newlen = strlen(buffer);	/* no decimal */
+		out = (char *) palloc0(newlen + 1);
+		strlcpy(out, buffer, newlen + 1);
+	}
+	return out;
+}
+
+static char *
+handle_string_to_numeric(const char * in, bool addquote)
+{
+	/*
+	 * no special handling to convert string to numeric. May fail to apply
+	 * if it contains non-numeric characters
+	 */
+	return (addquote ? escapeSingleQuote(in, addquote) : pstrdup(in));
+}
+
+static char *
+handle_base64_to_bit(const char * in, bool addquote, int typemod)
+{
+	int tmpoutlen = pg_b64_dec_len(strlen(in));
+	unsigned char * tmpout = (unsigned char *) palloc0(tmpoutlen);
+	char * out = NULL;
+
+	tmpoutlen = pg_b64_decode(in, strlen(in), (char*)tmpout, tmpoutlen);
+	if (addquote)
+	{
+		/* 8 bits per byte + 2 single quotes + b + terminating null */
+		char * tmp = NULL;
+		out = (char *) palloc0((tmpoutlen * 8) + 2 + 1 + 1);
+		tmp = out;
+		reverse_byte_array(tmpout, tmpoutlen);
+		strcat(tmp, "'b");
+		tmp += 2;
+		bytes_to_binary_string(tmpout, tmpoutlen, tmp);
+		trim_leading_zeros(tmp);
+		if (strlen(tmp) < typemod)
+			prepend_zeros(tmp, typemod - strlen(tmp));
+
+		strcat(tmp, "'");
+	}
+	else
+	{
+		/* 8 bits per byte + terminating null */
+		out = (char *) palloc0(tmpoutlen * 8 + 1);
+		reverse_byte_array(tmpout, tmpoutlen);
+		bytes_to_binary_string(tmpout, tmpoutlen, out);
+		trim_leading_zeros(out);
+		if (strlen(out) < typemod)
+			prepend_zeros(out, typemod - strlen(out));
+	}
+	pfree(tmpout);
+	return out;
+}
+
+static char *
+handle_string_to_bit(const char * in, bool addquote)
+{
+	/*
+	 * no special handling to convert string to bit. May fail to apply
+	 * if it contains non-bit characters
+	 */
+	return (addquote ? escapeSingleQuote(in, addquote) : pstrdup(in));
+}
+
+static char *
+handle_numeric_to_bit(const char * in, bool addquote)
+{
+	/*
+	 * no special handling to convert numeric to bit. May fail to apply
+	 * if it contains non-bit numerics
+	 */
+	return (addquote ? escapeSingleQuote(in, addquote) : pstrdup(in));
+}
+
+static char *
+construct_datestr(long long input, bool addquote, int timerep)
+{
+	char * out = NULL;
+	time_t dayssinceepoch = 0;
+	struct tm epoch = {0};
+	time_t epoch_time, target_time;
+	struct tm *target_date;
+	char datestr[10 + 1]; /* YYYY-MM-DD */
+
+	switch (timerep)
+	{
+		case TIME_DATE:
+			/* number of days since epoch, no conversion needed */
+			dayssinceepoch = (time_t) input;
+			break;
+		case TIME_TIMESTAMP:
+			/* number of milliseconds since epoch - convert to days since epoch */
+			dayssinceepoch = (time_t)(input / 86400000LL);
+			break;
+		case TIME_MICROTIMESTAMP:
+			/* number of microseconds since epoch - convert to days since epoch */
+			dayssinceepoch = (time_t)(input / 86400000000LL);
+			break;
+		case TIME_NANOTIMESTAMP:
+			/* number of microseconds since epoch - convert to days since epoch */
+			dayssinceepoch = (time_t)(input / 86400000000000LL);
+			break;
+		case TIME_UNDEF:
+		default:
+		{
+			/* todo: manually figure out the right timerep based on input */
+			set_shm_connector_errmsg(myConnectorId, "no time representation available to"
+					"process DATEOID value");
+			elog(ERROR, "no time representation available to process DATEOID value");
+		}
+	}
+
+	/* since 1970-01-01 */
+	epoch.tm_year = 70;
+	epoch.tm_mon = 0;
+	epoch.tm_mday = 1;
+
+	epoch_time = mktime(&epoch);
+	target_time = epoch_time + (dayssinceepoch * 24 * 60 * 60);
+
+	/*
+	 * Convert to struct tm in GMT timezone for now
+	 * todo: convert to local timezone?
+	 */
+	target_date = gmtime(&target_time);
+	strftime(datestr, sizeof(datestr), "%Y-%m-%d", target_date);
+
+	if (addquote)
+	{
+		out = (char *) palloc0(strlen(datestr) + 2 + 1);
+		snprintf(out, strlen(datestr) + 2 + 1, "'%s'", datestr);
+	}
+	else
+	{
+		out = (char *) palloc0(strlen(datestr) + 1);
+		strcpy(out, datestr);
+	}
+	return out;
+}
+
+static char *
+handle_base64_to_date(const char * in, bool addquote, int timerep)
+{
+	long long input = 0;
+	int tmpoutlen = pg_b64_dec_len(strlen(in));
+	unsigned char * tmpout = (unsigned char *) palloc0(tmpoutlen + 1);
+
+	tmpoutlen = pg_b64_decode(in, strlen(in), (char *)tmpout, tmpoutlen);
+	input = derive_value_from_byte(tmpout, tmpoutlen);
+	return construct_datestr(input, addquote, timerep);
+}
+
+static char *
+handle_numeric_to_date(const char * in, bool addquote, int timerep)
+{
+	long long input = atoll(in);
+
+	return construct_datestr(input, addquote, timerep);
+}
+
+static char *
+handle_string_to_date(const char * in, bool addquote)
+{
+	/*
+	 * no special handling to convert string to date. May fail to apply
+	 * if it contains unsupported date format
+	 */
+	return (addquote ? escapeSingleQuote(in, addquote) : pstrdup(in));
+}
+
+static char *
+construct_timestampstr(long long input, bool addquote, int timerep, int typemod)
+{
+	char * out = NULL;
+	time_t seconds = 0, remains = 0;
+	struct tm *tm_info;
+	char timestamp[26 + 1] = {0};	/* yyyy-MM-dd hh:mm:ss.xxxxxx */
+
+	switch (timerep)
+	{
+		case TIME_TIMESTAMP:
+			/* milliseconds since epoch - convert to seconds since epoch */
+			seconds = (time_t)(input / 1000);
+			remains = input % 1000;
+			break;
+		case TIME_MICROTIMESTAMP:
+			/* microseconds since epoch - convert to seconds since epoch */
+			seconds = (time_t)(input / 1000 / 1000);
+			remains = input % 1000000;
+			break;
+		case TIME_NANOTIMESTAMP:
+			/* microseconds since epoch - convert to seconds since epoch */
+			seconds = (time_t)(input / 1000 / 1000 / 1000);
+			remains = input % 1000000000;
+			break;
+		case TIME_UNDEF:
+		default:
+		{
+			/* todo: manually figure out the right timerep based on input */
+			set_shm_connector_errmsg(myConnectorId, "no time representation available to"
+					"process TIMESTAMPOID value");
+			elog(ERROR, "no time representation available to process TIMESTAMPOID value");
+		}
+	}
+	tm_info = gmtime(&seconds);
+
+	if (typemod > 0)
+	{
+		/*
+		 * it means we could include additional precision to timestamp. PostgreSQL
+		 * supports up to 6 digits of precision. We always put 6, PostgreSQL will
+		 * round it up or down as defined by table schema
+		 */
+		snprintf(timestamp, sizeof(timestamp), "%04d-%02d-%02d %02d:%02d:%02d.%06ld",
+				tm_info->tm_year + 1900,
+				tm_info->tm_mon + 1,
+				tm_info->tm_mday,
+				tm_info->tm_hour,
+				tm_info->tm_min,
+				tm_info->tm_sec,
+				remains);
+	}
+	else
+	{
+		snprintf(timestamp, sizeof(timestamp), "%04d-%02d-%02d %02d:%02d:%02d",
+				tm_info->tm_year + 1900,
+				tm_info->tm_mon + 1,
+				tm_info->tm_mday,
+				tm_info->tm_hour,
+				tm_info->tm_min,
+				tm_info->tm_sec);
+	}
+
+	if (addquote)
+	{
+		out = (char *) palloc0(strlen(timestamp) + 2 + 1);
+		snprintf(out, strlen(timestamp) + 2 + 1, "'%s'", timestamp);
+	}
+	else
+	{
+		out = (char *) palloc0(strlen(timestamp) + 1);
+		strcpy(out, timestamp);
+	}
+	return out;
+}
+
+static char *
+handle_base64_to_timestamp(const char * in, bool addquote, int timerep, int typemod)
+{
+	long long input = 0;
+	int tmpoutlen = pg_b64_dec_len(strlen(in));
+	unsigned char * tmpout = (unsigned char *) palloc0(tmpoutlen + 1);
+
+	tmpoutlen = pg_b64_decode(in, strlen(in), (char *)tmpout, tmpoutlen);
+	input = derive_value_from_byte(tmpout, tmpoutlen);
+	return construct_timestampstr(input, addquote, timerep, typemod);
+}
+
+static char *
+handle_numeric_to_timestamp(const char * in, bool addquote, int timerep, int typemod)
+{
+	long long input = atoll(in);
+
+	return construct_timestampstr(input, addquote, timerep, typemod);
+}
+
+static char *
+handle_string_to_timestamp(const char * in, bool addquote)
+{
+    size_t len = strlen(in);
+    bool add_tz = (len > 0 && in[len - 1] == 'Z') ? true : false;
+    size_t new_len = len + (add_tz ? 5 : 0);
+    char * out = NULL;
+    char * t = NULL;
+
+    /* todo: we assume input is already in correct timestamp format.
+     * We may need to check that is true prior to processing
+     */
+	if (addquote)
+	{
+		out = (char *) palloc0(new_len + 2 + 1);
+		out[0] = '\'';
+		strcpy(&out[1], in);
+		t = strchr(out, 'T');
+		if (t)
+			*t = ' ';
+
+		if (add_tz)
+			strcpy(&out[len], "+00:00");
+	}
+	else
+	{
+		out = (char *) palloc0(new_len + 1);
+		strcpy(out, in);
+		t = strchr(out, 'T');
+		if (t)
+			*t = ' ';
+
+		if (add_tz)
+			strcpy(&out[len - 1], "+00:00");
+	}
+    return out;
+}
+
+static char *
+construct_timetr(long long input, bool addquote, int timerep, int typemod)
+{
+	time_t seconds = 0, remains = 0;
+	char time[15 + 1] = {0};	/* hh:mm:ss.xxxxxx */
+	char * out = NULL;
+
+	switch(timerep)
+	{
+		case TIME_TIME:
+			/* milliseconds since midnight - convert to seconds since midnight */
+			seconds = (time_t)(input / 1000);
+			remains = input % 1000;
+			break;
+		case TIME_MICROTIME:
+			/* microseconds since midnight - convert to seconds since midnight */
+			seconds = (time_t)(input / 1000 / 1000);
+			remains = input % 1000000;
+			break;
+		case TIME_NANOTIME:
+			/* nanoseconds since midnight - convert to seconds since midnight */
+			seconds = (time_t)(input / 1000 / 1000 / 1000);
+			remains = input % 1000000000;
+			break;
+		case TIME_UNDEF:
+		default:
+		{
+			/* todo: manually figure out the right timerep based on input */
+			set_shm_connector_errmsg(myConnectorId, "no time representation available to"
+					"process TIMEOID value");
+			elog(ERROR, "no time representation available to process TIMEOID value");
+		}
+	}
+	if (typemod > 0)
+	{
+		snprintf(time, sizeof(time), "%02d:%02d:%02d.%06ld",
+				(int)((seconds / (60 * 60)) % 24),
+				(int)((seconds / 60) % 60),
+				(int)(seconds % 60),
+				remains);
+	}
+	else
+	{
+		snprintf(time, sizeof(time), "%02d:%02d:%02d",
+				(int)((seconds / (60 * 60)) % 24),
+				(int)((seconds / 60) % 60),
+				(int)(seconds % 60));
+	}
+
+	if (addquote)
+	{
+		out = (char *) palloc0(strlen(time) + 2 + 1);
+		snprintf(out, strlen(time) + 2 + 1, "'%s'", time);
+	}
+	else
+	{
+		out = (char *) palloc0(strlen(time) + 1);
+		strcpy(out, time);
+	}
+	return out;
+}
+
+static char *
+handle_base64_to_time(const char * in, bool addquote, int timerep, int typemod)
+{
+	long long input = 0;
+	int tmpoutlen = pg_b64_dec_len(strlen(in));
+	unsigned char * tmpout = (unsigned char *) palloc0(tmpoutlen + 1);
+
+	tmpoutlen = pg_b64_decode(in, strlen(in), (char *)tmpout, tmpoutlen);
+	input = derive_value_from_byte(tmpout, tmpoutlen);
+	return construct_timetr(input, addquote, timerep, typemod);
+}
+
+static char *
+handle_numeric_to_time(const char * in, bool addquote, int timerep, int typemod)
+{
+	unsigned long long input = atoll(in);
+
+	return construct_timetr(input, addquote, timerep, typemod);
+}
+
+static char *
+handle_string_to_time(const char * in, bool addquote)
+{
+	/*
+	 * no special handling to convert string to time. May fail to apply
+	 * if it contains non-time characters
+	 */
+	return (addquote ? escapeSingleQuote(in, addquote) : pstrdup(in));
+}
+
+static char *
+handle_base64_to_byte(const char * in, bool addquote)
+{
+	int tmpoutlen = pg_b64_dec_len(strlen(in));
+	unsigned char * tmpout = (unsigned char *) palloc0(tmpoutlen);
+	char * out = NULL;
+
+	tmpoutlen = pg_b64_decode(in, strlen(in), (char*)tmpout, tmpoutlen);
+	if (addquote)
+	{
+		/* hexstring + 2 single quotes + '\x' + terminating null */
+		out = (char *) palloc0((tmpoutlen * 2) + 2 + 2 + 1);
+		bytearray_to_escaped_string(tmpout, tmpoutlen, out);
+	}
+	else
+	{
+		/* bytearray + terminating null */
+		out = (char *) palloc0(tmpoutlen + 1);
+		memcpy(out, tmpout, tmpoutlen);
+	}
+	pfree(tmpout);
+	return out;
+}
+
+static char *
+handle_string_to_byte(const char * in, bool addquote)
+{
+	/*
+	 * no special handling to convert string to byte. May fail to apply
+	 * if it contains non-byte characters
+	 */
+	return (addquote ? escapeSingleQuote(in, addquote) : pstrdup(in));
+}
+
+static char *
+handle_numeric_to_byte(const char * in, bool addquote)
+{
+	/*
+	 * no special handling to convert numeric to byte. May fail to apply
+	 * if it contains non-byte numerics
+	 */
+	return (addquote ? escapeSingleQuote(in, addquote) : pstrdup(in));
+}
+
+static char *
+construct_intervalstr(long long input, bool addquote, int timerep, int typemod)
+{
+	time_t seconds = 0, remains = 0;
+	char inter[64 + 1] = {0};
+	int fields;
+	char * out = NULL;
+
+	switch (timerep)
+	{
+		case TIME_MICRODURATION:
+		{
+			/* interval in microseconds - convert to seconds */
+			seconds = (time_t)(input / 1000 / 1000);
+			remains = input % 1000000;
+			break;
+		}
+		default:
+		{
+			/* todo: manually figure out the right timerep based on input */
+			set_shm_connector_errmsg(myConnectorId, "no interval representation available to"
+					"process INTERVALOID value");
+			elog(ERROR, "no interval representation available to process INTERVALOID value");
+		}
+	}
+
+	/* we need to figure out interval's range and precision from colval->typemod */
+	fields = INTERVAL_RANGE(typemod);
+	switch (fields)
+	{
+		case INTERVAL_MASK(YEAR):	/* year */
+			snprintf(inter, sizeof(inter), "%d years",
+					(int) seconds / SECS_PER_YEAR);
+			break;
+		case INTERVAL_MASK(MONTH):	/* month */
+			snprintf(inter, sizeof(inter), "%d months",
+					(int) seconds / (SECS_PER_DAY * DAYS_PER_MONTH));
+			break;
+		case INTERVAL_MASK(DAY):	/* day */
+			snprintf(inter, sizeof(inter), "%d days",
+					(int) seconds / SECS_PER_DAY);
+			break;
+		case INTERVAL_MASK(HOUR):	/* hour */
+			snprintf(inter, sizeof(inter), "%d days",
+					(int) seconds / SECS_PER_HOUR);
+			break;
+		case INTERVAL_MASK(MINUTE):	/* minute */
+			snprintf(inter, sizeof(inter), "%d days",
+					(int) seconds / SECS_PER_MINUTE);
+			break;
+		case INTERVAL_MASK(SECOND):	/* second */
+			snprintf(inter, sizeof(inter), "%d seconds",
+					(int) seconds);
+			break;
+		case INTERVAL_MASK(YEAR) | INTERVAL_MASK(MONTH):	/* year to month */
+			snprintf(inter, sizeof(inter), "%d years %d months",
+					(int) seconds / SECS_PER_YEAR,
+					(int) (seconds / (SECS_PER_DAY * DAYS_PER_MONTH)) % MONTHS_PER_YEAR);
+			break;
+		case INTERVAL_MASK(DAY) | INTERVAL_MASK(HOUR):		/* day to hour */
+			snprintf(inter, sizeof(inter), "%d days %d hours",
+					(int) seconds / SECS_PER_DAY,
+					(int) (seconds / SECS_PER_HOUR) % HOURS_PER_DAY);
+			break;
+		case INTERVAL_MASK(DAY) | INTERVAL_MASK(HOUR) | INTERVAL_MASK(MINUTE):	/* day to minute */
+			snprintf(inter, sizeof(inter), "%d days %02d:%02d",
+					(int) seconds / SECS_PER_DAY,
+					(int) (seconds / SECS_PER_HOUR) % HOURS_PER_DAY,
+					(int) (seconds / SECS_PER_MINUTE) % MINS_PER_HOUR);
+			break;
+		case INTERVAL_MASK(DAY) | INTERVAL_MASK(HOUR) | INTERVAL_MASK(MINUTE) | INTERVAL_MASK(SECOND):	/* day to second */
+			snprintf(inter, sizeof(inter), "%d days %02d:%02d:%02d.%06d",
+					(int) seconds / SECS_PER_DAY,
+					(int) (seconds / SECS_PER_HOUR) % HOURS_PER_DAY,
+					(int) (seconds / SECS_PER_MINUTE) % MINS_PER_HOUR,
+					(int) (seconds % SECS_PER_MINUTE) % SECS_PER_MINUTE,
+					(int) remains);
+			break;
+		case INTERVAL_MASK(HOUR) | INTERVAL_MASK(MINUTE):	/* hour to minute */
+			snprintf(inter, sizeof(inter), "%02d:%02d",
+					(int) seconds / SECS_PER_HOUR,
+					(int) (seconds / SECS_PER_MINUTE) % MINS_PER_HOUR);
+			break;
+		case INTERVAL_MASK(HOUR) | INTERVAL_MASK(MINUTE) | INTERVAL_MASK(SECOND):	/* hour to second */
+			snprintf(inter, sizeof(inter), "%02d:%02d:%02d.%06d",
+					(int) (seconds / SECS_PER_HOUR),
+					(int) (seconds / SECS_PER_MINUTE) % MINS_PER_HOUR,
+					(int) (seconds % SECS_PER_MINUTE) % SECS_PER_MINUTE,
+					(int) remains);
+			break;
+		case INTERVAL_MASK(MINUTE) | INTERVAL_MASK(SECOND):	/* minute to second */
+			snprintf(inter, sizeof(inter), "%02d:%02d.%06d",
+					(int) seconds / SECS_PER_MINUTE,
+					(int) (seconds % SECS_PER_MINUTE) % SECS_PER_MINUTE,
+					(int) remains);
+			break;
+		case INTERVAL_FULL_RANGE:	/* full range */
+			snprintf(inter, sizeof(inter), "%d years %d months % days %02d:%02d:%02d.%06d",
+					(int) seconds / SECS_PER_YEAR,
+					(int) (seconds / (SECS_PER_DAY * DAYS_PER_MONTH)) % MONTHS_PER_YEAR,
+					(int) (seconds / SECS_PER_DAY) % (SECS_PER_DAY * DAYS_PER_MONTH),
+					(int) (seconds / SECS_PER_HOUR) % HOURS_PER_DAY,
+					(int) (seconds / SECS_PER_MINUTE) % MINS_PER_HOUR,
+					(int) (seconds % SECS_PER_MINUTE) % SECS_PER_MINUTE,
+					(int) remains);
+			break;
+		default:
+		{
+			set_shm_connector_errmsg(myConnectorId, "invalid INTERVAL typmod");
+			elog(ERROR, "invalid INTERVAL typmod: 0x%x", typemod);
+			break;
+		}
+	}
+	if (addquote)
+	{
+		out = escapeSingleQuote(inter, addquote);
+	}
+	else
+	{
+		out = (char *) palloc0(strlen(inter) + 1);
+		memcpy(out, inter, strlen(inter));
+	}
+	return out;
+}
+
+static char *
+handle_base64_to_interval(const char * in, bool addquote, int timerep, int typemod)
+{
+	int tmpoutlen = pg_b64_dec_len(strlen(in));
+	unsigned char * tmpout = (unsigned char *) palloc0(tmpoutlen);
+	long long input = 0;
+
+	tmpoutlen = pg_b64_decode(in, strlen(in), (char *)tmpout, tmpoutlen);
+	input = derive_value_from_byte(tmpout, tmpoutlen);
+	return construct_intervalstr(input, addquote, timerep, typemod);
+}
+
+static char *
+handle_numeric_to_interval(const char * in, bool addquote, int timerep, int typemod)
+{
+	long long input = atoll(in);
+
+	return construct_intervalstr(input, addquote, timerep, typemod);
+}
+
+static char *
+handle_string_to_interval(const char * in, bool addquote)
+{
+	/*
+	 * no special handling to convert string to interval. May fail to apply
+	 * if it contains incorrect interval format
+	 */
+	return (addquote ? escapeSingleQuote(in, addquote) : pstrdup(in));
+}
+
+static char *
+handle_data_by_type_category(char * in, DBZ_DML_COLUMN_VALUE * colval, ConnectorType conntype, bool addquote)
+{
+	char * out = NULL;
+	elog(DEBUG1, "%s: col %s timerep %d dbztype %d category %c typname %s",__FUNCTION__,
+			colval->name, colval->timerep, colval->dbztype, colval->typcategory, colval->typname);
+	switch (colval->typcategory)
+	{
+		case TYPCATEGORY_BOOLEAN:
+		case TYPCATEGORY_NUMERIC:
+		{
+			switch (colval->dbztype)
+			{
+				case DBZTYPE_STRUCT:
+				{
+					expand_struct_value(in, colval, conntype);
+					out = handle_base64_to_numeric_with_scale(colval->value, colval->scale);
+					break;
+				}
+				case DBZTYPE_BYTES:
+				{
+					out = handle_base64_to_numeric_with_scale(in, colval->scale);
+					break;
+				}
+				case DBZTYPE_STRING:
+				{
+					/* no special handling for now. todo */
+					out = pstrdup(in);
+					break;
+				}
+				default:
+				{
+					out = pstrdup(in);
+					break;
+				}
+			}
+			break;
+		}
+		case TYPCATEGORY_DATETIME:
+		{
+			/*
+			 * DATE, TIME or IMESTAMP, we cannot possibly know at this point, so we assume the
+			 * type name would contain descriptive words to help us identify. It may not be 100%
+			 * accurate, so it is best to define a transform function after this stage to
+			 * correctly process it. todo: we can expose a new GUC to allow user to configure
+			 * non-native data type and tell synchdb how to process them
+			 */
+			switch (colval->dbztype)
+			{
+				case DBZTYPE_STRUCT:
+				{
+					expand_struct_value(in, colval, conntype);
+					if (strstr(colval->typname, "date"))
+						out = handle_base64_to_date(colval->value, addquote, colval->timerep);
+					else if (strstr(colval->typname, "timestamp"))
+						out = handle_base64_to_timestamp(colval->value, addquote, colval->timerep, colval->typemod);
+					else
+						out = handle_base64_to_time(colval->value, addquote, colval->timerep, colval->typemod);
+					break;
+				}
+				case DBZTYPE_BYTES:
+				{
+					if (strstr(colval->typname, "date"))
+						out = handle_base64_to_date(in, addquote, colval->timerep);
+					else if (strstr(colval->typname, "timestamp"))
+						out = handle_base64_to_timestamp(in, addquote, colval->timerep, colval->typemod);
+					else
+						out = handle_base64_to_time(in, addquote, colval->timerep, colval->typemod);
+					break;
+				}
+				case DBZTYPE_STRING:
+				{
+					if (strstr(colval->typname, "timestamp") || strstr(colval->typname, "timetz"))
+					{
+						out = handle_string_to_timestamp(in, addquote);
+					}
+					else
+					{
+						if (addquote)
+							out = escapeSingleQuote(in, addquote);
+						else
+							out = pstrdup(in);
+					}
+					break;
+				}
+				default:
+				{
+					if (strstr(colval->typname, "date"))
+						out = handle_numeric_to_date(in, addquote, colval->timerep);
+					else if (strstr(colval->typname, "timestamp"))
+						out = handle_numeric_to_timestamp(in, addquote, colval->timerep, colval->typemod);
+					else
+						out = handle_numeric_to_time(in, addquote, colval->timerep, colval->typemod);
+					break;
+				}
+			}
+			break;
+		}
+		case TYPCATEGORY_BITSTRING:
+		{
+			switch (colval->dbztype)
+			{
+				case DBZTYPE_STRUCT:
+				{
+					expand_struct_value(in, colval, conntype);
+					out = handle_base64_to_bit(colval->value, addquote, colval->typemod);
+					break;
+				}
+				case DBZTYPE_BYTES:
+				{
+					out = handle_base64_to_bit(in, addquote, colval->typemod);
+					break;
+				}
+				case DBZTYPE_STRING:
+				default:
+				{
+					if (addquote)
+						out = escapeSingleQuote(in, addquote);
+					else
+						out = pstrdup(in);
+					break;
+				}
+			}
+			break;
+		}
+		case TYPCATEGORY_TIMESPAN:
+		{
+			switch (colval->dbztype)
+			{
+				case DBZTYPE_STRUCT:
+				{
+					expand_struct_value(in, colval, conntype);
+					out = handle_base64_to_interval(colval->value, addquote, colval->timerep, colval->typemod);
+					break;
+				}
+				case DBZTYPE_BYTES:
+				{
+					out = handle_base64_to_interval(in, addquote, colval->timerep, colval->typemod);
+					break;
+				}
+				case DBZTYPE_STRING:
+				{
+					if (addquote)
+						out = escapeSingleQuote(in, addquote);
+					else
+						out = pstrdup(in);
+					break;
+				}
+				default:
+				{
+					out = handle_numeric_to_interval(in, addquote, colval->timerep, colval->typemod);
+					break;
+				}
+			}
+			break;
+		}
+		case TYPCATEGORY_USER:
+		case TYPCATEGORY_ENUM:
+		case TYPCATEGORY_GEOMETRIC:
+		case TYPCATEGORY_STRING:
+		default:
+		{
+			/* todo */
+			elog(DEBUG1, "no special handling for category %c", colval->typcategory);
+			if (addquote)
+			{
+				out = escapeSingleQuote(in, addquote);
+			}
+			else
+			{
+				out = pstrdup(in);
+			}
+			break;
+		}
+	}
+	return out;
+}
 
 /*
  * processDataByType
@@ -2619,58 +3497,8 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 	if (!strcasecmp(in, "NULL"))
 		return NULL;
 
-	/*
-	 * in Oracle connector, the "in" value may be expressed as JSON with scale
-	 * value inside if the data type is "variable scale". Check if this is the
-	 * case and handle it accordingly
-	 */
-	if (type == TYPE_ORACLE)
-	{
-		/* if input value is a JSON and variabel scale is set */
-		if (in[0] == '{' && in[strlen(in) - 1] == '}' &&
-				colval->timerep == DATA_VARIABLE_SCALE)
-		{
-			StringInfoData strinfo;
-			Datum jsonb_datum;
-			Jsonb *jb;
-
-			elog(DEBUG1, "handling value expressed in JSON: %s", colval->value);
-
-			initStringInfo(&strinfo);
-			jsonb_datum = DirectFunctionCall1(jsonb_in, CStringGetDatum(in));
-			jb = DatumGetJsonbP(jsonb_datum);
-
-			getPathElementString(jb, "scale", &strinfo, true);
-			if (!strcasecmp(strinfo.data, "null"))
-				colval->scale = 0;
-			else
-				colval->scale = atoi(strinfo.data);
-
-			elog(DEBUG1, "colval->scale is set to %d", colval->scale);
-			getPathElementString(jb, "value", &strinfo, true);
-			if (!strcasecmp(strinfo.data, "null"))
-			{
-				elog(WARNING, "JSON has scale but with no value");
-			}
-			else
-			{
-				/* replace colval->value with the new value derived from the JSON */
-				pfree(colval->value);
-				colval->value = pstrdup(strinfo.data);
-
-				/* make "in" points to colval->value for subsequent processing */
-				in = colval->value;
-				elog(DEBUG1, "colval->value is set to %s", colval->value);
-			}
-
-			if(strinfo.data)
-				pfree(strinfo.data);
-		}
-	}
-	/*
-	 * handle the "in" value based on the data types created on the PostgreSQL
-	 * side
-	 */
+	elog(DEBUG1, "%s: col %s typoid %d timerep %d dbztype %d category %c",__FUNCTION__,
+			colval->name, colval->datatype, colval->timerep, colval->dbztype, colval->typcategory);
 	switch(colval->datatype)
 	{
 		case BOOLOID:
@@ -2679,621 +3507,231 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 		case INT4OID:
 		case FLOAT8OID:
 		case FLOAT4OID:
-		{
-			/*
-			 * Oracle could express numeric values with variable scale. If this is
-			 * the case, handle it accordingly.
-			 */
-			if (type == TYPE_ORACLE && colval->timerep == DATA_VARIABLE_SCALE)
-			{
-				int newlen = 0, decimalpos = 0;
-				long value = 0;
-				char buffer[32] = {0};
-				int tmpoutlen = pg_b64_dec_len(strlen(in));
-				unsigned char * tmpout = (unsigned char *) palloc0(tmpoutlen + 1);
-
-				tmpoutlen = pg_b64_decode(in, strlen(in), (char *)tmpout, tmpoutlen);
-
-				value = derive_value_from_byte(tmpout, tmpoutlen);
-
-				snprintf(buffer, sizeof(buffer), "%ld", value);
-				if (colval->scale > 0)
-				{
-					if (strlen(buffer) > colval->scale)
-					{
-						/* ex: 123 -> 1.23*/
-						newlen = strlen(buffer) + 1;	/* plus 1 decimal */
-						out = (char *) palloc0(newlen + 1);	/* plus 1 terminating null */
-						decimalpos = strlen(buffer) - colval->scale;
-						strncpy(out, buffer, decimalpos);
-						out[decimalpos] = '.';
-						strcpy(out + decimalpos + 1, buffer + decimalpos);
-					}
-					else if (strlen(buffer) == colval->scale)
-					{
-						/* ex: 123 -> 0.123 */
-						newlen = strlen(buffer) + 2;	/* plus 1 decimal and 1 zero */
-						out = (char *) palloc0(newlen + 1);	/* plus 1 terminating null */
-						snprintf(out, newlen + 1, "0.%s", buffer);
-					}
-					else
-					{
-						/* ex: 1 -> 0.001*/
-						int scale_factor = 1, i = 0;
-						double res = 0.0;
-
-						/* plus 1 decimal and 1 zero and the zeros as a result of left shift */
-						newlen = strlen(buffer) + (colval->scale - strlen(buffer)) + 2;
-						out = (char *) palloc0(newlen + 1);	/* plus 1 terminating null */
-
-						for (i = 0; i< colval->scale; i++)
-							scale_factor *= 10;
-
-						res = (double)value / (double)scale_factor;
-						snprintf(out, newlen + 1, "%g", res);
-					}
-				}
-				else
-				{
-					newlen = strlen(buffer);	/* no decimal */
-					out = (char *) palloc0(newlen + 1);
-					strlcpy(out, buffer, newlen + 1);
-				}
-			}
-			else
-			{
-				/* no extra processing for nunmeric types in other connectors */
-				out = (char *) palloc0(strlen(in) + 1);
-				strlcpy(out, in, strlen(in) + 1);
-			}
-			break;
-		}
-		case MONEYOID:
 		case NUMERICOID:
+		case MONEYOID:
 		{
-			int newlen = 0, decimalpos = 0;
-			long value = 0;
-			char buffer[32] = {0};
-			int tmpoutlen = pg_b64_dec_len(strlen(in));
-			unsigned char * tmpout = (unsigned char *) palloc0(tmpoutlen + 1);
+			/* special handling for MONEYOID to use scale 4 to account for cents */
+			if (colval->datatype == MONEYOID)
+				colval->scale = 4;
 
-			tmpoutlen = pg_b64_decode(in, strlen(in), (char *)tmpout, tmpoutlen);
-
-			value = derive_value_from_byte(tmpout, tmpoutlen);
-
-			snprintf(buffer, sizeof(buffer), "%ld", value);
-			if (colval->scale > 0)
+			switch (colval->dbztype)
 			{
-				if (strlen(buffer) > colval->scale)
+				case DBZTYPE_STRUCT:
 				{
-					/* ex: 123 -> 1.23*/
-					newlen = strlen(buffer) + 1;	/* plus 1 decimal */
-					out = (char *) palloc0(newlen + 1);	/* plus 1 terminating null */
-					decimalpos = strlen(buffer) - colval->scale;
-					strncpy(out, buffer, decimalpos);
-					out[decimalpos] = '.';
-					strcpy(out + decimalpos + 1, buffer + decimalpos);
+					expand_struct_value(in, colval, type);
+					out = handle_base64_to_numeric_with_scale(colval->value, colval->scale);
+					break;
 				}
-				else if (strlen(buffer) == colval->scale)
+				case DBZTYPE_BYTES:
 				{
-					/* ex: 123 -> 0.123 */
-					newlen = strlen(buffer) + 2;	/* plus 1 decimal and 1 zero */
-					out = (char *) palloc0(newlen + 1);	/* plus 1 terminating null */
-					snprintf(out, newlen + 1, "0.%s", buffer);
+					out = handle_base64_to_numeric_with_scale(in, colval->scale);
+					break;
 				}
-				else
+				case DBZTYPE_STRING:
 				{
-					/* ex: 1 -> 0.001*/
-					int scale_factor = 1, i = 0;
-					double res = 0.0;
-
-					/* plus 1 decimal and 1 zero and the zeros as a result of left shift */
-					newlen = strlen(buffer) + (colval->scale - strlen(buffer)) + 2;
-					out = (char *) palloc0(newlen + 1);	/* plus 1 terminating null */
-
-					for (i = 0; i< colval->scale; i++)
-						scale_factor *= 10;
-
-					res = (double)value / (double)scale_factor;
-					snprintf(out, newlen + 1, "%g", res);
+					out = handle_string_to_numeric(in, addquote);
+					break;
+				}
+				default:
+				{
+					/* numeric to numeric, just use as is */
+					out = pstrdup(in);
+					break;
 				}
 			}
-			else
-			{
-				/* make scale = 4 to account for cents */
-				if (colval->datatype == MONEYOID)
-				{
-					colval->scale = 4;
-					if (strlen(buffer) > colval->scale)
-					{
-						newlen = strlen(buffer) + 1;	/* plus 1 decimal */
-						out = (char *) palloc0(newlen + 1);	/* plus 1 terminating null */
-
-						decimalpos = strlen(buffer) - colval->scale;
-						strncpy(out, buffer, decimalpos);
-						out[decimalpos] = '.';
-						strcpy(out + decimalpos + 1, buffer + decimalpos);
-					}
-					else if (strlen(buffer) == colval->scale)
-					{
-						/* ex: 123 -> 0.123 */
-						newlen = strlen(buffer) + 2;	/* plus 1 decimal and 1 zero */
-						out = (char *) palloc0(newlen + 1);	/* plus 1 terminating null */
-						snprintf(out, newlen + 1, "0.%s", buffer);
-					}
-					else
-					{
-						/* ex: 1 -> 0.001*/
-						int scale_factor = 1, i = 0;
-						double res = 0.0;
-
-						/* plus 1 decimal and 1 zero and the zeros as a result of left shift */
-						newlen = strlen(buffer) + (colval->scale - strlen(buffer)) + 2;
-						out = (char *) palloc0(newlen + 1);	/* plus 1 terminating null */
-
-						for (i = 0; i< colval->scale; i++)
-							scale_factor *= 10;
-
-						res = (double)value / (double)scale_factor;
-						snprintf(out, newlen + 1, "%g", res);
-					}
-
-				}
-				else
-				{
-					newlen = strlen(buffer);	/* no decimal */
-					out = (char *) palloc0(newlen + 1);
-					strlcpy(out, buffer, newlen + 1);
-				}
-			}
-			pfree(tmpout);
 			break;
 		}
 		case BPCHAROID:
 		case TEXTOID:
 		case VARCHAROID:
 		case CSTRINGOID:
-		case TIMESTAMPTZOID:
 		case JSONBOID:
 		case UUIDOID:
 		{
 			if (addquote)
-			{
 				out = escapeSingleQuote(in, addquote);
-			}
 			else
-			{
-				out = (char *) palloc0(strlen(in) + 1);
-				strlcpy(out, in, strlen(in) + 1);
-			}
+				out = pstrdup(in);
 			break;
 		}
 		case VARBITOID:
 		case BITOID:
 		{
-			int tmpoutlen = pg_b64_dec_len(strlen(in));
-			unsigned char * tmpout = (unsigned char *) palloc0(tmpoutlen);
-
-			tmpoutlen = pg_b64_decode(in, strlen(in), (char*)tmpout, tmpoutlen);
-			if (addquote)
+			switch (colval->dbztype)
 			{
-				/* 8 bits per byte + 2 single quotes + b + terminating null */
-				char * tmp = NULL;
-				out = (char *) palloc0((tmpoutlen * 8) + 2 + 1 + 1);
-				tmp = out;
-				reverse_byte_array(tmpout, tmpoutlen);
-				strcat(tmp, "'b");
-				tmp += 2;
-				bytes_to_binary_string(tmpout, tmpoutlen, tmp);
-				trim_leading_zeros(tmp);
-				if (strlen(tmp) < colval->typemod)
-					prepend_zeros(tmp, colval->typemod - strlen(tmp));
-
-				strcat(tmp, "'");
+				case DBZTYPE_STRUCT:
+				{
+					expand_struct_value(in, colval, type);
+					out = handle_base64_to_bit(colval->value, addquote, colval->typemod);
+					break;
+				}
+				case DBZTYPE_BYTES:
+				{
+					out = handle_base64_to_bit(in, addquote, colval->typemod);
+					break;
+				}
+				case DBZTYPE_STRING:
+				{
+					out = handle_string_to_bit(in, addquote);
+					break;
+				}
+				default:
+				{
+					out = handle_numeric_to_bit(in, addquote);
+					break;
+				}
 			}
-			else
-			{
-				/* 8 bits per byte + terminating null */
-				out = (char *) palloc0(tmpoutlen * 8 + 1);
-				reverse_byte_array(tmpout, tmpoutlen);
-				bytes_to_binary_string(tmpout, tmpoutlen, out);
-				trim_leading_zeros(out);
-				if (strlen(out) < colval->typemod)
-					prepend_zeros(out, colval->typemod - strlen(out));
-			}
-			pfree(tmpout);
-
 			break;
 		}
 		case DATEOID:
 		{
-			/*
-			 * we need to process these time related values based on the timerep
-			 * that has been determined during the parsing stage
-			 */
-			long long input = atoll(in);
-			time_t dayssinceepoch = 0;
-			struct tm epoch = {0};
-			time_t epoch_time, target_time;
-			struct tm *target_date;
-			char datestr[10 + 1]; /* YYYY-MM-DD */
-
-			switch (colval->timerep)
+			switch (colval->dbztype)
 			{
-				case TIME_DATE:
-					/* number of days since epoch, no conversion needed */
-					dayssinceepoch = (time_t) input;
+				case DBZTYPE_STRUCT:
+				{
+					expand_struct_value(in, colval, type);
+					out = handle_base64_to_date(colval->value, addquote, colval->timerep);
 					break;
-				case TIME_TIMESTAMP:
-					/* number of milliseconds since epoch - convert to days since epoch */
-					dayssinceepoch = (time_t)(input / 86400000LL);
+				}
+				case DBZTYPE_BYTES:
+				{
+					out = handle_base64_to_date(in, addquote, colval->timerep);
 					break;
-				case TIME_MICROTIMESTAMP:
-					/* number of microseconds since epoch - convert to days since epoch */
-					dayssinceepoch = (time_t)(input / 86400000000LL);
+				}
+				case DBZTYPE_STRING:
+				{
+					out = handle_string_to_date(in, addquote);
 					break;
-				case TIME_NANOTIMESTAMP:
-					/* number of microseconds since epoch - convert to days since epoch */
-					dayssinceepoch = (time_t)(input / 86400000000000LL);
-					break;
-				case TIME_UNDEF:
+				}
 				default:
 				{
-					set_shm_connector_errmsg(myConnectorId, "no time representation available to"
-							"process DATEOID value");
-					elog(ERROR, "no time representation available to process DATEOID value for %s", colval->name);
+					out = handle_numeric_to_date(in, addquote, colval->timerep);
+					break;
 				}
-			}
-
-			/* since 1970-01-01 */
-			epoch.tm_year = 70;
-			epoch.tm_mon = 0;
-			epoch.tm_mday = 1;
-
-			epoch_time = mktime(&epoch);
-			target_time = epoch_time + (dayssinceepoch * 24 * 60 * 60);
-
-			/*
-			 * Convert to struct tm in GMT timezone for now
-			 * todo: convert to local timezone?
-			 */
-			target_date = gmtime(&target_time);
-			strftime(datestr, sizeof(datestr), "%Y-%m-%d", target_date);
-
-			if (addquote)
-			{
-				out = (char *) palloc0(strlen(datestr) + 2 + 1);
-				snprintf(out, strlen(datestr) + 2 + 1, "'%s'", datestr);
-			}
-			else
-			{
-				out = (char *) palloc0(strlen(datestr) + 1);
-				strlcpy(out, datestr,strlen(datestr) + 1);
 			}
 			break;
 		}
+		case TIMESTAMPTZOID:
 		case TIMESTAMPOID:
+		case TIMETZOID:
 		{
-			/*
-			 * we need to process these time related values based on the timerep
-			 * that has been determined during the parsing stage
-			 */
-			long long input = atoll(in);
-			time_t seconds = 0, remains = 0;
-			struct tm *tm_info;
-			char timestamp[26 + 1] = {0};	/* yyyy-MM-ddThh:mm:ss.xxxxxx */
-
-			switch (colval->timerep)
+			switch (colval->dbztype)
 			{
-				case TIME_TIMESTAMP:
-					/* milliseconds since epoch - convert to seconds since epoch */
-					seconds = (time_t)(input / 1000);
-					remains = input % 1000;
+				case DBZTYPE_STRUCT:
+				{
+					expand_struct_value(in, colval, type);
+					out = handle_base64_to_timestamp(colval->value, addquote, colval->timerep, colval->typemod);
 					break;
-				case TIME_MICROTIMESTAMP:
-					/* microseconds since epoch - convert to seconds since epoch */
-					seconds = (time_t)(input / 1000 / 1000);
-					remains = input % 1000000;
+				}
+				case DBZTYPE_BYTES:
+				{
+					out = handle_base64_to_timestamp(in, addquote, colval->timerep,  colval->typemod);
 					break;
-				case TIME_NANOTIMESTAMP:
-					/* microseconds since epoch - convert to seconds since epoch */
-					seconds = (time_t)(input / 1000 / 1000 / 1000);
-					remains = input % 1000000000;
+				}
+				case DBZTYPE_STRING:
+				{
+					out = handle_string_to_timestamp(in, addquote);
 					break;
-				case TIME_ZONEDTIMESTAMP:
-					/*
-					 * sent as string - just treat it like a string and skip the
-					 * rest of processing logic
-					 */
-					if (addquote)
-					{
-						out = escapeSingleQuote(in, addquote);
-					}
-					else
-					{
-						out = (char *) palloc0(strlen(in) + 1);
-						strlcpy(out, in, strlen(in) + 1);
-					}
-
-					/* skip the rest of processing */
-					return out;
-				case TIME_UNDEF:
+				}
 				default:
 				{
-					set_shm_connector_errmsg(myConnectorId, "no time representation available to"
-							"process TIMESTAMPOID value");
-					elog(ERROR, "no time representation available to process TIMESTAMPOID value for %s", colval->name);
+					out = handle_numeric_to_timestamp(in, addquote, colval->timerep, colval->typemod);
+					break;
 				}
-			}
-			tm_info = gmtime(&seconds);
-
-			if (colval->typemod > 0)
-			{
-				/*
-				 * it means we could include additional precision to timestamp. PostgreSQL
-				 * supports up to 6 digits of precision. We always put 6, PostgreSQL will
-				 * round it up or down as defined by table schema
-				 */
-				snprintf(timestamp, sizeof(timestamp), "%04d-%02d-%02dT%02d:%02d:%02d.%06ld",
-						tm_info->tm_year + 1900,
-						tm_info->tm_mon + 1,
-						tm_info->tm_mday,
-						tm_info->tm_hour,
-						tm_info->tm_min,
-						tm_info->tm_sec,
-						remains);
-			}
-			else
-			{
-				snprintf(timestamp, sizeof(timestamp), "%04d-%02d-%02dT%02d:%02d:%02d",
-						tm_info->tm_year + 1900,
-						tm_info->tm_mon + 1,
-						tm_info->tm_mday,
-						tm_info->tm_hour,
-						tm_info->tm_min,
-						tm_info->tm_sec);
-			}
-
-			if (addquote)
-			{
-				out = (char *) palloc0(strlen(timestamp) + 2 + 1);
-				snprintf(out, strlen(timestamp) + 2 + 1, "'%s'", timestamp);
-			}
-			else
-			{
-				out = (char *) palloc0(strlen(timestamp) + 1);
-				strlcpy(out, timestamp, strlen(timestamp) + 1);
 			}
 			break;
 		}
 		case TIMEOID:
 		{
-			/*
-			 * we need to process these time related values based on the timerep
-			 * that has been determined during the parsing stage
-			 */
-			unsigned long long input = atoll(in);
-			time_t seconds = 0, remains = 0;
-			char time[15 + 1] = {0};	/* hh:mm:ss.xxxxxx */
-
-			switch(colval->timerep)
+			switch (colval->dbztype)
 			{
-				case TIME_TIME:
-					/* milliseconds since midnight - convert to seconds since midnight */
-					seconds = (time_t)(input / 1000);
-					remains = input % 1000;
+				case DBZTYPE_STRUCT:
+				{
+					expand_struct_value(in, colval, type);
+					out = handle_base64_to_time(colval->value, addquote, colval->timerep, colval->typemod);
 					break;
-				case TIME_MICROTIME:
-					/* microseconds since midnight - convert to seconds since midnight */
-					seconds = (time_t)(input / 1000 / 1000);
-					remains = input % 1000000;
+				}
+				case DBZTYPE_BYTES:
+				{
+					out = handle_base64_to_time(in, addquote, colval->timerep, colval->typemod);
 					break;
-				case TIME_NANOTIME:
-					/* nanoseconds since midnight - convert to seconds since midnight */
-					seconds = (time_t)(input / 1000 / 1000 / 1000);
-					remains = input % 1000000000;
+				}
+				case DBZTYPE_STRING:
+				{
+					out = handle_string_to_time(in, addquote);
 					break;
-				case TIME_UNDEF:
+				}
 				default:
 				{
-					set_shm_connector_errmsg(myConnectorId, "no time representation available to"
-							"process TIMEOID value");
-					elog(ERROR, "no time representation available to process TIMEOID value for %s", colval->name);
+					out = handle_numeric_to_time(in, addquote, colval->timerep, colval->typemod);
+					break;
 				}
-			}
-			if (colval->typemod > 0)
-			{
-				snprintf(time, sizeof(time), "%02d:%02d:%02d.%06ld",
-						(int)((seconds / (60 * 60)) % 24),
-						(int)((seconds / 60) % 60),
-						(int)(seconds % 60),
-						remains);
-			}
-			else
-			{
-				snprintf(time, sizeof(time), "%02d:%02d:%02d",
-						(int)((seconds / (60 * 60)) % 24),
-						(int)((seconds / 60) % 60),
-						(int)(seconds % 60));
-			}
-
-			if (addquote)
-			{
-				out = (char *) palloc0(strlen(time) + 2 + 1);
-				snprintf(out, strlen(time) + 2 + 1, "'%s'", time);
-			}
-			else
-			{
-				out = (char *) palloc0(strlen(time) + 1);
-				strlcpy(out, time, strlen(time) + 1);
 			}
 			break;
 		}
 		case BYTEAOID:
 		{
-			int tmpoutlen = pg_b64_dec_len(strlen(in));
-			unsigned char * tmpout = (unsigned char *) palloc0(tmpoutlen);
-
-			tmpoutlen = pg_b64_decode(in, strlen(in), (char*)tmpout, tmpoutlen);
-
-			if (addquote)
+			switch (colval->dbztype)
 			{
-				/* hexstring + 2 single quotes + '\x' + terminating null */
-				out = (char *) palloc0((tmpoutlen * 2) + 2 + 2 + 1);
-				bytearray_to_escaped_string(tmpout, tmpoutlen, out);
+				case DBZTYPE_STRUCT:
+				{
+					expand_struct_value(in, colval, type);
+					out = handle_base64_to_byte(colval->value, addquote);
+					break;
+				}
+				case DBZTYPE_BYTES:
+				{
+					out = handle_base64_to_byte(in, addquote);
+					break;
+				}
+				case DBZTYPE_STRING:
+				{
+					out = handle_string_to_byte(in, addquote);
+					break;
+				}
+				default:
+				{
+					out = handle_numeric_to_byte(in, addquote);
+					break;
+				}
 			}
-			else
-			{
-				/* bytearray + terminating null */
-				out = (char *) palloc0(tmpoutlen + 1);
-				memcpy(out, tmpout, tmpoutlen);
-			}
-			pfree(tmpout);
 			break;
 		}
 		case INTERVALOID:
 		{
-			long long input = atoll(in);
-			time_t seconds = 0, remains = 0;
-			char inter[64 + 1] = {0};
-			int fields;
-
-			/* break down the input based on colval->timerep */
-			switch (colval->timerep)
+			switch (colval->dbztype)
 			{
-				case TIME_MICRODURATION:
+				case DBZTYPE_STRUCT:
 				{
-					/* interval in microseconds - convert to seconds */
-					seconds = (time_t)(input / 1000 / 1000);
-					remains = input % 1000000;
+					expand_struct_value(in, colval, type);
+					out = handle_base64_to_interval(colval->value, addquote, colval->timerep, colval->typemod);
+					break;
+				}
+				case DBZTYPE_BYTES:
+				{
+					out = handle_base64_to_interval(in, addquote, colval->timerep, colval->typemod);
+					break;
+				}
+				case DBZTYPE_STRING:
+				{
+					out = handle_string_to_interval(in, addquote);
 					break;
 				}
 				default:
 				{
-					set_shm_connector_errmsg(myConnectorId, "no interval representation available to"
-							"process INTERVALOID value");
-					elog(ERROR, "no interval representation available to process INTERVALOID value for %s", colval->name);
-				}
-			}
-
-			/* we need to figure out interval's range and precision from colval->typemod */
-			fields = INTERVAL_RANGE(colval->typemod);
-			switch (fields)
-			{
-				case INTERVAL_MASK(YEAR):	/* year */
-					snprintf(inter, sizeof(inter), "%d years",
-							(int) seconds / SECS_PER_YEAR);
-					break;
-				case INTERVAL_MASK(MONTH):	/* month */
-					snprintf(inter, sizeof(inter), "%d months",
-							(int) seconds / (SECS_PER_DAY * DAYS_PER_MONTH));
-					break;
-				case INTERVAL_MASK(DAY):	/* day */
-					snprintf(inter, sizeof(inter), "%d days",
-							(int) seconds / SECS_PER_DAY);
-					break;
-				case INTERVAL_MASK(HOUR):	/* hour */
-					snprintf(inter, sizeof(inter), "%d days",
-							(int) seconds / SECS_PER_HOUR);
-					break;
-				case INTERVAL_MASK(MINUTE):	/* minute */
-					snprintf(inter, sizeof(inter), "%d days",
-							(int) seconds / SECS_PER_MINUTE);
-					break;
-				case INTERVAL_MASK(SECOND):	/* second */
-					snprintf(inter, sizeof(inter), "%d seconds",
-							(int) seconds);
-					break;
-				case INTERVAL_MASK(YEAR) | INTERVAL_MASK(MONTH):	/* year to month */
-					snprintf(inter, sizeof(inter), "%d years %d months",
-							(int) seconds / SECS_PER_YEAR,
-							(int) (seconds / (SECS_PER_DAY * DAYS_PER_MONTH)) % MONTHS_PER_YEAR);
-					break;
-				case INTERVAL_MASK(DAY) | INTERVAL_MASK(HOUR):		/* day to hour */
-					snprintf(inter, sizeof(inter), "%d days %d hours",
-							(int) seconds / SECS_PER_DAY,
-							(int) (seconds / SECS_PER_HOUR) % HOURS_PER_DAY);
-					break;
-				case INTERVAL_MASK(DAY) | INTERVAL_MASK(HOUR) | INTERVAL_MASK(MINUTE):	/* day to minute */
-					snprintf(inter, sizeof(inter), "%d days %02d:%02d",
-							(int) seconds / SECS_PER_DAY,
-							(int) (seconds / SECS_PER_HOUR) % HOURS_PER_DAY,
-							(int) (seconds / SECS_PER_MINUTE) % MINS_PER_HOUR);
-					break;
-				case INTERVAL_MASK(DAY) | INTERVAL_MASK(HOUR) | INTERVAL_MASK(MINUTE) | INTERVAL_MASK(SECOND):	/* day to second */
-					snprintf(inter, sizeof(inter), "%d days %02d:%02d:%02d.%06d",
-							(int) seconds / SECS_PER_DAY,
-							(int) (seconds / SECS_PER_HOUR) % HOURS_PER_DAY,
-							(int) (seconds / SECS_PER_MINUTE) % MINS_PER_HOUR,
-							(int) (seconds % SECS_PER_MINUTE) % SECS_PER_MINUTE,
-							(int) remains);
-					break;
-				case INTERVAL_MASK(HOUR) | INTERVAL_MASK(MINUTE):	/* hour to minute */
-					snprintf(inter, sizeof(inter), "%02d:%02d",
-							(int) seconds / SECS_PER_HOUR,
-							(int) (seconds / SECS_PER_MINUTE) % MINS_PER_HOUR);
-					break;
-				case INTERVAL_MASK(HOUR) | INTERVAL_MASK(MINUTE) | INTERVAL_MASK(SECOND):	/* hour to second */
-					snprintf(inter, sizeof(inter), "%02d:%02d:%02d.%06d",
-							(int) (seconds / SECS_PER_HOUR),
-							(int) (seconds / SECS_PER_MINUTE) % MINS_PER_HOUR,
-							(int) (seconds % SECS_PER_MINUTE) % SECS_PER_MINUTE,
-							(int) remains);
-					break;
-				case INTERVAL_MASK(MINUTE) | INTERVAL_MASK(SECOND):	/* minute to second */
-					snprintf(inter, sizeof(inter), "%02d:%02d.%06d",
-							(int) seconds / SECS_PER_MINUTE,
-							(int) (seconds % SECS_PER_MINUTE) % SECS_PER_MINUTE,
-							(int) remains);
-					break;
-				case INTERVAL_FULL_RANGE:	/* full range */
-					snprintf(inter, sizeof(inter), "%d years %d months % days %02d:%02d:%02d.%06d",
-							(int) seconds / SECS_PER_YEAR,
-							(int) (seconds / (SECS_PER_DAY * DAYS_PER_MONTH)) % MONTHS_PER_YEAR,
-							(int) (seconds / SECS_PER_DAY) % (SECS_PER_DAY * DAYS_PER_MONTH),
-							(int) (seconds / SECS_PER_HOUR) % HOURS_PER_DAY,
-							(int) (seconds / SECS_PER_MINUTE) % MINS_PER_HOUR,
-							(int) (seconds % SECS_PER_MINUTE) % SECS_PER_MINUTE,
-							(int) remains);
-					break;
-				default:
-				{
-					set_shm_connector_errmsg(myConnectorId, "invalid INTERVAL typmod");
-					elog(ERROR, "invalid INTERVAL typmod: 0x%x", colval->typemod);
+					out = handle_numeric_to_interval(in, addquote, colval->timerep, colval->typemod);
 					break;
 				}
-			}
-			if (addquote)
-			{
-				out = escapeSingleQuote(inter, addquote);
-			}
-			else
-			{
-				out = (char *) palloc0(strlen(inter) + 1);
-				memcpy(out, inter, strlen(inter));
 			}
 			break;
 		}
-		case TIMETZOID:
-		/* todo: support more data types as needed */
 		default:
 		{
 			/*
-			 * control will come in here if a data type does not have any special
-			 * processing, such as geometry data type added by postgis extension.
-			 * We will treat them as text in their original form. todo: if data type
-			 * is number-oriented, and with addquote=true, it will produce the number
-			 * in quotes which may not be desirable.
+			 * if this column data type does not fall in the cases above, then we will try
+			 * to process it based on its type category.
 			 */
-			if (addquote)
-			{
-				out = escapeSingleQuote(in, addquote);
-			}
-			else
-			{
-				out = (char *) palloc0(strlen(in) + 1);
-				strlcpy(out, in, strlen(in) + 1);
-			}
+			out = handle_data_by_type_category(in, colval, type, addquote);
 			break;
 		}
 	}
@@ -3420,6 +3858,7 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 	/* copy identification data to PG_DML */
 	pgdml->op = dbzdml->op;
 	pgdml->tableoid = dbzdml->tableoid;
+	pgdml->natts = dbzdml->natts;
 
 	switch(dbzdml->op)
 	{
@@ -3702,128 +4141,12 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 }
 
 /*
- * get_additional_parameters
- *
- * this function fetches additional parameters from Jsonb based on the given column data types
- */
-static void
-get_additional_parameters(Jsonb * jb, DBZ_DML_COLUMN_VALUE * colval, bool isbefore, HTAB * namejsonposhash)
-{
-	StringInfoData strinfo;
-	int pos = 0;
-	char path[SYNCHDB_JSON_PATH_SIZE] = {0};
-	NameJsonposEntry * entry;
-	bool found = false;
-
-	if (!colval || !colval->remoteColumnName || colval->datatype == InvalidOid || namejsonposhash == NULL)
-		return;
-
-	initStringInfo(&strinfo);
-
-	/* find the position in schema from namejsonposhash using untransformed remoteColumnName */
-	entry = (NameJsonposEntry *) hash_search(namejsonposhash, colval->remoteColumnName, HASH_FIND, &found);
-	if (found)
-		pos = entry->jsonpos;
-	else
-	{
-		/* dump the JSON change event as additional detail if available */
-		if (synchdb_log_event_on_error && g_eventStr != NULL)
-			elog(LOG, "%s", g_eventStr);
-
-		elog(ERROR, "cannot find schema info for column %s in JSON change event", colval->remoteColumnName);
-	}
-
-	switch (colval->datatype)
-	{
-
-		case NUMERICOID:
-		{
-			/* spcial numeric case: need to obtain scale and precision from json */
-			elog(DEBUG1, "numeric: retrieving additional scale and precision parameters");
-
-			snprintf(path, SYNCHDB_JSON_PATH_SIZE, "schema.fields.%d.fields.%d.parameters.scale",
-					isbefore ? 0 : 1, pos);
-
-			getPathElementString(jb, path, &strinfo, true);
-
-			if (!strcasecmp(strinfo.data, "NULL"))
-				colval->scale = -1;	/* has no scale */
-			else
-				colval->scale = atoi(strinfo.data);	/* has scale */
-
-			/* also check if variable scale is used (Oracle) */
-			snprintf(path, SYNCHDB_JSON_PATH_SIZE, "schema.fields.%d.fields.%d.name",
-					isbefore ? 0 : 1, pos);
-
-			getPathElementString(jb, path, &strinfo, true);
-
-			if (!strcasecmp(strinfo.data, "NULL"))
-				colval->timerep = TIME_UNDEF;	/* has no specific representation */
-			else
-			{
-				if (find_exact_string_match(strinfo.data, "io.debezium.data.VariableScaleDecimal"))
-					colval->timerep = DATA_VARIABLE_SCALE;
-			}
-			break;
-		}
-		case INT8OID:
-		case INT2OID:
-		case INT4OID:
-		case FLOAT8OID:
-		case FLOAT4OID:
-		case DATEOID:
-		case TIMEOID:
-		case TIMESTAMPOID:
-		case TIMETZOID:
-		case INTERVALOID:
-		{
-			snprintf(path, SYNCHDB_JSON_PATH_SIZE, "schema.fields.%d.fields.%d.name",
-					isbefore ? 0 : 1, pos);
-
-			getPathElementString(jb, path, &strinfo, true);
-			if (!strcasecmp(strinfo.data, "NULL"))
-				colval->timerep = TIME_UNDEF;	/* has no specific representation */
-			else
-			{
-				if (find_exact_string_match(strinfo.data, "io.debezium.time.Date"))
-					colval->timerep = TIME_DATE;
-				else if (find_exact_string_match(strinfo.data, "io.debezium.time.Time"))
-					colval->timerep = TIME_TIME;
-				else if (find_exact_string_match(strinfo.data, "io.debezium.time.MicroTime"))
-					colval->timerep = TIME_MICROTIME;
-				else if (find_exact_string_match(strinfo.data, "io.debezium.time.NanoTime"))
-					colval->timerep = TIME_NANOTIME;
-				else if (find_exact_string_match(strinfo.data, "io.debezium.time.Timestamp"))
-					colval->timerep = TIME_TIMESTAMP;
-				else if (find_exact_string_match(strinfo.data, "io.debezium.time.MicroTimestamp"))
-					colval->timerep = TIME_MICROTIMESTAMP;
-				else if (find_exact_string_match(strinfo.data, "io.debezium.time.NanoTimestamp"))
-					colval->timerep = TIME_NANOTIMESTAMP;
-				else if (find_exact_string_match(strinfo.data, "io.debezium.time.ZonedTimestamp"))
-					colval->timerep = TIME_ZONEDTIMESTAMP;
-				else if (find_exact_string_match(strinfo.data, "io.debezium.time.MicroDuration"))
-					colval->timerep = TIME_MICRODURATION;
-				else if (find_exact_string_match(strinfo.data, "io.debezium.data.VariableScaleDecimal"))
-					colval->timerep = DATA_VARIABLE_SCALE;
-				else
-					colval->timerep = TIME_UNDEF;
-			}
-			break;
-		}
-		default:
-			break;
-	}
-	if(strinfo.data)
-		pfree(strinfo.data);
-}
-
-/*
  * parseDBZDML
  *
  * this function parses a Jsonb that represents DML operation and produce a DBZ_DML structure
  */
 static DBZ_DML *
-parseDBZDML(Jsonb * jb, char op, ConnectorType type)
+parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirst, bool islast)
 {
 	StringInfoData strinfo, objid;
 	Jsonb * dmlpayload = NULL;
@@ -3838,11 +4161,12 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 	Relation rel;
 	TupleDesc tupdesc;
 	int attnum, j = 0;
-
+	bool isnull = false;
 	HTAB * typeidhash;
 	HTAB * namejsonposhash;
 	HASHCTL hash_ctl;
 	NameOidEntry * entry;
+	NameJsonposEntry * entry2;
 	bool found;
 	DataCacheKey cachekey = {0};
 	DataCacheEntry * cacheentry;
@@ -3853,50 +4177,82 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 
 	initStringInfo(&strinfo);
 	initStringInfo(&objid);
-
 	dbzdml = (DBZ_DML *) palloc0(sizeof(DBZ_DML));
 
-	/* fetch database - required */
-	getPathElementString(jb, "payload.source.db", &strinfo, true);
-	if (!strcasecmp(strinfo.data, "NULL"))
+	if (source)
 	{
-		elog(WARNING, "malformed DML change request - no database attribute specified");
+		JsonbValue * v = NULL;
+		JsonbValue vbuf;
+
+		/* payload.source.db - required */
+		v = getKeyJsonValueFromContainer(&source->root, "db", strlen("db"), &vbuf);
+		if (!v)
+		{
+			elog(WARNING, "malformed DML change request - no database attribute specified");
+			destroyDBZDML(dbzdml);
+			dbzdml = NULL;
+			goto end;
+		}
+		db = pnstrdup(v->val.string.val, v->val.string.len);
+		appendStringInfo(&objid, "%s.", db);
+		memset(&vbuf, 0, sizeof(JsonbValue));
+
+		/*
+		 * payload.source.ts_ms - read only on the first or last change event of a batch
+		 * for statistic display purpose
+		 */
+		if (isfirst || islast)
+		{
+			v = getKeyJsonValueFromContainer(&source->root, "ts_ms", strlen("ts_ms"), &vbuf);
+			if (!v)
+				dbzdml->src_ts_ms = 0;
+			else
+				dbzdml->src_ts_ms = DatumGetUInt64(DirectFunctionCall1(numeric_int8, PointerGetDatum(v->val.numeric)));
+		}
+
+		/* payload.source.schema - optional */
+		v = getKeyJsonValueFromContainer(&source->root, "schema", strlen("schema"), &vbuf);
+		if (v)
+		{
+			schema = pnstrdup(v->val.string.val, v->val.string.len);
+			appendStringInfo(&objid, "%s.", schema);
+		}
+
+		/* payload.source.table - required */
+		v = getKeyJsonValueFromContainer(&source->root, "table", strlen("table"), &vbuf);
+		if (!v)
+		{
+			elog(WARNING, "malformed DML change request - no table attribute specified");
+			destroyDBZDML(dbzdml);
+			dbzdml = NULL;
+			goto end;
+		}
+		table = pnstrdup(v->val.string.val, v->val.string.len);
+		appendStringInfo(&objid, "%s", table);
+	}
+	else
+	{
+		elog(WARNING, "malformed DML change request - no source element");
 		destroyDBZDML(dbzdml);
-
-		if(strinfo.data)
-			pfree(strinfo.data);
-
-		return NULL;
+		dbzdml = NULL;
+		goto end;
 	}
-	db = pstrdup(strinfo.data);
-	appendStringInfo(&objid, "%s.", db);
 
-	/* fetch schema - optional */
-	getPathElementString(jb, "payload.source.schema", &strinfo, true);
-	if (strcasecmp(strinfo.data, "NULL"))
+	/*
+	 * payload.ts_ms - read only on the first or last change event of a batch
+	 * for statistic display purpose
+	 */
+	if (isfirst || islast)
 	{
-		/* append schema to objid if present */
-		schema = pstrdup(strinfo.data);
-		appendStringInfo(&objid, "%s.", schema);
+		getPathElementString(jb, "payload.ts_ms", &strinfo, true);
+		if (!strcasecmp(strinfo.data, "NULL"))
+			dbzdml->dbz_ts_ms = 0;
+		else
+			dbzdml->dbz_ts_ms = strtoull(strinfo.data, NULL, 10);
 	}
 
-	/* fetch table - required */
-	getPathElementString(jb, "payload.source.table", &strinfo, true);
-	if (!strcasecmp(strinfo.data, "NULL") || !strcasecmp(strinfo.data, "dbzsignal"))
-	{
-		elog(WARNING, "malformed DML change request - no table attribute specified");
-		destroyDBZDML(dbzdml);
-
-		if(strinfo.data)
-			pfree(strinfo.data);
-
-		return NULL;
-	}
-	table = pstrdup(strinfo.data);
-	appendStringInfo(&objid, "%s", table);
-
+	/* table name transformation */
 	dbzdml->remoteObjectId = pstrdup(objid.data);
-
 	dbzdml->mappedObjectId = transform_object_name(objid.data, "table");
 	if (dbzdml->mappedObjectId)
 	{
@@ -3904,7 +4260,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 		char * db2 = NULL, * table2 = NULL, * schema2 = NULL;
 
 		splitIdString(objectIdCopy, &db2, &schema2, &table2, false);
-		if (!table)
+		if (!table2)
 		{
 			/* save the error */
 			char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
@@ -3915,17 +4271,13 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 			/* trigger pg's error shutdown routine */
 			elog(ERROR, "%s", msg);
 		}
-		elog(DEBUG1, "transformed table object ID '%s' to '%s'",
-				objid.data, dbzdml->mappedObjectId);
+		else
+			dbzdml->table = pstrdup(table2);
 
-		/* save the individual components for sanity check below */
 		if (schema2)
 			dbzdml->schema = pstrdup(schema2);
 		else
 			dbzdml->schema = pstrdup("public");
-
-		if (table2)
-			dbzdml->table = pstrdup(table2);
 	}
 	else
 	{
@@ -3936,10 +4288,6 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 		resetStringInfo(&strinfo);
 		appendStringInfo(&strinfo, "%s.%s", dbzdml->schema, dbzdml->table);
 		dbzdml->mappedObjectId = pstrdup(strinfo.data);
-
-		/* use the untransformed object id and components */
-		elog(DEBUG1, "no object ID transformation done for '%s'",
-				dbzdml->mappedObjectId);
 	}
 	/* free the temporary pointers */
 	if (db)
@@ -3983,6 +4331,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 		/* use the cached data type hash for lookup later */
 		typeidhash = cacheentry->typeidhash;
 		dbzdml->tableoid = cacheentry->tableoid;
+		namejsonposhash = cacheentry->namejsonposhash;
 	}
 	else
 	{
@@ -4008,8 +4357,6 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 			elog(ERROR, "%s", msg);
 		}
 
-		elog(DEBUG1, "namespace %s.%s has PostgreSQL OID %d", dbzdml->schema, dbzdml->table, dbzdml->tableoid);
-
 		/* populate cached information */
 		strlcpy(cacheentry->key.schema, dbzdml->schema, sizeof(cachekey.schema));
 		strlcpy(cacheentry->key.table, dbzdml->table, sizeof(cachekey.table));
@@ -4022,7 +4369,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 		hash_ctl.hcxt = TopMemoryContext;
 
 		cacheentry->typeidhash = hash_create("Name to OID Hash Table",
-											 512, // limit to 512 columns max
+											 512,
 											 &hash_ctl,
 											 HASH_ELEM | HASH_CONTEXT);
 
@@ -4039,56 +4386,44 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 
 		/* get primary key bitmapset */
 		pkattrs = RelationGetIndexAttrBitmap(rel, INDEX_ATTR_BITMAP_PRIMARY_KEY);
-		if (!pkattrs)
-		{
-			/* should it be ERROR? */
-			elog(WARNING, "No primary key found for relation %s. Please use synchdb.dml_use_spi = "
-					"false to support UPDATE and DELETE without primary key",
-					RelationGetRelationName(rel));
-		}
 
-		/* cache tupdesc */
+		/* cache tupdesc and save natts for later use */
 		cacheentry->tupdesc = CreateTupleDescCopy(tupdesc);
+		dbzdml->natts = tupdesc->natts;
 
 		for (attnum = 1; attnum <= tupdesc->natts; attnum++)
 		{
 			Form_pg_attribute attr = TupleDescAttr(tupdesc, attnum - 1);
-			elog(DEBUG2, "column %d: name %s, type %u, length %d",
-					attnum,
-					NameStr(attr->attname),
-					attr->atttypid,
-					attr->attlen);
-
 			entry = (NameOidEntry *) hash_search(typeidhash, NameStr(attr->attname), HASH_ENTER, &found);
 			if (!found)
 			{
-				strncpy(entry->name, NameStr(attr->attname), NAMEDATALEN);
+				strlcpy(entry->name, NameStr(attr->attname), NAMEDATALEN);
 				entry->oid = attr->atttypid;
 				entry->position = attnum;
 				entry->typemod = attr->atttypmod;
 				if (pkattrs && bms_is_member(attnum - FirstLowInvalidHeapAttributeNumber, pkattrs))
 					entry->ispk =true;
-
-				elog(DEBUG2, "Inserted name '%s' with OID %u and position %d", entry->name, entry->oid, entry->position);
-			}
-			else
-			{
-				elog(DEBUG2, "Name '%s' already exists with OID %u and position %d", entry->name, entry->oid, entry->position);
+				get_type_category_preferred(entry->oid, &entry->typcategory, &entry->typispreferred);
+				strlcpy(entry->typname, format_type_be(attr->atttypid), NAMEDATALEN);
 			}
 		}
 		bms_free(pkattrs);
 		table_close(rel, NoLock);
-	}
 
-	/* build another hash to store json value's locations of schema data for correct additional param lookups */
-	namejsonposhash = build_schema_jsonpos_hash(jb);
-	if (!namejsonposhash)
-	{
-		/* dump the JSON change event as additional detail if available */
-		if (synchdb_log_event_on_error && g_eventStr != NULL)
-			elog(LOG, "%s", g_eventStr);
+		/*
+		 * build another hash to store json value's locations of schema data for correct additional param lookups
+		 * todo: combine this hash with typeidhash above to save one hash
+		 */
+		cacheentry->namejsonposhash = build_schema_jsonpos_hash(jb);
+		namejsonposhash = cacheentry->namejsonposhash;
+		if (!namejsonposhash)
+		{
+			/* dump the JSON change event as additional detail if available */
+			if (synchdb_log_event_on_error && g_eventStr != NULL)
+				elog(LOG, "%s", g_eventStr);
 
-		elog(ERROR, "cannot parse schema section of change event JSON. Abort");
+			elog(ERROR, "cannot parse schema section of change event JSON. Abort");
+		}
 	}
 
 	switch(op)
@@ -4126,7 +4461,8 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 			 * 	in this case, the parser will parse the entire sub element as string under the key "g"
 			 * 	in the above example.
 			 */
-			dmlpayload = getPathElementJsonb(jb, "payload.after");
+			Datum datum_elems[2] ={CStringGetTextDatum("payload"), CStringGetTextDatum("after")};
+			dmlpayload = DatumGetJsonbP(jsonb_get_element(jb, &datum_elems[0], 2, &isnull, false));
 			if (dmlpayload)
 			{
 				int pause = 0;
@@ -4136,26 +4472,19 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 					switch (r)
 					{
 						case WJB_BEGIN_OBJECT:
-							elog(DEBUG1, "start of object (%s) --------------------", key ? key : "null");
-
 							if (key != NULL)
 							{
-								elog(DEBUG1, "sub element detected, skip subsequent parsing");
 								pause = 1;
 							}
 							break;
 						case WJB_END_OBJECT:
 							if (pause)
 							{
-								elog(DEBUG1, "sub element ended, resume parsing operation");
 								pause = 0;
 								if (key)
 								{
 									int pathsize = strlen("payload.after.") + strlen(key) + 1;
 									char * tmpPath = (char *) palloc0 (pathsize);
-
-									elog(DEBUG1, "parse the entire sub element under %s as string", key);
-
 									snprintf(tmpPath, pathsize, "payload.after.%s", key);
 									getPathElementString(jb, tmpPath, &strinfo, false);
 									value = pstrdup(strinfo.data);
@@ -4163,11 +4492,8 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 										pfree(tmpPath);
 								}
 							}
-							elog(DEBUG1, "end of object (%s) --------------------", key ? key : "null");
 							break;
 						case WJB_BEGIN_ARRAY:
-							elog(DEBUG1, "start of array (%s) --- array type not expected or handled yet",
-									key ? key : "null");
 							if (key)
 							{
 								pfree(key);
@@ -4175,15 +4501,12 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 							}
 							break;
 						case WJB_END_ARRAY:
-							elog(DEBUG1, "end of array (%s) --- array type not expected or handled yet",
-																key ? key : "null");
 							break;
 						case WJB_KEY:
 							if (pause)
 								break;
 
 							key = pnstrdup(v.val.string.val, v.val.string.len);
-							elog(DEBUG2, "Key: %s", key);
 							break;
 						case WJB_VALUE:
 						case WJB_ELEM:
@@ -4192,38 +4515,29 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 							switch (v.type)
 							{
 								case jbvNull:
-									elog(DEBUG2, "Value: NULL");
-									value = pnstrdup("NULL", strlen("NULL"));
+									value = pstrdup("NULL");
 									break;
 								case jbvString:
 									value = pnstrdup(v.val.string.val, v.val.string.len);
-									elog(DEBUG2, "String Value: %s", value);
 									break;
 								case jbvNumeric:
-								{
 									value = DatumGetCString(DirectFunctionCall1(numeric_out, PointerGetDatum(v.val.numeric)));
-									elog(DEBUG2, "Numeric Value: %s", value);
 									break;
-								}
 								case jbvBool:
-									elog(DEBUG2, "Boolean Value: %s", v.val.boolean ? "true" : "false");
 									if (v.val.boolean)
-										value = pnstrdup("true", strlen("true"));
+										value = pstrdup("true");
 									else
-										value = pnstrdup("false", strlen("false"));
+										value = pstrdup("false");
 									break;
 								case jbvBinary:
-									elog(WARNING, "Binary Value: not handled yet");
-									value = pnstrdup("NULL", strlen("NULL"));
+									value = pstrdup("NULL");
 									break;
 								default:
-									elog(WARNING, "Unknown value type: %d", v.type);
-									value = pnstrdup("NULL", strlen("NULL"));
+									value = pstrdup("NULL");
 									break;
 							}
 						break;
 						default:
-							elog(WARNING, "Unknown token: %d", r);
 							break;
 					}
 
@@ -4250,8 +4564,6 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 						mappedColumnName = transform_object_name(colNameObjId.data, "column");
 						if (mappedColumnName)
 						{
-							elog(DEBUG1, "transformed column object ID '%s'to '%s'",
-									colNameObjId.data, mappedColumnName);
 							/* replace the column name with looked up value here */
 							pfree(colval->name);
 							colval->name = pstrdup(mappedColumnName);
@@ -4267,14 +4579,25 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 							colval->position = entry->position;
 							colval->typemod = entry->typemod;
 							colval->ispk = entry->ispk;
-							get_additional_parameters(jb, colval, false, namejsonposhash);
+							colval->typcategory = entry->typcategory;
+							colval->typispreferred = entry->typispreferred;
+							colval->typname = pstrdup(entry->typname);
 						}
 						else
 							elog(ERROR, "cannot find data type for column %s. None-existent column?", colval->name);
 
-						elog(DEBUG1, "consumed %s = %s, type %d", colval->name, colval->value, colval->datatype);
-						dbzdml->columnValuesAfter = lappend(dbzdml->columnValuesAfter, colval);
+						entry2 = (NameJsonposEntry *) hash_search(namejsonposhash, colval->remoteColumnName, HASH_FIND, &found);
+						if (found)
+						{
+							colval->dbztype = entry2->dbztype;
+							colval->timerep = entry2->timerep;
+							colval->scale = entry2->scale;
+						}
+						else
+							elog(ERROR, "cannot find json schema data for column %s(%s). invalid json event?",
+									colval->name, colval->remoteColumnName);
 
+						dbzdml->columnValuesAfter = lappend(dbzdml->columnValuesAfter, colval);
 						pfree(key);
 						pfree(value);
 						key = NULL;
@@ -4297,7 +4620,8 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 			 * 		"after": null
 			 * 	}
 			 */
-			dmlpayload = getPathElementJsonb(jb, "payload.before");
+			Datum datum_elems[2] = { CStringGetTextDatum("payload"), CStringGetTextDatum("before")};
+			dmlpayload = DatumGetJsonbP(jsonb_get_element(jb, &datum_elems[0], 2, &isnull, false));
 			if (dmlpayload)
 			{
 				int pause = 0;
@@ -4307,26 +4631,19 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 					switch (r)
 					{
 						case WJB_BEGIN_OBJECT:
-							elog(DEBUG1, "start of object (%s) --------------------", key ? key : "null");
-
 							if (key != NULL)
 							{
-								elog(DEBUG1, "sub element detected, skip subsequent parsing");
 								pause = 1;
 							}
 							break;
 						case WJB_END_OBJECT:
 							if (pause)
 							{
-								elog(DEBUG1, "sub element ended, resume parsing operation");
 								pause = 0;
 								if (key)
 								{
 									int pathsize = strlen("payload.before.") + strlen(key) + 1;
 									char * tmpPath = (char *) palloc0 (pathsize);
-
-									elog(DEBUG1, "parse the entire sub element under %s as string", key);
-
 									snprintf(tmpPath, pathsize, "payload.before.%s", key);
 									getPathElementString(jb, tmpPath, &strinfo, false);
 									value = pstrdup(strinfo.data);
@@ -4334,11 +4651,8 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 										pfree(tmpPath);
 								}
 							}
-							elog(DEBUG1, "end of object (%s) --------------------", key ? key : "null");
 							break;
 						case WJB_BEGIN_ARRAY:
-							elog(DEBUG1, "start of array (%s) --- array type not expected or handled yet",
-									key ? key : "null");
 							if (key)
 							{
 								pfree(key);
@@ -4346,15 +4660,12 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 							}
 							break;
 						case WJB_END_ARRAY:
-							elog(DEBUG1, "end of array (%s) --- array type not expected or handled yet",
-																key ? key : "null");
 							break;
 						case WJB_KEY:
 							if (pause)
 								break;
 
 							key = pnstrdup(v.val.string.val, v.val.string.len);
-							elog(DEBUG2, "Key: %s", key);
 							break;
 						case WJB_VALUE:
 						case WJB_ELEM:
@@ -4363,38 +4674,29 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 							switch (v.type)
 							{
 								case jbvNull:
-									elog(DEBUG2, "Value: NULL");
 									value = pnstrdup("NULL", strlen("NULL"));
 									break;
 								case jbvString:
 									value = pnstrdup(v.val.string.val, v.val.string.len);
-									elog(DEBUG2, "String Value: %s", value);
 									break;
 								case jbvNumeric:
-								{
 									value = DatumGetCString(DirectFunctionCall1(numeric_out, PointerGetDatum(v.val.numeric)));
-									elog(DEBUG2, "Numeric Value: %s", value);
 									break;
-								}
 								case jbvBool:
-									elog(DEBUG2, "Boolean Value: %s", v.val.boolean ? "true" : "false");
 									if (v.val.boolean)
 										value = pnstrdup("true", strlen("true"));
 									else
 										value = pnstrdup("false", strlen("false"));
 									break;
 								case jbvBinary:
-									elog(WARNING, "Binary Value: not handled yet");
 									value = pnstrdup("NULL", strlen("NULL"));
 									break;
 								default:
-									elog(WARNING, "Unknown value type: %d", v.type);
 									value = pnstrdup("NULL", strlen("NULL"));
 									break;
 							}
 						break;
 						default:
-							elog(WARNING, "Unknown token: %d", r);
 							break;
 					}
 
@@ -4422,8 +4724,6 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 
 						if (mappedColumnName)
 						{
-							elog(DEBUG1, "transformed column object ID '%s'to '%s'",
-									colNameObjId.data, mappedColumnName);
 							/* replace the column name with looked up value here */
 							pfree(colval->name);
 							colval->name = pstrdup(mappedColumnName);
@@ -4439,13 +4739,23 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 							colval->position = entry->position;
 							colval->typemod = entry->typemod;
 							colval->ispk = entry->ispk;
-							get_additional_parameters(jb, colval, true, namejsonposhash);
+							colval->typcategory = entry->typcategory;
+							colval->typispreferred = entry->typispreferred;
+							colval->typname = pstrdup(entry->typname);
 						}
 						else
 							elog(ERROR, "cannot find data type for column %s. None-existent column?", colval->name);
 
-						elog(DEBUG1, "consumed %s = %s, type %d", colval->name, colval->value, colval->datatype);
-						dbzdml->columnValuesBefore = lappend(dbzdml->columnValuesBefore, colval);
+						entry2 = (NameJsonposEntry *) hash_search(namejsonposhash, colval->remoteColumnName, HASH_FIND, &found);
+						if (found)
+						{
+							colval->dbztype = entry2->dbztype;
+							colval->timerep = entry2->timerep;
+							colval->scale = entry2->scale;
+						}
+						else
+							elog(ERROR, "cannot find json schema data for column %s(%s). invalid json event?",
+									colval->name, colval->remoteColumnName);
 
 						pfree(key);
 						pfree(value);
@@ -4481,9 +4791,15 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 			{
 				/* need to parse before and after */
 				if (i == 0)
-					dmlpayload = getPathElementJsonb(jb, "payload.before");
+				{
+					Datum datum_elems[2] = { CStringGetTextDatum("payload"), CStringGetTextDatum("before")};
+					dmlpayload = DatumGetJsonbP(jsonb_get_element(jb, &datum_elems[0], 2, &isnull, false));
+				}
 				else
-					dmlpayload = getPathElementJsonb(jb, "payload.after");
+				{
+					Datum datum_elems[2] = { CStringGetTextDatum("payload"), CStringGetTextDatum("after")};
+					dmlpayload = DatumGetJsonbP(jsonb_get_element(jb, &datum_elems[0], 2, &isnull, false));
+				}
 				if (dmlpayload)
 				{
 					int pause = 0;
@@ -4493,26 +4809,20 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 						switch (r)
 						{
 							case WJB_BEGIN_OBJECT:
-								elog(DEBUG1, "start of object (%s) --------------------", key ? key : "null");
-
 								if (key != NULL)
 								{
-									elog(DEBUG1, "sub element detected, skip subsequent parsing");
 									pause = 1;
 								}
 								break;
 							case WJB_END_OBJECT:
 								if (pause)
 								{
-									elog(DEBUG1, "sub element ended, resume parsing operation");
 									pause = 0;
 									if (key)
 									{
 										int pathsize = (i == 0 ? strlen("payload.before.") + strlen(key) + 1 :
 												strlen("payload.after.") + strlen(key) + 1);
 										char * tmpPath = (char *) palloc0 (pathsize);
-
-										elog(DEBUG1, "parse the entire sub element under %s as string", key);
 										if (i == 0)
 											snprintf(tmpPath, pathsize, "payload.before.%s", key);
 										else
@@ -4523,11 +4833,8 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 											pfree(tmpPath);
 									}
 								}
-								elog(DEBUG1, "end of object (%s) --------------------", key ? key : "null");
 								break;
 							case WJB_BEGIN_ARRAY:
-								elog(DEBUG1, "start of array (%s) --- array type not expected or handled yet",
-										key ? key : "null");
 								if (key)
 								{
 									pfree(key);
@@ -4535,15 +4842,12 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 								}
 								break;
 							case WJB_END_ARRAY:
-								elog(DEBUG1, "end of array (%s) --- array type not expected or handled yet",
-																	key ? key : "null");
 								break;
 							case WJB_KEY:
 								if (pause)
 									break;
 
 								key = pnstrdup(v.val.string.val, v.val.string.len);
-								elog(DEBUG2, "Key: %s", key);
 								break;
 							case WJB_VALUE:
 							case WJB_ELEM:
@@ -4552,38 +4856,29 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 								switch (v.type)
 								{
 									case jbvNull:
-										elog(DEBUG2, "Value: NULL");
 										value = pnstrdup("NULL", strlen("NULL"));
 										break;
 									case jbvString:
 										value = pnstrdup(v.val.string.val, v.val.string.len);
-										elog(DEBUG2, "String Value: %s", value);
 										break;
 									case jbvNumeric:
-									{
 										value = DatumGetCString(DirectFunctionCall1(numeric_out, PointerGetDatum(v.val.numeric)));
-										elog(DEBUG2, "Numeric Value: %s", value);
 										break;
-									}
 									case jbvBool:
-										elog(DEBUG2, "Boolean Value: %s", v.val.boolean ? "true" : "false");
 										if (v.val.boolean)
 											value = pnstrdup("true", strlen("true"));
 										else
 											value = pnstrdup("false", strlen("false"));
 										break;
 									case jbvBinary:
-										elog(WARNING, "Binary Value: not handled yet");
 										value = pnstrdup("NULL", strlen("NULL"));
 										break;
 									default:
-										elog(WARNING, "Unknown value type: %d", v.type);
 										value = pnstrdup("NULL", strlen("NULL"));
 										break;
 								}
 							break;
 							default:
-								elog(WARNING, "Unknown token: %d", r);
 								break;
 						}
 
@@ -4610,8 +4905,6 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 							mappedColumnName = transform_object_name(colNameObjId.data, "column");
 							if (mappedColumnName)
 							{
-								elog(DEBUG1, "transformed column object ID '%s'to '%s'",
-										colNameObjId.data, mappedColumnName);
 								/* replace the column name with looked up value here */
 								pfree(colval->name);
 								colval->name = pstrdup(mappedColumnName);
@@ -4627,15 +4920,24 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 								colval->position = entry->position;
 								colval->typemod = entry->typemod;
 								colval->ispk = entry->ispk;
-								if (i == 0)
-									get_additional_parameters(jb, colval, true, namejsonposhash);
-								else
-									get_additional_parameters(jb, colval, false, namejsonposhash);
+								colval->typcategory = entry->typcategory;
+								colval->typispreferred = entry->typispreferred;
+								colval->typname = pstrdup(entry->typname);
 							}
 							else
 								elog(ERROR, "cannot find data type for column %s. None-existent column?", colval->name);
 
-							elog(DEBUG1, "consumed %s = %s, type %d", colval->name, colval->value, colval->datatype);
+							entry2 = (NameJsonposEntry *) hash_search(namejsonposhash, colval->remoteColumnName, HASH_FIND, &found);
+							if (found)
+							{
+								colval->dbztype = entry2->dbztype;
+								colval->timerep = entry2->timerep;
+								colval->scale = entry2->scale;
+							}
+							else
+								elog(ERROR, "cannot find json schema data for column %s(%s). invalid json event?",
+										colval->name, colval->remoteColumnName);
+
 							if (i == 0)
 								dbzdml->columnValuesBefore = lappend(dbzdml->columnValuesBefore, colval);
 							else
@@ -4672,6 +4974,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type)
 	if (dbzdml->columnValuesAfter != NULL)
 		list_sort(dbzdml->columnValuesAfter, list_sort_cmp);
 
+end:
 	if (strinfo.data)
 		pfree(strinfo.data);
 
@@ -5208,6 +5511,7 @@ fc_load_rules(ConnectorType connectorType, const char * rulefile)
 	char * key = NULL;
 	char * value = NULL;
 	bool found = 0;
+	size_t ret = 0;
 
 	HTAB * rulehash = NULL;
 	DatatypeHashEntry hashentry;
@@ -5286,10 +5590,15 @@ fc_load_rules(ConnectorType connectorType, const char * rulefile)
 
 	/* Allocate memory to store file contents */
 	json_string = palloc0(jsonlength + 1);
-	fread(json_string, 1, jsonlength, file);
+	ret = fread(json_string, 1, jsonlength, file);
 	json_string[jsonlength] = '\0';
 
 	fclose(file);
+	if (ret == 0)
+	{
+		set_shm_connector_errmsg(myConnectorId, "rule file empty");
+		elog(ERROR, "Rule file is empty: %s", rulefile);
+	}
 
 	jsonb_datum = DirectFunctionCall1(jsonb_in, CStringGetDatum(json_string));
 	jb = DatumGetJsonbP(jsonb_datum);
@@ -5889,14 +6198,20 @@ fc_load_objmap(const char * name, ConnectorType connectorType)
  * Main function to process Debezium change event
  */
 int
-fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats, bool schemasync, const char * name)
+fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
+		bool schemasync, const char * name, bool isfirst, bool islast)
 {
 	Datum jsonb_datum;
-	Jsonb *jb;
+	Jsonb * jb;
+	Jsonb * source = NULL;
 	StringInfoData strinfo;
 	ConnectorType type;
 	MemoryContext tempContext, oldContext;
 	bool islastsnapshot = false;
+	int ret = -1;
+	struct timeval tv;
+	Datum datum_elems[2] = {CStringGetTextDatum("payload"), CStringGetTextDatum("source")};
+	bool isnull;
 
 	tempContext = AllocSetContextCreate(TopMemoryContext,
 										"FORMAT_CONVERTER",
@@ -5910,33 +6225,71 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats, b
     jsonb_datum = DirectFunctionCall1(jsonb_in, CStringGetDatum(event));
     jb = DatumGetJsonbP(jsonb_datum);
 
-    /* Get connector type */
-    getPathElementString(jb, "payload.source.connector", &strinfo, true);
-    type = fc_get_connector_type(strinfo.data);
-
-    /* Check if it's a DDL or DML event */
-    getPathElementString(jb, "payload.source.snapshot", &strinfo, true);
-    if (!strcmp(strinfo.data, "true") || !strcmp(strinfo.data, "last"))
+    /* Obtain source element - required */
+	source = DatumGetJsonbP(jsonb_get_element(jb, &datum_elems[0], 2, &isnull, false));
+    if (source)
     {
-    	if (schemasync)
-    	{
-        	if (get_shm_connector_stage_enum(myConnectorId) != STAGE_SCHEMA_SYNC)
-        		set_shm_connector_stage(myConnectorId, STAGE_SCHEMA_SYNC);
-    	}
-    	else
-    	{
-        	if (get_shm_connector_stage_enum(myConnectorId) != STAGE_INITIAL_SNAPSHOT)
-        		set_shm_connector_stage(myConnectorId, STAGE_INITIAL_SNAPSHOT);
-    	}
-    	if (!strcmp(strinfo.data, "last"))
-    		islastsnapshot = true;
+		JsonbValue * v = NULL;
+		JsonbValue vbuf;
+		char * tmp = NULL;
+
+		/* payload.source.connector - required */
+		v = getKeyJsonValueFromContainer(&source->root, "connector", strlen("connector"), &vbuf);
+		if (!v)
+		{
+			elog(WARNING, "malformed change request - no connector attribute specified");
+	    	increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
+	    	MemoryContextSwitchTo(oldContext);
+	    	MemoryContextDelete(tempContext);
+			return -1;
+		}
+		tmp = pnstrdup(v->val.string.val, v->val.string.len);
+		type = fc_get_connector_type(tmp);
+		pfree(tmp);
+
+		/* payload.source.snapshot - required */
+		v = getKeyJsonValueFromContainer(&source->root, "snapshot", strlen("snapshot"), &vbuf);
+		if (!v)
+		{
+			elog(WARNING, "malformed DML change request - no snapshot attribute specified");
+			increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
+	    	MemoryContextSwitchTo(oldContext);
+	    	MemoryContextDelete(tempContext);
+			return -1;
+		}
+		tmp = pnstrdup(v->val.string.val, v->val.string.len);
+	    if (!strcmp(tmp, "true") || !strcmp(tmp, "last"))
+	    {
+	    	if (schemasync)
+	    	{
+	        	if (get_shm_connector_stage_enum(myConnectorId) != STAGE_SCHEMA_SYNC)
+	        		set_shm_connector_stage(myConnectorId, STAGE_SCHEMA_SYNC);
+	    	}
+	    	else
+	    	{
+	        	if (get_shm_connector_stage_enum(myConnectorId) != STAGE_INITIAL_SNAPSHOT)
+	        		set_shm_connector_stage(myConnectorId, STAGE_INITIAL_SNAPSHOT);
+	    	}
+	    	if (!strcmp(tmp, "last"))
+	    		islastsnapshot = true;
+	    }
+	    else
+	    {
+	    	if (get_shm_connector_stage_enum(myConnectorId) != STAGE_CHANGE_DATA_CAPTURE)
+	    		set_shm_connector_stage(myConnectorId, STAGE_CHANGE_DATA_CAPTURE);
+	    }
+	    pfree(tmp);
     }
     else
     {
-    	if (get_shm_connector_stage_enum(myConnectorId) != STAGE_CHANGE_DATA_CAPTURE)
-    		set_shm_connector_stage(myConnectorId, STAGE_CHANGE_DATA_CAPTURE);
+    	elog(WARNING, "malformed change request - no source element");
+    	increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
+    	MemoryContextSwitchTo(oldContext);
+    	MemoryContextDelete(tempContext);
+		return -1;
     }
 
+    /* Check if it's a DDL or DML event */
     getPathElementString(jb, "payload.op", &strinfo, true);
     if (!strcmp(strinfo.data, "NULL"))
     {
@@ -5948,12 +6301,10 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats, b
     	increment_connector_statistics(myBatchStats, STATS_DDL, 1);
 
     	/* (1) parse */
-    	elog(DEBUG1, "parsing DBZ DDL change event...");
     	set_shm_connector_state(myConnectorId, STATE_PARSING);
-    	dbzddl = parseDBZDDL(jb);
+    	dbzddl = parseDBZDDL(jb, isfirst, islast);
     	if (!dbzddl)
     	{
-    		elog(DEBUG1, "malformed DDL event");
     		set_shm_connector_state(myConnectorId, STATE_SYNCING);
     		increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
     		MemoryContextSwitchTo(oldContext);
@@ -5961,13 +6312,11 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats, b
     		return -1;
     	}
 
-    	elog(DEBUG1, "converting to PG DDL change event...");
     	/* (2) convert */
     	set_shm_connector_state(myConnectorId, STATE_CONVERTING);
     	pgddl = convert2PGDDL(dbzddl, type);
     	if (!pgddl)
     	{
-    		elog(DEBUG1, "failed to convert DBZ DDL to PG DDL change event");
     		set_shm_connector_state(myConnectorId, STATE_SYNCING);
     		increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
     		destroyDBZDDL(dbzddl);
@@ -5977,11 +6326,10 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats, b
     	}
 
     	/* (3) execute */
-    	elog(DEBUG1, "executing PG DDL change event...");
     	set_shm_connector_state(myConnectorId, STATE_EXECUTING);
-    	if(ra_executePGDDL(pgddl, type))
+    	ret = ra_executePGDDL(pgddl, type);
+    	if(ret)
     	{
-    		elog(WARNING, "failed to execute PG DDL change event");
     		set_shm_connector_state(myConnectorId, STATE_SYNCING);
     		increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
     		destroyDBZDDL(dbzddl);
@@ -5990,13 +6338,30 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats, b
     		MemoryContextDelete(tempContext);
     		return -1;
     	}
+
 		/* (4) update attribute map table */
     	updateSynchdbAttribute(dbzddl, pgddl, type, name);
 
-		/* (5) clean up */
+    	/* (5) record only the first and last change event's processing timestamps only */
+    	if (islast && !isfirst)
+    	{
+			myBatchStats->stats_last_src_ts = dbzddl->src_ts_ms;
+			myBatchStats->stats_last_dbz_ts = dbzddl->dbz_ts_ms;
+			gettimeofday(&tv, NULL);
+			myBatchStats->stats_last_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
+    	}
+
+    	if (!islast && isfirst)
+    	{
+			myBatchStats->stats_first_src_ts = dbzddl->src_ts_ms;
+			myBatchStats->stats_first_dbz_ts = dbzddl->dbz_ts_ms;
+			gettimeofday(&tv, NULL);
+			myBatchStats->stats_first_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
+    	}
+
+		/* (6) clean up */
     	set_shm_connector_state(myConnectorId, (islastsnapshot && schemasync ?
     			STATE_SCHEMA_SYNC_DONE : STATE_SYNCING));
-    	elog(DEBUG1, "execution completed. Clean up...");
     	destroyDBZDDL(dbzddl);
     	destroyPGDDL(pgddl);
     }
@@ -6011,10 +6376,9 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats, b
 
     	/* (1) parse */
     	set_shm_connector_state(myConnectorId, STATE_PARSING);
-    	dbzdml = parseDBZDML(jb, strinfo.data[0], type);
+    	dbzdml = parseDBZDML(jb, strinfo.data[0], type, source, isfirst, islast);
     	if (!dbzdml)
 		{
-			elog(WARNING, "malformed DNL event");
 			set_shm_connector_state(myConnectorId, STATE_SYNCING);
 			increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
 			MemoryContextSwitchTo(oldContext);
@@ -6027,7 +6391,6 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats, b
     	pgdml = convert2PGDML(dbzdml, type);
     	if (!pgdml)
     	{
-    		elog(WARNING, "failed to convert DBZ DML to PG DML change event");
     		set_shm_connector_state(myConnectorId, STATE_SYNCING);
     		increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
     		destroyDBZDML(dbzdml);
@@ -6038,10 +6401,9 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats, b
 
     	/* (3) execute */
     	set_shm_connector_state(myConnectorId, STATE_EXECUTING);
-    	elog(DEBUG1, "executing PG DML change event...");
-    	if(ra_executePGDML(pgdml, type, myBatchStats))
+    	ret = ra_executePGDML(pgdml, type, myBatchStats);
+    	if(ret)
     	{
-    		elog(WARNING, "failed to execute PG DML change event");
     		set_shm_connector_state(myConnectorId, STATE_SYNCING);
     		increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
         	destroyDBZDML(dbzdml);
@@ -6051,9 +6413,25 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats, b
     		return -1;
     	}
 
-       	/* (4) clean up */
+    	/* (4) record only the first and last change event's processing timestamps only */
+    	if (islast && !isfirst)
+    	{
+			myBatchStats->stats_last_src_ts = dbzdml->src_ts_ms;
+			myBatchStats->stats_last_dbz_ts = dbzdml->dbz_ts_ms;
+			gettimeofday(&tv, NULL);
+			myBatchStats->stats_last_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
+    	}
+
+    	if (!islast && isfirst)
+    	{
+			myBatchStats->stats_first_src_ts = dbzdml->src_ts_ms;
+			myBatchStats->stats_first_dbz_ts = dbzdml->dbz_ts_ms;
+			gettimeofday(&tv, NULL);
+			myBatchStats->stats_first_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
+    	}
+
+       	/* (5) clean up */
     	set_shm_connector_state(myConnectorId, STATE_SYNCING);
-    	elog(DEBUG1, "execution completed. Clean up...");
     	destroyDBZDML(dbzdml);
     	destroyPGDML(pgdml);
     }

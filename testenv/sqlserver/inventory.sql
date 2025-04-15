@@ -64,7 +64,7 @@ INSERT INTO customers(first_name,last_name,email)
 EXEC sys.sp_cdc_enable_table @source_schema = 'dbo', @source_name = 'customers', @role_name = NULL, @supports_net_changes = 0;
 -- Create some very simple orders
 CREATE TABLE orders (
-  id INTEGER IDENTITY(10001,1) NOT NULL PRIMARY KEY,
+  order_number INTEGER IDENTITY(10001,1) NOT NULL PRIMARY KEY,
   order_date DATE NOT NULL,
   purchaser INTEGER NOT NULL,
   quantity INTEGER NOT NULL,

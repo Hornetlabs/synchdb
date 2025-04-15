@@ -32,7 +32,6 @@ import org.apache.log4j.*;
 import java.lang.management.ManagementFactory;
 import java.lang.management.MemoryMXBean;
 import java.lang.management.MemoryUsage;
-
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -51,7 +50,7 @@ public class DebeziumRunner {
 	final int TYPE_MYSQL = 1;
 	final int TYPE_ORACLE = 2;
 	final int TYPE_SQLSERVER = 3;
-	final int BATCH_QUEUE_SIZE = 3;
+	final int BATCH_QUEUE_SIZE = 5;
 	
 	final int LOG_LEVEL_UNDEF = 0;
 	final int LOG_LEVEL_ALL = 1;
@@ -299,7 +298,8 @@ public class DebeziumRunner {
 
 		public ChangeRecordBatch(List<ChangeEvent<String, String>> records, DebeziumEngine.RecordCommitter committer) 
 		{
-			this.records = new ArrayList<>(records);
+			//this.records = new ArrayList<>(records);
+			this.records = records;
 			this.committer = committer;
 		}
 	}
@@ -438,7 +438,6 @@ public class DebeziumRunner {
 				/* limit to this Oracle user's schema for now so we do not replicate tables from other schemas */
 				props.setProperty("schema.include.list", myParameters.user);
 				props.setProperty("lob.enabled", "true");
-				props.setProperty("poll.interval.ms", "100");
 				props.setProperty("unavailable.value.placeholder", "__synchdb_unavailable_value");
 				break;
 			}
@@ -475,7 +474,7 @@ public class DebeziumRunner {
 		}
 		
 		/* setting common properties */
-
+		props.setProperty("poll.interval.ms", "500");
 		if (myParameters.table.equals("null"))
 			logger.warn("table is null - skip setting table.include.list property");
 		else if (myParameters.table.startsWith("file:"))
@@ -655,7 +654,7 @@ public class DebeziumRunner {
 
 	public List<String> getChangeEvents()
 	{
-		List<String> listCopy;
+		List<String> listCopy = null;
 		if (activeBatchHash == null)
 		{
 			activeBatchHash = new HashMap<>();
@@ -669,11 +668,11 @@ public class DebeziumRunner {
         if (!future.isDone())
 		{
 			int i = 0;
-			listCopy = new ArrayList<>();
 			ChangeRecordBatch myNextBatch;
 			myNextBatch = batchManager.getNextBatch();
 			if (myNextBatch != null)
 			{
+				listCopy = new ArrayList<>(myNextBatch.records.size() + 1);
 				logger.info("Debezium -> Synchdb: sent batchid(" + myNextBatch.batchid + ") with size(" + myNextBatch.records.size() + ")");
 				/* first element: batch id */
 				listCopy.add("B-" + String.valueOf(myNextBatch.batchid));
@@ -734,11 +733,12 @@ public class DebeziumRunner {
 		{
 			logger.info("debezium marked all records in batchid(" + batchid + ") as processed");
 
-			for (i = 0; i < myBatch.records.size(); i++)
-			{
-				myBatch.committer.markProcessed(myBatch.records.get(i));
-			}
-
+			/*
+			 * mark only the last change event in batch as done. This has the same effect as
+			 * marking the entire batch as done that does not require individually mark each
+			 * change event as done, which takes a longer time
+			 */
+			myBatch.committer.markProcessed(myBatch.records.get(myBatch.records.size()-1));
 			/* mark this batch complete to allow debezium to commit and flush offset */
 			myBatch.committer.markBatchFinished();
 			

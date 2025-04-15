@@ -1,3 +1,5 @@
+[![build_and_test](https://github.com/Hornetlabs/synchdb/actions/workflows/synchdb-ci.yml/badge.svg)](https://github.com/Hornetlabs/synchdb/actions/workflows/synchdb-ci.yml)
+
 ## Introduction
 
 SynchDB is a PostgreSQL extension designed for fast and reliable data replication from multiple heterogeneous databases (including MySQL, SQL Server, and Oracle) into PostgreSQL. It eliminates the need for middleware or third-party software, enabling direct synchronization without additional orchestration.
