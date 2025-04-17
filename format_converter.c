@@ -610,7 +610,7 @@ transform_object_name(const char * objid, const char * objtype)
 	strncpy(key.extObjName, objid, strlen(objid));
 	strncpy(key.extObjType, objtype, strlen(objtype));
 	entry = (ObjMapHashEntry *) hash_search(objectMappingHash, &key, HASH_FIND, &found);
-	if (!found)
+	if (found)
 	{
 		res = pstrdup(entry->pgsqlObjName);
 	}
