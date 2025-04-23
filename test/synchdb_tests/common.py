@@ -37,6 +37,15 @@ def getDbname(dbvendor):
     else:
         return ORACLE_DB
 
+def getSchema(dbvendor):
+    # returns the remote schema name in example databases
+    if dbvendor == "mysql":
+        return None
+    elif dbvendor == "sqlserver":
+        return "dbo"
+    else:
+        return "c##dbzuser"
+
 def run_pg_query(cursor, query):
     cursor.execute(query)
     if cursor.description:  # Only fetch if query returns results
@@ -45,8 +54,9 @@ def run_pg_query(cursor, query):
 
 def run_pg_query_one(cursor, query):
     cursor.execute(query)
-    row = cursor.fetchone()
-    return row
+    if cursor.description:
+        return cursor.fetchone()
+    return None
 
 ## default data type matrix for all supported database vendors
 ## todo: better ways to lookup
@@ -283,3 +293,12 @@ def stop_and_delete_synchdb_connector(cursor, name):
     # it shuts down before delete
     row = run_pg_query_one(cursor, f"SELECT synchdb_del_conninfo('{name}')")
     return row[0]
+
+def drop_default_pg_schema(cursor, vendor):
+    if vendor == "mysql":
+        row = run_pg_query_one(cursor, f"DROP SCHEMA inventory CASCADE")
+    elif vendor == "sqlserver":
+        row = run_pg_query_one(cursor, f"DROP SCHEMA testdb CASCADE")
+    else:
+        row = run_pg_query_one(cursor, f"DROP SCHEMA free CASCADE")
+

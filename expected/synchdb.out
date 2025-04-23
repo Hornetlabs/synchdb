@@ -1,1 +1,348 @@
-CREATE EXTENSION synchdb;
+CREATE EXTENSION synchdb CASCADE;
+\d
+              List of relations
+ Schema |        Name        | Type  | Owner  
+--------+--------------------+-------+--------
+ public | synchdb_att_view   | view  | ubuntu
+ public | synchdb_attribute  | table | ubuntu
+ public | synchdb_conninfo   | table | ubuntu
+ public | synchdb_objmap     | table | ubuntu
+ public | synchdb_state_view | view  | ubuntu
+ public | synchdb_stats_view | view  | ubuntu
+(6 rows)
+
+SELECT synchdb_add_conninfo('mysqlconn','127.0.0.1', 3306, 'mysqluser', 'mysqlpwd', 'inventory', 'postgres', 'inventory.orders,inventory.customers', 'mysql');
+WARNING:  adjusting destination database from postgres to the current database contrib_regression
+ synchdb_add_conninfo 
+----------------------
+                    0
+(1 row)
+
+SELECT synchdb_add_conninfo('sqlserverconn','127.0.0.1', 1433, 'sa', 'Password!', 'testDB', 'postgres', '', 'sqlserver');
+WARNING:  adjusting destination database from postgres to the current database contrib_regression
+ synchdb_add_conninfo 
+----------------------
+                    0
+(1 row)
+
+SELECT synchdb_add_conninfo('oracleconn','127.0.0.1', 1521, 'c##dbzuser', 'dbz', 'mydb', 'postgres', '', 'oracle');
+WARNING:  adjusting destination database from postgres to the current database contrib_regression
+ synchdb_add_conninfo 
+----------------------
+                    0
+(1 row)
+
+SELECT synchdb_add_conninfo('errorconn','127.0.0.1', 1521, 'c##dbzuser', 'dbz', 'mydb', 'postgres', '', 'nonexist');
+WARNING:  adjusting destination database from postgres to the current database contrib_regression
+ERROR:  unsupported connector
+SELECT name, isactive, data->'hostname', data->'port', data->'user', data->'srcdb', data->'table', data->'connector' FROM synchdb_conninfo;
+     name      | isactive |  ?column?   | ?column? |   ?column?   |  ?column?   |                ?column?                |  ?column?   
+---------------+----------+-------------+----------+--------------+-------------+----------------------------------------+-------------
+ mysqlconn     | f        | "127.0.0.1" | 3306     | "mysqluser"  | "inventory" | "inventory.orders,inventory.customers" | "mysql"
+ sqlserverconn | f        | "127.0.0.1" | 1433     | "sa"         | "testDB"    | "null"                                 | "sqlserver"
+ oracleconn    | f        | "127.0.0.1" | 1521     | "c##dbzuser" | "mydb"      | "null"                                 | "oracle"
+(3 rows)
+
+SELECT synchdb_add_extra_conninfo('mysqlconn', 'verufy_ca', 'keystore1', 'keystorepass', 'truststore1', 'truststorepass');
+ synchdb_add_extra_conninfo 
+----------------------------
+                          0
+(1 row)
+
+SELECT synchdb_add_extra_conninfo('sqlserverconn', 'verufy_ca', 'keystore2', 'keystorepass', 'truststore2', 'truststorepass');
+ synchdb_add_extra_conninfo 
+----------------------------
+                          0
+(1 row)
+
+SELECT synchdb_add_extra_conninfo('oracleconn', 'verufy_ca', 'keystore3', 'keystorepass', 'truststore3', 'truststorepass');
+ synchdb_add_extra_conninfo 
+----------------------------
+                          0
+(1 row)
+
+SELECT synchdb_del_extra_conninfo('mysqlconn');
+ synchdb_del_extra_conninfo 
+----------------------------
+                          0
+(1 row)
+
+SELECT synchdb_del_extra_conninfo('sqlserverconn');
+ synchdb_del_extra_conninfo 
+----------------------------
+                          0
+(1 row)
+
+SELECT synchdb_del_extra_conninfo('oracleconn');
+ synchdb_del_extra_conninfo 
+----------------------------
+                          0
+(1 row)
+
+SELECT name, isactive, data->'hostname', data->'port', data->'user', data->'srcdb', data->'table', data->'connector' FROM synchdb_conninfo;
+     name      | isactive |  ?column?   | ?column? |   ?column?   |  ?column?   |                ?column?                |  ?column?   
+---------------+----------+-------------+----------+--------------+-------------+----------------------------------------+-------------
+ mysqlconn     | f        | "127.0.0.1" | 3306     | "mysqluser"  | "inventory" | "inventory.orders,inventory.customers" | "mysql"
+ sqlserverconn | f        | "127.0.0.1" | 1433     | "sa"         | "testDB"    | "null"                                 | "sqlserver"
+ oracleconn    | f        | "127.0.0.1" | 1521     | "c##dbzuser" | "mydb"      | "null"                                 | "oracle"
+(3 rows)
+
+SELECT data->'ssl_mode', data->'ssl_keystore', data->'ssl_truststore' FROM synchdb_conninfo;
+ ?column? | ?column? | ?column? 
+----------+----------+----------
+          |          | 
+          |          | 
+          |          | 
+(3 rows)
+
+SELECT synchdb_add_objmap('mysqlconn', 'table', 'ext_db1.ext_table1', 'pg_table1');
+ synchdb_add_objmap 
+--------------------
+                  0
+(1 row)
+
+SELECT synchdb_add_objmap('mysqlconn', 'column', 'ext_db1.ext_table1.ext_column1', 'pg_column1');
+ synchdb_add_objmap 
+--------------------
+                  0
+(1 row)
+
+SELECT synchdb_add_objmap('mysqlconn', 'datatype', 'int', 'bigint');
+ synchdb_add_objmap 
+--------------------
+                  0
+(1 row)
+
+SELECT synchdb_add_objmap('mysqlconn', 'datatype', 'ext_db1.ext_table1.ext_column1', 'text');
+ synchdb_add_objmap 
+--------------------
+                  0
+(1 row)
+
+SELECT synchdb_add_objmap('mysqlconn', 'transform', 'ext_db1.ext_table1.ext_column1', '''>>>>>'' || ''%d'' || ''<<<<<''');
+ synchdb_add_objmap 
+--------------------
+                  0
+(1 row)
+
+SELECT synchdb_add_objmap('sqlserverconn', 'table', 'ext_db1.ext_table2', 'pg_table2');
+ synchdb_add_objmap 
+--------------------
+                  0
+(1 row)
+
+SELECT synchdb_add_objmap('sqlserverconn', 'column', 'ext_db1.ext_table2.ext_column1', 'pg_column2');
+ synchdb_add_objmap 
+--------------------
+                  0
+(1 row)
+
+SELECT synchdb_add_objmap('sqlserverconn', 'datatype', 'nchar', 'test');
+ synchdb_add_objmap 
+--------------------
+                  0
+(1 row)
+
+SELECT synchdb_add_objmap('sqlserverconn', 'datatype', 'ext_db1.ext_table2.ext_column1', 'datetime');
+ synchdb_add_objmap 
+--------------------
+                  0
+(1 row)
+
+SELECT synchdb_add_objmap('sqlserverconn', 'transform', 'ext_db1.ext_table2.ext_column1', '''>>>>>'' || ''%d'' || ''<<<<<''');
+ synchdb_add_objmap 
+--------------------
+                  0
+(1 row)
+
+SELECT synchdb_add_objmap('oracleconn', 'table', 'ext_db1.ext_table3', 'pg_table3');
+ synchdb_add_objmap 
+--------------------
+                  0
+(1 row)
+
+SELECT synchdb_add_objmap('oracleconn', 'column', 'ext_db1.ext_table3.ext_column1', 'pg_column3');
+ synchdb_add_objmap 
+--------------------
+                  0
+(1 row)
+
+SELECT synchdb_add_objmap('oracleconn', 'datatype', 'number', 'bigint');
+ synchdb_add_objmap 
+--------------------
+                  0
+(1 row)
+
+SELECT synchdb_add_objmap('oracleconn', 'datatype', 'ext_db1.ext_table3.ext_column1', 'varchar');
+ synchdb_add_objmap 
+--------------------
+                  0
+(1 row)
+
+SELECT synchdb_add_objmap('oracleconn', 'transform', 'ext_db1.ext_table3.ext_column1', '''>>>>>'' || ''%d'' || ''<<<<<''');
+ synchdb_add_objmap 
+--------------------
+                  0
+(1 row)
+
+SELECT synchdb_add_objmap('oracleconn', 'notexit', 'notexist', 'notexist');
+ERROR:  unsupported object type notexit
+SELECT * FROM synchdb_objmap;
+     name      |  objtype  | enabled |             srcobj             |           dstobj           
+---------------+-----------+---------+--------------------------------+----------------------------
+ mysqlconn     | table     | t       | ext_db1.ext_table1             | pg_table1
+ mysqlconn     | column    | t       | ext_db1.ext_table1.ext_column1 | pg_column1
+ mysqlconn     | datatype  | t       | int                            | bigint
+ mysqlconn     | datatype  | t       | ext_db1.ext_table1.ext_column1 | text
+ mysqlconn     | transform | t       | ext_db1.ext_table1.ext_column1 | '>>>>>' || '%d' || '<<<<<'
+ sqlserverconn | table     | t       | ext_db1.ext_table2             | pg_table2
+ sqlserverconn | column    | t       | ext_db1.ext_table2.ext_column1 | pg_column2
+ sqlserverconn | datatype  | t       | nchar                          | test
+ sqlserverconn | datatype  | t       | ext_db1.ext_table2.ext_column1 | datetime
+ sqlserverconn | transform | t       | ext_db1.ext_table2.ext_column1 | '>>>>>' || '%d' || '<<<<<'
+ oracleconn    | table     | t       | ext_db1.ext_table3             | pg_table3
+ oracleconn    | column    | t       | ext_db1.ext_table3.ext_column1 | pg_column3
+ oracleconn    | datatype  | t       | number                         | bigint
+ oracleconn    | datatype  | t       | ext_db1.ext_table3.ext_column1 | varchar
+ oracleconn    | transform | t       | ext_db1.ext_table3.ext_column1 | '>>>>>' || '%d' || '<<<<<'
+(15 rows)
+
+SELECT synchdb_del_objmap('mysqlconn', 'table', 'ext_db1.ext_table1');
+ synchdb_del_objmap 
+--------------------
+                  0
+(1 row)
+
+SELECT synchdb_del_objmap('mysqlconn', 'column', 'ext_db1.ext_table1.ext_column1');
+ synchdb_del_objmap 
+--------------------
+                  0
+(1 row)
+
+SELECT synchdb_del_objmap('mysqlconn', 'datatype', 'int');
+ synchdb_del_objmap 
+--------------------
+                  0
+(1 row)
+
+SELECT synchdb_del_objmap('mysqlconn', 'datatype', 'ext_db1.ext_table1.ext_column1');
+ synchdb_del_objmap 
+--------------------
+                  0
+(1 row)
+
+SELECT synchdb_del_objmap('mysqlconn', 'transform', 'ext_db1.ext_table1.ext_column1');
+ synchdb_del_objmap 
+--------------------
+                  0
+(1 row)
+
+SELECT synchdb_del_objmap('sqlserverconn', 'table', 'ext_db1.ext_table2');
+ synchdb_del_objmap 
+--------------------
+                  0
+(1 row)
+
+SELECT synchdb_del_objmap('sqlserverconn', 'column', 'ext_db1.ext_table2.ext_column1');
+ synchdb_del_objmap 
+--------------------
+                  0
+(1 row)
+
+SELECT synchdb_del_objmap('sqlserverconn', 'datatype', 'nchar');
+ synchdb_del_objmap 
+--------------------
+                  0
+(1 row)
+
+SELECT synchdb_del_objmap('sqlserverconn', 'datatype', 'ext_db1.ext_table2.ext_column1');
+ synchdb_del_objmap 
+--------------------
+                  0
+(1 row)
+
+SELECT synchdb_del_objmap('sqlserverconn', 'transform', 'ext_db1.ext_table2.ext_column1');
+ synchdb_del_objmap 
+--------------------
+                  0
+(1 row)
+
+SELECT synchdb_del_objmap('oracleconn', 'table', 'ext_db1.ext_table3');
+ synchdb_del_objmap 
+--------------------
+                  0
+(1 row)
+
+SELECT synchdb_del_objmap('oracleconn', 'column', 'ext_db1.ext_table3.ext_column1');
+ synchdb_del_objmap 
+--------------------
+                  0
+(1 row)
+
+SELECT synchdb_del_objmap('oracleconn', 'datatype', 'number');
+ synchdb_del_objmap 
+--------------------
+                  0
+(1 row)
+
+SELECT synchdb_del_objmap('oracleconn', 'datatype', 'ext_db1.ext_table3.ext_column1');
+ synchdb_del_objmap 
+--------------------
+                  0
+(1 row)
+
+SELECT synchdb_del_objmap('oracleconn', 'transform', 'ext_db1.ext_table3.ext_column1');
+ synchdb_del_objmap 
+--------------------
+                  0
+(1 row)
+
+SELECT * FROM synchdb_objmap;
+     name      |  objtype  | enabled |             srcobj             |           dstobj           
+---------------+-----------+---------+--------------------------------+----------------------------
+ mysqlconn     | table     | f       | ext_db1.ext_table1             | pg_table1
+ mysqlconn     | column    | f       | ext_db1.ext_table1.ext_column1 | pg_column1
+ mysqlconn     | datatype  | f       | int                            | bigint
+ mysqlconn     | datatype  | f       | ext_db1.ext_table1.ext_column1 | text
+ mysqlconn     | transform | f       | ext_db1.ext_table1.ext_column1 | '>>>>>' || '%d' || '<<<<<'
+ sqlserverconn | table     | f       | ext_db1.ext_table2             | pg_table2
+ sqlserverconn | column    | f       | ext_db1.ext_table2.ext_column1 | pg_column2
+ sqlserverconn | datatype  | f       | nchar                          | test
+ sqlserverconn | datatype  | f       | ext_db1.ext_table2.ext_column1 | datetime
+ sqlserverconn | transform | f       | ext_db1.ext_table2.ext_column1 | '>>>>>' || '%d' || '<<<<<'
+ oracleconn    | table     | f       | ext_db1.ext_table3             | pg_table3
+ oracleconn    | column    | f       | ext_db1.ext_table3.ext_column1 | pg_column3
+ oracleconn    | datatype  | f       | number                         | bigint
+ oracleconn    | datatype  | f       | ext_db1.ext_table3.ext_column1 | varchar
+ oracleconn    | transform | f       | ext_db1.ext_table3.ext_column1 | '>>>>>' || '%d' || '<<<<<'
+(15 rows)
+
+SELECT synchdb_del_conninfo('mysqlconn');
+ synchdb_del_conninfo 
+----------------------
+                    0
+(1 row)
+
+SELECT synchdb_del_conninfo('sqlserverconn');
+ synchdb_del_conninfo 
+----------------------
+                    0
+(1 row)
+
+SELECT synchdb_del_conninfo('oracleconn');
+ synchdb_del_conninfo 
+----------------------
+                    0
+(1 row)
+
+SELECT name, isactive, data->'hostname', data->'port', data->'user', data->'srcdb', data->'table', data->'connector' FROM synchdb_conninfo;
+ name | isactive | ?column? | ?column? | ?column? | ?column? | ?column? | ?column? 
+------+----------+----------+----------+----------+----------+----------+----------
+(0 rows)
+
+SELECT * FROM synchdb_objmap;
+ name | objtype | enabled | srcobj | dstobj 
+------+---------+---------+--------+--------
+(0 rows)
+
+DROP EXTENSION synchdb;

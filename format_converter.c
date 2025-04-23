@@ -3819,6 +3819,9 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 			}
 		}
 	}
+
+	elog(DEBUG1, "data processing completed. Returning output: ");
+	elog(DEBUG1, "%s", out);
 	return out;
 }
 
@@ -4251,9 +4254,12 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 			dbzdml->dbz_ts_ms = strtoull(strinfo.data, NULL, 10);
 	}
 
-	/* table name transformation */
+	/* table name transformation and normalized objectid to lower case */
+	for (j = 0; j < objid.len; j++)
+		objid.data[j] = (char) pg_tolower((unsigned char) objid.data[j]);
+
 	dbzdml->remoteObjectId = pstrdup(objid.data);
-	dbzdml->mappedObjectId = transform_object_name(objid.data, "table");
+	dbzdml->mappedObjectId = transform_object_name(dbzdml->remoteObjectId, "table");
 	if (dbzdml->mappedObjectId)
 	{
 		char * objectIdCopy = pstrdup(dbzdml->mappedObjectId);

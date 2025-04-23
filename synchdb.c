@@ -3840,6 +3840,13 @@ synchdb_add_objmap(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("failed to init or attach to synchdb shared memory")));
 
+	if (strcasecmp(NameStr(*objtype), "table") && strcasecmp(NameStr(*objtype), "column") &&
+		strcasecmp(NameStr(*objtype), "datatype") && strcasecmp(NameStr(*objtype), "transform"))
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("unsupported object type %s", NameStr(*objtype))));
+	}
 	appendStringInfo(&strinfo, "INSERT INTO %s (name, objtype, enabled, srcobj, dstobj)"
 			" VALUES (trim(lower('%s')), trim(lower('%s')), true, trim(lower('%s')), '%s')",
 			SYNCHDB_OBJECT_MAPPING_TABLE,
@@ -4085,6 +4092,14 @@ synchdb_del_objmap(PG_FUNCTION_ARGS)
 
 	StringInfoData strinfo;
 	initStringInfo(&strinfo);
+
+	if (strcasecmp(NameStr(*objtype), "table") && strcasecmp(NameStr(*objtype), "column") &&
+		strcasecmp(NameStr(*objtype), "datatype") && strcasecmp(NameStr(*objtype), "transform"))
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("unsupported object type %s", NameStr(*objtype))));
+	}
 
 	appendStringInfo(&strinfo, "UPDATE %s SET "
 			"enabled = false WHERE "

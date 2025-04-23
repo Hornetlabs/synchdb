@@ -4,7 +4,7 @@ from decimal import Decimal
 from datetime import datetime, timezone, timedelta
 from binascii import unhexlify
 
-from common import run_pg_query, run_pg_query_one, run_remote_query, run_remote_query_one, create_synchdb_connector, getConnectorName, getDbname, verify_default_type_mappings, create_and_start_synchdb_connector, stop_and_delete_synchdb_connector
+from common import run_pg_query, run_pg_query_one, run_remote_query, run_remote_query_one, create_synchdb_connector, getConnectorName, getDbname, verify_default_type_mappings, create_and_start_synchdb_connector, stop_and_delete_synchdb_connector, getSchema, drop_default_pg_schema
 
 def parse_time_with_fraction(t):
     if '.' in t:
@@ -73,6 +73,7 @@ def parse_ora_year2month_interval(s):
 def test_AllDefaultDataTypes(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_addt"
     dbname = getDbname(dbvendor).lower()
+    
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "no_data")
     assert result == 0
 
@@ -487,80 +488,297 @@ def test_AllDefaultDataTypes(pg_cursor, dbvendor):
             assert row[23] == None
 
     stop_and_delete_synchdb_connector(pg_cursor, name)
-
-def test_CreateObjmapEntries(pg_cursor, dbvendor):
-    name = getConnectorName(dbvendor) + "_objmap"
-    dbname = getDbname(dbvendor).lower()
-    rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_add_objmap('{name}', 'table', 'ext_db1.ext_table1', 'pg_table1')")
-    assert rows[0] == 0
-    rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_add_objmap('{name}', 'column', 'ext_db1.ext_table1.ext_column1', 'pg_column1')")
-    assert rows[0] == 0
-    rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_add_objmap('{name}', 'datatype', 'int', 'bigint')")
-    assert rows[0] == 0
-    rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_add_objmap('{name}', 'datatype', 'ext_db1.ext_table1.ext_column1', 'text')")
-    assert rows[0] == 0
-    rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_add_objmap('{name}', 'transform', 'ext_db1.ext_table1.ext_column1', '''>>>>>'' || ''%d'' || ''<<<<<''')")
-    assert rows[0] == 0
-
-    rows = run_pg_query_one(pg_cursor, f"SELECT count(*) from synchdb_objmap WHERE name = '{name}'")
-    assert rows[0] == 5
-
-    rows = run_pg_query(pg_cursor, f"SELECT enabled from synchdb_objmap WHERE name = '{name}'")
-    for row in rows:
-        assert row[0] == True
-
-def test_CreateObjmapEntriesWithError(pg_cursor, dbvendor):
-    assert True
-
-def test_DeleteObjmapEntries(pg_cursor, dbvendor):
-    name = getConnectorName(dbvendor) + "_objmap"
-    rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_del_objmap('{name}', 'table', 'ext_db1.ext_table1')")
-    assert rows[0] == 0
-    rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_del_objmap('{name}', 'column', 'ext_db1.ext_table1.ext_column1')")
-    assert rows[0] == 0
-    rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_del_objmap('{name}', 'datatype', 'int')")
-    assert rows[0] == 0
-    rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_del_objmap('{name}', 'datatype', 'ext_db1.ext_table1.ext_column1')")
-    assert rows[0] == 0
-    rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_del_objmap('{name}', 'transform', 'ext_db1.ext_table1.ext_column1')")
-    assert rows[0] == 0
-
-    rows = run_pg_query_one(pg_cursor, f"SELECT count(*) from synchdb_objmap WHERE name = '{name}'")
-    assert rows[0] == 5
-
-    rows = run_pg_query(pg_cursor, f"SELECT enabled from synchdb_objmap WHERE name = '{name}'")
-    for row in rows:
-        assert row[0] == False
-
-def test_ReloadObjmapEntries(pg_cursor, dbvendor):
-    assert True
+    drop_default_pg_schema(pg_cursor, dbvendor)
 
 def test_TableNameMapping(pg_cursor, dbvendor):
-    assert True
+    name = getConnectorName(dbvendor) + "_objmap_tnm"
+    dbname = getDbname(dbvendor).lower()
+    
+    if dbvendor == "mysql":
+        exttable_prefix=dbname
+    else:
+        schema = getSchema(dbvendor).lower() 
+        exttable_prefix= dbname + "." + schema
+        
+    # create objmap of type = 'table'
+    rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_add_objmap('{name}', 'table', '{exttable_prefix}.objmap_srctable1', '{dbname}.objmap_dsttable1')")
+    assert rows[0] == 0
+    rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_add_objmap('{name}', 'table', '{exttable_prefix}.objmap_srctable2', 'objmap_dsttable2')")
+    assert rows[0] == 0
+    rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_add_objmap('{name}', 'table', '{exttable_prefix}.objmap_srctable3', 'someschema.objmap_dsttable3')")
+    assert rows[0] == 0
 
-def test_AlterTableNameMapping(pg_cursor, dbvendor):
-    assert True
+   # create the tables remotely
+    run_remote_query(dbvendor, "CREATE TABLE objmap_srctable1 (a INT, b varchar(50))")
+    run_remote_query(dbvendor, "CREATE TABLE objmap_srctable2 (a INT, b varchar(50))")
+    run_remote_query(dbvendor, "CREATE TABLE objmap_srctable3 (a INT, b varchar(50))")
+    
+    # special case for sqlserver: add new tables to cdc
+    if dbvendor == "sqlserver":
+        run_remote_query(dbvendor, f"""
+            EXEC sys.sp_cdc_enable_table @source_schema = '{schema}',
+            @source_name = 'objmap_srctable1', @role_name = NULL, @supports_net_changes = 0;
+            """)
+        run_remote_query(dbvendor, f"""
+            EXEC sys.sp_cdc_enable_table @source_schema = '{schema}',
+            @source_name = 'objmap_srctable2', @role_name = NULL, @supports_net_changes = 0;
+            """)
+        run_remote_query(dbvendor, f"""
+            EXEC sys.sp_cdc_enable_table @source_schema = '{schema}',
+            @source_name = 'objmap_srctable3', @role_name = NULL, @supports_net_changes = 0;
+            """)
+
+    # create the connector in pg and copy the tables
+    result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "no_data")
+    assert result == 0
+    
+    if dbvendor == "oracle":
+        time.sleep(60)
+    else:
+        time.sleep(10)
+
+    # check if tables have been copied with table names mapped correctly
+    rows = run_pg_query_one(pg_cursor, f"SELECT pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND ext_tbname = '{exttable_prefix}.objmap_srctable1' LIMIT 1")
+    assert rows != None and len(rows) > 0 and rows[0] == f'{dbname}.objmap_dsttable1'
+    rows = run_pg_query_one(pg_cursor, f"SELECT pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND ext_tbname = '{exttable_prefix}.objmap_srctable2' LIMIT 1")
+    assert rows != None and len(rows) > 0 and rows[0] == f'public.objmap_dsttable2'
+    rows = run_pg_query_one(pg_cursor, f"SELECT pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND ext_tbname = '{exttable_prefix}.objmap_srctable3' LIMIT 1")
+    assert rows != None and len(rows) > 0 and rows[0] == f'someschema.objmap_dsttable3'
+
+    # make sure they exist
+    rows = run_pg_query_one(pg_cursor, f"SELECT EXISTS ( SELECT 1 FROM information_schema.tables WHERE table_schema = '{dbname}' AND table_name ='objmap_dsttable1')")
+    assert rows[0] == True
+    rows = run_pg_query_one(pg_cursor, f"SELECT EXISTS ( SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name ='objmap_dsttable2')")
+    assert rows[0] == True
+    rows = run_pg_query_one(pg_cursor, f"SELECT EXISTS ( SELECT 1 FROM information_schema.tables WHERE table_schema = 'someschema' AND table_name ='objmap_dsttable3')")
+    assert rows[0] == True
+
+    stop_and_delete_synchdb_connector(pg_cursor, name)
+    drop_default_pg_schema(pg_cursor, dbvendor)
 
 def test_ColumnNameMapping(pg_cursor, dbvendor):
-    assert True
+    name = getConnectorName(dbvendor) + "_objmap_cnm"
+    dbname = getDbname(dbvendor).lower()
 
-def test_AlterColumnNameMapping(pg_cursor, dbvendor):
-    assert True
+    if dbvendor == "mysql":
+        exttable_prefix=dbname
+    else:
+        schema = getSchema(dbvendor).lower()
+        exttable_prefix= dbname + "." + schema
+
+    # create objmap of type = 'column'
+    rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_add_objmap('{name}', 'column', '{exttable_prefix}.objmapcol_srctable1.a', 'pgintcol')")
+    assert rows[0] == 0
+    rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_add_objmap('{name}', 'column', '{exttable_prefix}.objmapcol_srctable1.b', 'pgtextcol')")
+    assert rows[0] == 0
+
+    # create the tables remotely
+    run_remote_query(dbvendor, "CREATE TABLE objmapcol_srctable1 (a INT, b varchar(50))")
+
+    # special case for sqlserver: add new tables to cdc
+    if dbvendor == "sqlserver":
+        run_remote_query(dbvendor, f"""
+            EXEC sys.sp_cdc_enable_table @source_schema = '{schema}',
+            @source_name = 'objmapcol_srctable1', @role_name = NULL, @supports_net_changes = 0;
+            """)
+
+    # create the connector in pg and copy the tables
+    result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "no_data")
+    assert result == 0
+    
+    if dbvendor == "oracle":
+        time.sleep(60)
+    else:
+        time.sleep(10)
+
+    # check if tables have been copied with table names mapped correctly
+    rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND ext_tbname = '{exttable_prefix}.objmapcol_srctable1'")
+    assert rows[0][1] == 'pgintcol'
+    assert rows[1][1] == 'pgtextcol'
+
+    stop_and_delete_synchdb_connector(pg_cursor, name)
+    drop_default_pg_schema(pg_cursor, dbvendor)
 
 def test_DataTypeMapping(pg_cursor, dbvendor):
-    assert True
+    name = getConnectorName(dbvendor) + "_objmap_dtm"
+    dbname = getDbname(dbvendor).lower()
 
-def test_AlterDataTypeMapping(pg_cursor, dbvendor):
-    assert True
+    if dbvendor == "mysql":
+        exttable_prefix=dbname
+    else:
+        schema = getSchema(dbvendor).lower()
+        exttable_prefix= dbname + "." + schema
 
-def test_DataTypeMappingWithError(pg_cursor, dbvendor):
-    assert True
+    rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_add_objmap('{name}', 'datatype', '{exttable_prefix}.orders.order_date', 'text|0')")
+    assert rows[0] == 0
+
+    result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial")
+    assert result == 0
+
+    if dbvendor == "oracle":
+        time.sleep(60)
+    else:
+        time.sleep(10)
+
+    # orders table shall have been replicated
+    rows = run_pg_query_one(pg_cursor, f"SELECT pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND ext_tbname = '{exttable_prefix}.orders' AND ext_attname = 'order_date'")
+    assert rows[0] == f"text"
+
+    rows = run_pg_query_one(pg_cursor, f"SELECT order_date from {dbname}.orders")
+    assert isinstance(rows[0], str)
+
+    stop_and_delete_synchdb_connector(pg_cursor, name)
+    drop_default_pg_schema(pg_cursor, dbvendor)
 
 def test_TransformExpression(pg_cursor, dbvendor):
-    assert True
+    name = getConnectorName(dbvendor) + "_objmap_te"
+    dbname = getDbname(dbvendor).lower()
 
-def test_AlterTransformExpression(pg_cursor, dbvendor):
-    assert True
+    if dbvendor == "mysql":
+        exttable_prefix=dbname
+    else:
+        schema = getSchema(dbvendor).lower()
+        exttable_prefix= dbname + "." + schema
+
+    rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_add_objmap('{name}', 'transform', '{exttable_prefix}.orders.purchaser', '%d + 1000000')")
+    assert rows[0] == 0
+
+    result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial")
+    assert result == 0
+
+    if dbvendor == "oracle":
+        time.sleep(60)
+    else:
+        time.sleep(10)
+
+    # orders table shall have been replicated
+    rows = run_pg_query_one(pg_cursor, f"SELECT transform FROM synchdb_att_view WHERE name = '{name}' AND ext_tbname = '{exttable_prefix}.orders' AND ext_attname = 'purchaser'")
+    assert rows[0] == f"%d + 1000000"
+
+    rows = run_pg_query(pg_cursor, f"SELECT purchaser from {dbname}.orders")
+    assert len(rows) > 0
+    for row in rows:
+        assert row[0] > 1000000
+
+    stop_and_delete_synchdb_connector(pg_cursor, name)
+    drop_default_pg_schema(pg_cursor, dbvendor)
+
+def test_ReloadObjmapEntries(pg_cursor, dbvendor):
+    name = getConnectorName(dbvendor) + "_objmap_roe"
+    dbname = getDbname(dbvendor).lower()
+
+    if dbvendor == "mysql":
+        exttable_prefix=dbname
+    else:
+        schema = getSchema(dbvendor).lower()
+        exttable_prefix= dbname + "." + schema
+
+    result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial")
+    assert result == 0
+
+    if dbvendor == "oracle":
+        time.sleep(60)
+    else:
+        time.sleep(10)
+
+    # default table orders table shall have been replicated
+    rows = run_pg_query_one(pg_cursor, f"SELECT pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND ext_tbname = '{exttable_prefix}.orders' LIMIT 1")
+    assert rows[0] == f"{dbname}.orders"
+
+    # column names shall be defaults too
+    rows = run_pg_query_one(pg_cursor, f"SELECT pg_attname FROM synchdb_att_view WHERE name = '{name}' AND ext_tbname = '{exttable_prefix}.orders' AND ext_attname ='order_number'")
+    assert rows[0] == f"order_number"
+    rows = run_pg_query_one(pg_cursor, f"SELECT pg_attname FROM synchdb_att_view WHERE name = '{name}' AND ext_tbname = '{exttable_prefix}.orders' AND ext_attname = 'order_date'")
+    assert rows[0] == f"order_date"
+
+    # transform expression shall be empty
+    rows = run_pg_query_one(pg_cursor, f"SELECT transform FROM synchdb_att_view WHERE name = '{name}' AND ext_tbname = '{exttable_prefix}.orders' AND ext_attname ='order_number'")
+    assert rows[0] == None
+    rows = run_pg_query_one(pg_cursor, f"SELECT transform FROM synchdb_att_view WHERE name = '{name}' AND ext_tbname = '{exttable_prefix}.orders' AND ext_attname ='order_date'")
+    assert rows[0] == None
+
+    # data type as default
+    rows = run_pg_query_one(pg_cursor, f"SELECT pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND ext_tbname = '{exttable_prefix}.orders' AND ext_attname ='order_number'")
+    assert rows[0] == "integer" or rows[0] == "numeric"
+    rows = run_pg_query_one(pg_cursor, f"SELECT pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND ext_tbname = '{exttable_prefix}.orders' AND ext_attname ='order_date'")
+    assert rows[0] == "date" or rows[0] == "timestamp without time zone"
+
+    rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_add_objmap('{name}', 'table', '{exttable_prefix}.orders', '{dbname}.invoices')")
+    assert rows[0] == 0
+    rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_add_objmap('{name}', 'column', '{exttable_prefix}.orders.order_number', 'the_number')")
+    assert rows[0] == 0
+    rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_add_objmap('{name}', 'column', '{exttable_prefix}.orders.order_date', 'the_date')")
+    assert rows[0] == 0
+    rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_add_objmap('{name}', 'datatype', '{exttable_prefix}.orders.purchaser', 'bigint')")
+    assert rows[0] == 0
+    rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_add_objmap('{name}', 'datatype', '{exttable_prefix}.orders.quantity', 'text|0')")
+    assert rows[0] == 0
+    rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_add_objmap('{name}', 'datatype', '{exttable_prefix}.orders.order_number', 'bigint')")
+    assert rows[0] == 0
+    rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_add_objmap('{name}', 'datatype', '{exttable_prefix}.orders.order_date', 'text|0')")
+    assert rows[0] == 0
+    rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_add_objmap('{name}', 'transform', '{exttable_prefix}.orders.order_number', '%d + 1000000')")
+    assert rows[0] == 0
+
+    # reload connector
+    rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_reload_objmap('{name}')")
+    assert rows[0] == 0
+
+    time.sleep(5)
+
+    rows = run_pg_query_one(pg_cursor, f"SELECT pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND ext_tbname = '{exttable_prefix}.orders' LIMIT 1")
+    assert rows[0] == f"{dbname}.invoices"
+    rows = run_pg_query_one(pg_cursor, f"SELECT pg_attname FROM synchdb_att_view WHERE name = '{name}' AND ext_tbname = '{exttable_prefix}.orders' AND ext_attname ='order_number'")
+    assert rows[0] == f"the_number"
+    rows = run_pg_query_one(pg_cursor, f"SELECT pg_attname FROM synchdb_att_view WHERE name = '{name}' AND ext_tbname = '{exttable_prefix}.orders' AND ext_attname = 'order_date'")
+    assert rows[0] == f"the_date"
+    rows = run_pg_query_one(pg_cursor, f"SELECT pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND ext_tbname = '{exttable_prefix}.orders' AND ext_attname ='purchaser'")
+    assert rows[0] == f"bigint"
+    rows = run_pg_query_one(pg_cursor, f"SELECT pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND ext_tbname = '{exttable_prefix}.orders' AND ext_attname = 'quantity'")
+    assert rows[0] == f"text"
+    rows = run_pg_query_one(pg_cursor, f"SELECT pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND ext_tbname = '{exttable_prefix}.orders' AND ext_attname = 'order_number'")
+    assert rows[0] == f"bigint"
+    rows = run_pg_query_one(pg_cursor, f"SELECT pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND ext_tbname = '{exttable_prefix}.orders' AND ext_attname = 'order_date'")
+    assert rows[0] == f"text"
+    rows = run_pg_query_one(pg_cursor, f"SELECT transform FROM synchdb_att_view WHERE name = '{name}' AND ext_tbname = '{exttable_prefix}.orders' AND ext_attname = 'order_number'")
+    assert rows[0] == f"%d + 1000000"
+
+    rows = run_pg_query(pg_cursor, f"SELECT the_number, the_date, quantity FROM {dbname}.invoices")
+    assert len(rows) > 0
+    for row in rows:
+        assert row[0] < 1000000
+        assert isinstance(row[1], str)
+        assert isinstance(row[2], str)
+    if dbvendor == "msql":
+        extrows = run_remote_query(dbvendor, f"""
+            INSERT INTO orders(order_number, order_date, purchaser, quantity, product_id) VALUES
+                (10005, "2025-12-12", 1002, 10000, 102)
+            """)
+    elif dbvendor == "oracle":
+        extrows = run_remote_query(dbvendor, f"""
+            INSERT INTO orders(order_number, order_date, purchaser, quantity, product_id) VALUES
+                (10005, TO_DATE('2025-12-12', 'YYYY-MM-DD'), 1002, 10000, 102)
+            """)
+    else:
+        extrows = run_remote_query(dbvendor, f"""
+            INSERT INTO orders(order_date, purchaser, quantity, product_id) VALUES
+                ("2025-12-12", 1002, 10000, 102)
+            """)
+
+    if dbvendor == "oracle":
+        time.sleep(60)
+    else:
+        time.sleep(10)
+        
+    rows = run_pg_query(pg_cursor, f"SELECT the_number, the_date, quantity FROM {dbname}.invoices WHERE the_number > 1000000")
+    assert len(rows) > 0
+    for row in rows:
+        assert row[0] > 1000000
+        assert isinstance(row[1], str)
+        assert isinstance(row[2], str)
+
+    stop_and_delete_synchdb_connector(pg_cursor, name)
+    drop_default_pg_schema(pg_cursor, dbvendor)
 
 def test_TransformExpressionWithError(pg_cursor, dbvendor):
     assert True
@@ -569,24 +787,29 @@ def test_ConvertString2Numeric(pg_cursor, dbvendor):
     assert True
 
 def test_ConvertString2Datetime(pg_cursor, dbvendor):
+    #not yet supported
     assert True
 
 def test_ConvertString2Date(pg_cursor, dbvendor):
+    #not yet supported
     assert True
 
 def test_ConvertString2Time(pg_cursor, dbvendor):
+    #not yet supported
     assert True
 
 def test_ConvertString2Bit(pg_cursor, dbvendor):
     assert True
 
 def test_ConvertString2Timestamp(pg_cursor, dbvendor):
+    #not yet supported
     assert True
 
 def test_ConvertString2Binary(pg_cursor, dbvendor):
     assert True
 
 def test_ConvertString2Interval(pg_cursor, dbvendor):
+    #not yet supported
     assert True
 
 

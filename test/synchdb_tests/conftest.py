@@ -22,6 +22,10 @@ def pg_instance(request):
 
     # Init DB
     subprocess.run(["initdb", "-D", data_dir], check=True, stdout=subprocess.DEVNULL)
+    
+    conf_file = os.path.join(data_dir, "postgresql.conf")
+    with open(conf_file, "a") as f:
+        f.write("\nlog_min_messages = debug1\n")
 
     # Start Postgres
     #print("[setup] setting up postgresql for test...")

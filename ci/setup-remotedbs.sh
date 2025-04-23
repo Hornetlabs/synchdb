@@ -61,7 +61,7 @@ EOF
 	sleep 1
 	docker exec -i $id sqlplus /nolog <<EOF
 CONNECT sys/oracle as sysdba;
-alter system set db_recovery_file_dest_size = 10G;
+alter system set db_recovery_file_dest_size = 30G;
 alter system set db_recovery_file_dest = '/opt/oracle/oradata/recovery_area' scope=spfile;
 shutdown immediate;
 startup mount;
@@ -115,9 +115,9 @@ GRANT SELECT ON V_$STATNAME TO c##dbzuser CONTAINER=ALL;
 GRANT EXECUTE ON DBMS_WORKLOAD_REPOSITORY TO C##DBZUSER;
 GRANT SELECT ON DBA_HIST_SNAPSHOT TO C##DBZUSER;
 GRANT EXECUTE ON DBMS_WORKLOAD_REPOSITORY TO PUBLIC;
-ALTER DATABASE ADD LOGFILE GROUP 4 ('/opt/oracle/oradata/FREE/redo04.log') SIZE 1G;
-ALTER DATABASE ADD LOGFILE GROUP 5 ('/opt/oracle/oradata/FREE/redo05.log') SIZE 1G;
-ALTER DATABASE ADD LOGFILE GROUP 6 ('/opt/oracle/oradata/FREE/redo06.log') SIZE 1G;
+ALTER DATABASE ADD LOGFILE GROUP 4 ('/opt/oracle/oradata/FREE/redo04.log') SIZE 512M;
+ALTER DATABASE ADD LOGFILE GROUP 5 ('/opt/oracle/oradata/FREE/redo05.log') SIZE 512M;
+ALTER DATABASE ADD LOGFILE GROUP 6 ('/opt/oracle/oradata/FREE/redo06.log') SIZE 512M;
 exit;
 EOF
 

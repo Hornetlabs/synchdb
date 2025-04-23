@@ -1133,7 +1133,8 @@ ra_listObjmaps(const char * name, ObjectMap ** out, int * numout)
 			"AND (objtype='column' OR objtype='datatype') AND %s.name=%s.name),"
 			"(SELECT pg_atttypename FROM synchdB_att_view WHERE (ext_tbname || '.' || ext_attname)=srcobj "
 			"AND objtype='datatype' AND %s.name=%s.name) "
-			"FROM %s WHERE name = '%s' ORDER BY objtype",
+			"FROM %s WHERE name = '%s' ORDER BY CASE objtype WHEN 'transform' THEN 1 WHEN 'datatype' THEN 2 "
+			"WHEN 'column' THEN 3 WHEN 'table' then 4 ELSE 5 END;",
 			SYNCHDB_OBJECT_MAPPING_TABLE,
 			SYNCHDB_ATTRIBUTE_VIEW,
 			SYNCHDB_OBJECT_MAPPING_TABLE,
