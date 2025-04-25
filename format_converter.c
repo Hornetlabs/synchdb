@@ -4763,6 +4763,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 							elog(ERROR, "cannot find json schema data for column %s(%s). invalid json event?",
 									colval->name, colval->remoteColumnName);
 
+						dbzdml->columnValuesBefore = lappend(dbzdml->columnValuesBefore, colval);
 						pfree(key);
 						pfree(value);
 						key = NULL;
