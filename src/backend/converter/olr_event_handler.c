@@ -1167,6 +1167,15 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 		goto end;
 	}
 	table = pnstrdup(v->val.string.val, v->val.string.len);
+
+	/* special checking to exclude LOG_MINING_FLUSH table created by Debezium. */
+	if (!strcasecmp(table, DBZ_LOG_MINING_FLUSH_TABLE))
+	{
+		elog(WARNING, "debezium log mining flush table %s ignored...", DBZ_LOG_MINING_FLUSH_TABLE);
+		destroyOLRDML(olrdml);
+		olrdml = NULL;
+		goto end;
+	}
 	appendStringInfo(&objid, "%s", table);
 
 	/* table name transformation and normalized objectid to lower case */
@@ -1911,6 +1920,10 @@ fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 		return -1;
 	}
 	op = pnstrdup(v->val.string.val, v->val.string.len);
+
+	/* update stage if needed */
+	if (get_shm_connector_stage_enum(myConnectorId) != STAGE_CHANGE_DATA_CAPTURE)
+		set_shm_connector_stage(myConnectorId, STAGE_CHANGE_DATA_CAPTURE);
 
 	elog(DEBUG1, "op is %s", op);
 	if (!strcasecmp(op, "begin") || !strcasecmp(op, "commit"))

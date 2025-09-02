@@ -1495,15 +1495,24 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 		tmp = pnstrdup(v->val.string.val, v->val.string.len);
 	    if (!strcmp(tmp, "true") || !strcmp(tmp, "last"))
 	    {
-	    	if (flag & CONNFLAG_SCHEMA_SYNC_MODE)
+	    	if (type == TYPE_OLR)
 	    	{
-	        	if (get_shm_connector_stage_enum(myConnectorId) != STAGE_SCHEMA_SYNC)
-	        		set_shm_connector_stage(myConnectorId, STAGE_SCHEMA_SYNC);
+	    		/* native openlog repliciator does not support schema synch mode yet- todo */
+				if (get_shm_connector_stage_enum(myConnectorId) != STAGE_INITIAL_SNAPSHOT)
+					set_shm_connector_stage(myConnectorId, STAGE_INITIAL_SNAPSHOT);
 	    	}
 	    	else
 	    	{
-	        	if (get_shm_connector_stage_enum(myConnectorId) != STAGE_INITIAL_SNAPSHOT)
-	        		set_shm_connector_stage(myConnectorId, STAGE_INITIAL_SNAPSHOT);
+				if (flag & CONNFLAG_SCHEMA_SYNC_MODE)
+				{
+					if (get_shm_connector_stage_enum(myConnectorId) != STAGE_SCHEMA_SYNC)
+						set_shm_connector_stage(myConnectorId, STAGE_SCHEMA_SYNC);
+				}
+				else
+				{
+					if (get_shm_connector_stage_enum(myConnectorId) != STAGE_INITIAL_SNAPSHOT)
+						set_shm_connector_stage(myConnectorId, STAGE_INITIAL_SNAPSHOT);
+				}
 	    	}
 	    	if (!strcmp(tmp, "last"))
 	    		islastsnapshot = true;
