@@ -1,0 +1,23 @@
+#
+# this yaml deploys sqlserver and connects it to internal
+# docker network for internal testing
+#
+
+services:
+  sqlserver:
+    container_name: sqlserver
+    image: mcr.microsoft.com/mssql/server:2019-latest
+    environment:
+     - ACCEPT_EULA=Y
+     - MSSQL_PID=Standard
+     - SA_PASSWORD=Password!
+     - MSSQL_AGENT_ENABLED=true
+    networks:
+      - synchdbnet
+
+networks:
+  synchdbnet:
+    name: synchdbnet
+    driver: bridge
+    internal: true
+

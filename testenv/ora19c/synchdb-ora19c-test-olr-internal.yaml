@@ -1,0 +1,23 @@
+#
+# this yaml deploys ora19c and exposes service ports.
+#
+
+services:
+  ora19c:
+    container_name: ora19c
+    image: doctorkirk/oracle-19c
+    environment:
+      - ORACLE_SID=FREE
+      - ORACLE_PWD=oracle
+      - ORACLE_CHARACTERSET=AL32UTF8
+    networks:
+      - synchdbnet
+    volumes:
+      - ../olr/oradata:/opt/oracle/oradata
+
+networks:
+  synchdbnet:
+    name: synchdbnet
+    driver: bridge
+    internal: true
+

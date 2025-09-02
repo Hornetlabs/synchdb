@@ -1,0 +1,26 @@
+#
+# this yaml deploys oracle and exposes service ports
+#
+
+services:
+  openlogreplicator:
+    container_name: OpenLogReplicator
+    image: hgneon/openlogreplicator:${OLRVER}
+    ports:
+      - 7070:7070
+    user: "54321:54321"
+    volumes:
+      - /opt/fast-recovery-area:/opt/fast-recovery-area
+      - ./:/opt/OpenLogReplicator/scripts
+      - ./checkpoint:/opt/OpenLogReplicator/checkpoint
+      - ./oradata:/opt/oracle/oradata
+    
+    networks:
+      - synchdbnet
+
+networks:
+  synchdbnet:
+    name: synchdbnet
+    driver: bridge
+    internal: true
+

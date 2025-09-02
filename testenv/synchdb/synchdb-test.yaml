@@ -1,0 +1,17 @@
+#
+# this yaml deploys pre-compiled synchdb and connects it
+# to internal docker network for internal testing
+#
+
+services:
+  synchdb:
+    container_name: synchdb
+    image: hgneon/synchdbtest:pg17
+    networks:
+      - synchdbnet
+
+networks:
+  synchdbnet:
+    name: synchdbnet
+    driver: bridge
+    internal: true

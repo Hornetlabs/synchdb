@@ -1,0 +1,6 @@
+# jmxremote.access
+# Format: username access_level
+
+monitorRole readonly
+controlRole readwrite
+

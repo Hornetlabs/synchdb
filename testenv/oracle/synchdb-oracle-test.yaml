@@ -1,0 +1,10 @@
+#
+# this yaml deploys oracle and exposes service ports
+#
+
+services:
+  oracle:
+    container_name: oracle
+    image: hgneon/testdb-oracle:23ai
+    ports:
+      - 1521:1521

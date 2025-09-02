@@ -1,0 +1,23 @@
+diff --git a/include_orig/utils/ora_compatible.h b/include/utils/ora_compatible.h
+index 9d4cfd3..3030bfa 100644
+--- a/include_orig/utils/ora_compatible.h
++++ b/include/utils/ora_compatible.h
+@@ -59,4 +59,18 @@ typedef enum
+ 	NLS_LENGTH_CHAR
+ } NlsLengthSemantics;
+ 
++/* oracle parser static parameters */
++extern int compatible_db;
++extern int nls_length_semantics;
++extern bool identifier_case_from_pg_dump;
++extern bool enable_case_switch;
++extern bool enable_emptystring_to_NULL;
++extern int identifier_case_switch;
++
++char *identifier_case_transform(const char *ident, int len);
++char *downcase_identifier(const char *ident, int len, bool warn, bool truncate);
++char *upcase_identifier(const char *ident, int len, bool warn, bool truncate);
++void truncate_identifier(char *ident, int len, bool warn);
++bool is_all_upper(const char *src, int len);
++
+ #endif							/* ORA_COMPATIBLE_H */

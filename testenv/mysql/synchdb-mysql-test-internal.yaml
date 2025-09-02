@@ -1,0 +1,21 @@
+#
+# this yaml deploys mysql and connects it to internal docker network
+# for internal testing
+#
+
+services:
+  mysql:
+    container_name: mysql
+    image: quay.io/debezium/example-mysql:2.6
+    environment:
+     - MYSQL_ROOT_PASSWORD=mysqlpwdroot
+     - MYSQL_USER=mysqluser
+     - MYSQL_PASSWORD=mysqlpwd
+    networks:
+      - synchdbnet
+
+networks:
+  synchdbnet:
+    name: synchdbnet
+    driver: bridge
+    internal: true

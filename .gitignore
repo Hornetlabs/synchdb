@@ -1,3 +1,5 @@
 dbz-engine/target/
 *.o
 *.so
+testenv/olr/oradata/
+testenv/olr/checkpoint

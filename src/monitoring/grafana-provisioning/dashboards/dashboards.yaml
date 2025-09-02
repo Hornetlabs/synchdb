@@ -1,0 +1,13 @@
+apiVersion: 1
+providers:
+  - name: 'synchdb'
+    orgId: 1
+    folder: 'SynchDB'
+    type: file
+    disableDeletion: false
+    allowUiUpdates: true
+    updateIntervalSeconds: 30
+    options:
+      # IMPORTANT: point to the folder where your JSONs live
+      path: /etc/grafana/provisioning/dashboards
+      foldersFromFilesStructure: true

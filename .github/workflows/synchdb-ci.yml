@@ -10,8 +10,8 @@ jobs:
     runs-on: ubuntu-22.04
     name: Initialize parameters
     outputs:
-      pg16_version: '{ "major": "16", "full": "16.8" }'
-      pg17_version: '{ "major": "17", "full": "17.4" }'
+      pg16_version: '{ "major": "16", "full": "REL_16_4" }'
+      pg17_version: '{ "major": "17", "full": "REL_17_4" }'
     steps:
       - name: set up parameters
         run: echo 'noop'
@@ -37,15 +37,14 @@ jobs:
       uses: stCarolas/setup-maven@v4.5
       with:
         maven-version: 3.9.8
-    - name: Install pg
+    - name: Install Protobuf
       run: |
         sudo apt-get update
-        echo -ne "\n" | sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh
-        sudo apt-get install -y postgresql-client-${{ fromJson(matrix.pg_version).major }}
-        sudo apt-get install -y postgresql-${{ fromJson(matrix.pg_version).major }}
-        sudo apt-get install -y postgresql-server-dev-${{ fromJson(matrix.pg_version).major }}
+        sudo apt-get install -y protobuf-compiler libprotobuf-dev libprotoc-dev
     - name: Expose $PG_MAJOR to Github Env
-      run: echo "PG_MAJOR=$(echo '${{ matrix.pg_version }}' | jq -r .major)" >> $GITHUB_ENV
+      run: |
+        echo "PG_MAJOR=$(echo '${{ matrix.pg_version }}' | jq -r .major)" >> $GITHUB_ENV
+        echo "PG_BRANCH=$(echo '${{ matrix.pg_version }}' | jq -r .full)" >> $GITHUB_ENV
       shell: bash
     - name: Build
       run: "./ci/build-synchdb.sh"
@@ -66,6 +65,7 @@ jobs:
           - mysql
           - oracle
           - sqlserver
+          - olr
     runs-on: ubuntu-22.04
     needs:
     - params
@@ -102,13 +102,13 @@ jobs:
         sudo ldconfig
     - name: Install Base PG and SynchDB
       run: |
-        sudo apt-get update
-        echo -ne "\n" | sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh
-        sudo apt-get install -y postgresql-client-${{ fromJson(matrix.pg_version).major }}
-        sudo apt-get install -y postgresql-${{ fromJson(matrix.pg_version).major }}
         sudo tar xzvf synchdb-install-${{ fromJson(matrix.pg_version).major }}.tar.gz -C /
         sudo apt-get install -y docker-compose
         docker-compose --version
+    - name: Install Protobuf
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y protobuf-compiler libprotobuf-dev libprotoc-dev
     - name: Expose $DBTYPE to Github Env
       run: echo "DBTYPE=${{ matrix.dbtypes }}" >> $GITHUB_ENV
       shell: bash

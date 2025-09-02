@@ -1,5 +1,10 @@
+#
+# this yaml deploys sqlserver and exposes service ports
+#
+
 services:
   sqlserver:
+    container_name: sqlserver
     image: mcr.microsoft.com/mssql/server:2019-latest
     ports:
      - 1433:1433

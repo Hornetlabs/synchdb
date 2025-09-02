@@ -1,0 +1,52 @@
+diff --git a/oracle_parser_orig/Makefile b/oracle_parser/Makefile
+index c7f9efb..493a7f2 100644
+--- a/oracle_parser_orig/Makefile
++++ b/oracle_parser/Makefile
+@@ -25,15 +25,15 @@
+ # add the file for requirement "SQL PARSER"
+ #
+ #-------------------------------------------------------------------------
+-subdir = src/backend/oracle_parser
+-top_builddir = ../../..
++#subdir = contrib/oracle_parser
++top_builddir = ../../../../../../
+ include $(top_builddir)/src/Makefile.global
+ 
+ PGFILEDESC = "liboracle_parser - raw parser for oracle"
+ NAME = liboracle_parser
+ 
+ # include our headers first
+-override CPPFLAGS := -I. -I$(srcdir) $(CPPFLAGS)
++override CPPFLAGS := -I./include -I$(srcdir) $(CPPFLAGS)
+ rpath =
+ 
+ OBJS = ora_keywords.o ora_gram.o ora_scan.o liboracle_parser.o $(WIN32RES)
+@@ -45,7 +45,7 @@ GEN_KEYWORDLIST_DEPS = $(TOOLSDIR)/ora_gen_keywordlist.pl $(TOOLSDIR)/PerfectHas
+ 
+ all: all-shared-lib
+ 
+-include $(top_srcdir)/src/Makefile.shlib
++include $(top_builddir)/src/Makefile.shlib
+ 
+ install: all installdirs install-lib
+ 
+@@ -59,7 +59,7 @@ ora_gram.h: ora_gram.c
+ 	touch $@
+ 
+ ora_gram.c: BISONFLAGS += -d
+-ora_gram.c: BISON_CHECK_CMD = $(PERL) $(srcdir)/../parser/check_keywords.pl $< $(srcdir)/../../include/oracle_parser/ora_kwlist.h
++ora_gram.c: BISON_CHECK_CMD = $(PERL) $(srcdir)/check_keywords.pl $< $(srcdir)/include/oracle_parser/ora_kwlist.h
+ 
+ ora_scan.c: FLEXFLAGS = -CF -p -p
+ ora_scan.c: FLEX_NO_BACKUP=yes
+@@ -69,8 +69,8 @@ ora_scan.c: FLEX_FIX_WARNING=yes
+ ora_scan.o ora_gram.o ora_keywords.o liboracle_parser.o: ora_gram.h
+ 
+ # generate SQL keyword lookup table to be included into ora_keywords*.o.
+-ora_kwlist_d.h: $(top_srcdir)/src/include/oracle_parser/ora_kwlist.h $(GEN_KEYWORDLIST_DEPS)
+-	$(GEN_KEYWORDLIST) --extern $<
++#ora_kwlist_d.h: $(top_srcdir)/src/include/oracle_parser/ora_kwlist.h $(GEN_KEYWORDLIST_DEPS)
++#	$(GEN_KEYWORDLIST) --extern $<
+ 
+ # Dependencies of ora_keywords*.o need to be managed explicitly to make sure
+ # that you don't get broken parsing code, even in a non-enable-depend build.

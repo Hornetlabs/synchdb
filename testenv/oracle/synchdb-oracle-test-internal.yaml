@@ -1,0 +1,17 @@
+#
+# this yaml deploys oracle and connects it to internal
+# docker network for internal testing
+#
+
+services:
+  oracle:
+    container_name: oracle
+    image: hgneon/testdb-oracle:23ai
+    networks:
+      - synchdbnet
+
+networks:
+  synchdbnet:
+    name: synchdbnet
+    driver: bridge
+    internal: true

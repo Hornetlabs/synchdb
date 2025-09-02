@@ -1,0 +1,36 @@
+version: '3.7'
+
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    #network_mode: "host"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    networks:
+      - synchdbnet
+      - pubnet
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    volumes:
+      - ./grafana-provisioning:/etc/grafana/provisioning
+    networks:
+      - synchdbnet
+      - pubnet
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+
+networks:
+  synchdbnet:
+    name: synchdbnet
+    driver: bridge
+    internal: true
+  pubnet:
+    name: pubnet
+    driver: bridge

@@ -1,0 +1,4 @@
+# jmxremote.password
+# Format: username password
+monitorRole mySecretPassword
+controlRole anotherSecretPassword

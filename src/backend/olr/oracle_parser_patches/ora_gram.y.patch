@@ -1,0 +1,459 @@
+diff --git a/oracle_parser_orig/ora_gram.y b/oracle_parser/ora_gram.y
+index 346717f..a98b47f 100644
+--- a/oracle_parser_orig/ora_gram.y
++++ b/oracle_parser/ora_gram.y
+@@ -55,6 +55,7 @@
+ #include "ora_gramparse.h"
+ #include "nodes/makefuncs.h"
+ #include "nodes/nodeFuncs.h"
++#include "nodes/nodetags_ext.h"
+ #include "parser/parser.h"
+ #include "parser/scansup.h"
+ #include "storage/lmgr.h"
+@@ -64,7 +65,16 @@
+ #include "utils/numeric.h"
+ #include "utils/ora_compatible.h"
+ #include "utils/xml.h"
++#include "catalog/pg_attribute.h"
+ 
++/* static configuration to oracle parser */
++int compatible_db = ORA_PARSER;
++int nls_length_semantics = NLS_LENGTH_BYTE;
++bool identifier_case_from_pg_dump = false;
++bool enable_case_switch = true;
++bool enable_emptystring_to_NULL = false;
++bool enable_canonical_mode = true;
++int identifier_case_switch = INTERCHANGE;
+ 
+ /*
+  * Location tracking support --- simpler than bison's default, since we only
+@@ -2547,20 +2557,36 @@ alter_table_cmd:
+ 					n->name = $3;
+ 					$$ = (Node *)n;
+ 				}
+-			| MODIFY ColId INVISIBLE
++			| MODIFY ColId Typename opt_collate_clause alter_using
+ 				{
+ 					AlterTableCmd *n = makeNode(AlterTableCmd);
+-					n->subtype = AT_SetInvisible;
+-					n->name = $2;
+-					$$ = (Node *)n;
+-				}
+-			| MODIFY ColId VISIBLE
+-				{
+-					AlterTableCmd *n = makeNode(AlterTableCmd);
+-					n->subtype = AT_DropInvisible;
+-					n->name = $2;
+-					$$ = (Node *)n;
++                    ColumnDef *def = makeNode(ColumnDef);
++
++                    n->subtype = AT_AlterColumnType;
++                    n->name = $2;
++                    n->def = (Node *) def;
++                    /* We only use these fields of the ColumnDef node */
++                    def->typeName = $3;
++                    def->collClause = (CollateClause *) $4;
++                    def->raw_default = $5;
++                    //def->location = @3;
++                    $$ = (Node *) n;
++
+ 				}
++			//| MODIFY ColId INVISIBLE
++			//	{
++			//		AlterTableCmd *n = makeNode(AlterTableCmd);
++			//		n->subtype = AT_SetInvisible;
++			//		n->name = $2;
++			//		$$ = (Node *)n;
++			//	}
++			//| MODIFY ColId VISIBLE
++			//	{
++			//		AlterTableCmd *n = makeNode(AlterTableCmd);
++			//		n->subtype = AT_DropInvisible;
++			//		n->name = $2;
++			//		$$ = (Node *)n;
++			//	}
+ 			/* ALTER TABLE <name> ALTER [COLUMN] <colname> DROP NOT NULL */
+ 			| ALTER opt_column ColId DROP NOT NULL_P
+ 				{
+@@ -6412,6 +6438,13 @@ ConstraintAttributeElem:
+ 			| INITIALLY DEFERRED			{ $$ = CAS_INITIALLY_DEFERRED; }
+ 			| NOT VALID						{ $$ = CAS_NOT_VALID; }
+ 			| NO INHERIT					{ $$ = CAS_NO_INHERIT; }
++/* added for synchdb - just a workaround, it does not really supprot enabled or disabled constraint */
++			| DISABLE_P						{ $$ = CAS_NOT_VALID; }
++			| ENABLE_P						{ $$ = CAS_DEFERRABLE; }
++			| ENABLE_P VALIDATE				{ $$ = CAS_DEFERRABLE; }
++//			| ENABLE_P NOVALIDATE			{ $$ = CAS_NOT_VALID; }
++			| DISABLE_P VALIDATE			{ $$ = CAS_DEFERRABLE; }
++//			| DISABLE NOVALIDATE			{ $$ = CAS_NOT_VALID; }
+ 		;
+ 
+ 
+@@ -15380,7 +15413,10 @@ SimpleTypename:
+ 						 */
+ 						if (n->val.ival.ival == (INTERVAL_MASK(YEAR) | INTERVAL_MASK(MONTH)))
+ 						{
+-							$$ = OracleSystemTypeName("yminterval");
++							if (enable_canonical_mode)
++								$$ = OracleSystemTypeName("interval year to month");
++							else
++								$$ = OracleSystemTypeName("yminterval");
+ 							$$->typmods = $2;
+ 							$$->location = @1;
+ 						}
+@@ -15389,7 +15425,10 @@ SimpleTypename:
+ 													 INTERVAL_MASK(MINUTE) |
+ 													 INTERVAL_MASK(SECOND)))
+ 						{
+-							$$ = OracleSystemTypeName("dsinterval");
++							if (enable_canonical_mode)
++								$$ = OracleSystemTypeName("interval day to second");
++							else
++								$$ = OracleSystemTypeName("dsinterval");
+ 							$$->typmods = $2;
+ 							$$->location = @1;
+ 						}
+@@ -15696,30 +15735,39 @@ CharacterWithLength:  character '(' Iconst ')'
+ 				{
+ 					if (ORA_PARSER == compatible_db)
+ 					{
+-						if (strcmp($1, "bpchar"))
++						if (enable_canonical_mode)
+ 						{
+-							if (nls_length_semantics == NLS_LENGTH_CHAR)
+-								$1 = "oravarcharchar";
+-							else
+-								$1 = "oravarcharbyte";
++							$$ = OracleSystemTypeName($1);
++							$$->typmods = list_make1(makeIntConst($3, @3));
++							$$->location = @1;
+ 						}
+ 						else
+ 						{
+-							if ($3 > CHAR_TYPE_LENGTH_MAX)
+-								ereport(ERROR,
+-									(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+-									errmsg("specified length too long for its datatype"),
+-									parser_errposition(@3)));
+-
+-							if (nls_length_semantics == NLS_LENGTH_CHAR)
+-								$1 = "oracharchar";
++							if (strcmp($1, "bpchar"))
++							{
++								if (nls_length_semantics == NLS_LENGTH_CHAR)
++									$1 = "oravarcharchar";
++								else
++									$1 = "oravarcharbyte";
++							}
+ 							else
+-								$1 = "oracharbyte";
++							{
++								if ($3 > CHAR_TYPE_LENGTH_MAX)
++									ereport(ERROR,
++										(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
++										errmsg("specified length too long for its datatype"),
++										parser_errposition(@3)));
++
++								if (nls_length_semantics == NLS_LENGTH_CHAR)
++									$1 = "oracharchar";
++								else
++									$1 = "oracharbyte";
++							}
++
++							$$ = OracleSystemTypeName($1);
++							$$->typmods = list_make1(makeIntConst($3, @3));
++							$$->location = @1;
+ 						}
+-
+-						$$ = OracleSystemTypeName($1);
+-						$$->typmods = list_make1(makeIntConst($3, @3));
+-						$$->location = @1;
+ 					}
+ 					else
+ 					{
+@@ -15734,29 +15782,39 @@ CharacterWithoutLength:	 character
+ 				{
+ 					if (ORA_PARSER == compatible_db)
+ 					{
+-						if (!strcmp($1, "bpchar"))
++						/* changed for synchdb */
++						if (enable_canonical_mode)
+ 						{
+-							if (nls_length_semantics == NLS_LENGTH_CHAR)
+-								$1 = "oracharchar";
+-							else
+-								$1 = "oracharbyte";
++							$$ = OracleSystemTypeName($1);
++							$$->typmods = list_make1(makeIntConst(1, -1));
++							$$->location = @1;
+ 						}
+ 						else
+ 						{
+-							if (nls_length_semantics == NLS_LENGTH_CHAR)
+-								$1 = "oravarcharchar";
++							if (!strcmp($1, "bpchar"))
++							{
++								if (nls_length_semantics == NLS_LENGTH_CHAR)
++									$1 = "oracharchar";
++								else
++									$1 = "oracharbyte";
++							}
+ 							else
+-								$1 = "oravarcharbyte";
+-						}
+-
+-						$$ = OracleSystemTypeName($1);
+-
+-						if ((strcmp($1, "oracharchar") == 0) || (strcmp($1, "oracharbyte") == 0))
+-							$$->typmods = list_make1(makeIntConst(1, -1));
+-						else
+-							$$->typmods = list_make1(makeIntConst(4000, -1));
++							{
++								if (nls_length_semantics == NLS_LENGTH_CHAR)
++									$1 = "oravarcharchar";
++								else
++									$1 = "oravarcharbyte";
++							}	
++	
++							$$ = OracleSystemTypeName($1);
++	
++							if ((strcmp($1, "oracharchar") == 0) || (strcmp($1, "oracharbyte") == 0))
++								$$->typmods = list_make1(makeIntConst(1, -1));
++							else
++								$$->typmods = list_make1(makeIntConst(4000, -1));
+ 
+-						$$->location = @1;
++							$$->location = @1;
++						}
+ 					}
+ 					else
+ 					{
+@@ -15769,21 +15827,22 @@ CharacterWithoutLength:	 character
+ 				}
+ 		;
+ 
+-character:	CHARACTER opt_varying
+-										{ $$ = $2 ? "varchar": "bpchar"; }
+-			| CHAR_P opt_varying
+-										{ $$ = $2 ? "varchar": "bpchar"; }
+-			| VARCHAR
+-										{ $$ = "varchar"; }
+-			| VARCHAR2
+-										{ $$ = "varchar"; }
+-			| NATIONAL CHARACTER opt_varying
+-										{ $$ = $3 ? "varchar": "bpchar"; }
+-			| NATIONAL CHAR_P opt_varying
+-										{ $$ = $3 ? "varchar": "bpchar"; }
+-			| NCHAR opt_varying
+-										{ $$ = $2 ? "varchar": "bpchar"; }
+-		;
++
++character:  CHARACTER opt_varying
++                                        { if (enable_canonical_mode){$$ = $2 ? "character varying": "character";} else {$$ = $2 ? "varchar": "bpchar";} }
++            | CHAR_P opt_varying
++                                        { if (enable_canonical_mode){$$ = $2 ? "char varying": "char";} else {$$ = $2 ? "varchar": "bpchar";} }
++            | VARCHAR
++                                        { $$ = "varchar"; }
++            | VARCHAR2
++                                        { if (enable_canonical_mode){$$ = "varchar2";} else {$$ = "varchar";} }
++            | NATIONAL CHARACTER opt_varying
++                                        { if (enable_canonical_mode){$$ = $3 ? "national character varying": "national character";} else {$$ = $3 ? "varchar": "bpchar";} }
++            | NATIONAL CHAR_P opt_varying
++                                        { if (enable_canonical_mode){$$ = $3 ? "national char varying": "national char";} else {$$ = $3 ? "varchar": "bpchar";} }
++            | NCHAR opt_varying
++                                        { if (enable_canonical_mode){$$ = $2 ? "nchar varying": "nchar";} else {$$ = $2 ? "varchar": "bpchar";} }
++        ;
+ 
+ opt_varying:
+ 			VARYING									{ $$ = true; }
+@@ -15792,22 +15851,26 @@ opt_varying:
+ 
+ OracleCharacter: character '(' Iconst CHAR_P ')'
+ 					{
+-						if (strcmp($1, "bpchar"))
+-							$1 = "oravarcharchar";
+-						else
+-							$1 = "oracharchar";
+-
++						if (!enable_canonical_mode)
++						{
++							if (strcmp($1, "bpchar"))
++								$1 = "oravarcharchar";
++							else
++								$1 = "oracharchar";
++						}
+ 						$$ = OracleSystemTypeName($1);
+ 						$$->typmods = list_make1(makeIntConst($3, @3));
+ 						$$->location = @1;
+ 					}
+ 				| character '(' Iconst BYTE_P ')'
+ 					{
+-						if (strcmp($1, "bpchar"))
+-							$1 = "oravarcharbyte";
+-						else
+-							$1 = "oracharbyte";
+-
++						if (!enable_canonical_mode)
++						{
++							if (strcmp($1, "bpchar"))
++								$1 = "oravarcharbyte";
++							else
++								$1 = "oracharbyte";
++						}
+ 						$$ = OracleSystemTypeName($1);
+ 						$$->typmods = list_make1(makeIntConst($3, @3));
+ 						$$->location = @1;
+@@ -15823,10 +15886,20 @@ Datetime:
+ 				{
+ 					if (ORA_PARSER == compatible_db)
+ 					{
+-						if ($5)
+-							$$ = OracleSystemTypeName("oratimestamptz");
++						if (enable_canonical_mode)
++						{
++							if ($5)
++                                $$ = OracleSystemTypeName("timestamp with time zone");
++                            else
++                                $$ = OracleSystemTypeName("timestamp");
++						}
+ 						else
+-							$$ = OracleSystemTypeName("oratimestamp");
++						{
++							if ($5)
++								$$ = OracleSystemTypeName("oratimestamptz");
++							else
++								$$ = OracleSystemTypeName("oratimestamp");
++						}
+ 						$$->typmods = list_make1(makeIntConst($3, @3));
+ 						$$->location = @1;
+ 					}
+@@ -15844,10 +15917,20 @@ Datetime:
+ 				{
+ 					if (ORA_PARSER == compatible_db)
+ 					{
+-						if ($2)
+-							$$ = OracleSystemTypeName("oratimestamptz");
++						if (enable_canonical_mode)
++						{
++							if ($2)
++                                $$ = OracleSystemTypeName("timestamp with time zone");
++                            else
++                                $$ = OracleSystemTypeName("timestamp");
++						}
+ 						else
+-							$$ = OracleSystemTypeName("oratimestamp");
++						{
++							if ($2)
++								$$ = OracleSystemTypeName("oratimestamptz");
++							else
++								$$ = OracleSystemTypeName("oratimestamp");
++						}
+ 						$$->typmods = list_make1(makeIntConst(6, -1));
+ 						$$->location = @1;
+ 					}
+@@ -15862,13 +15945,19 @@ Datetime:
+ 				}
+ 			| TIMESTAMP WITH_LA LOCAL TIME ZONE
+ 				{
+-					$$ = OracleSystemTypeName("oratimestampltz");
++					if (enable_canonical_mode)
++						$$ = OracleSystemTypeName("timestamp with local time zone");
++					else
++						$$ = OracleSystemTypeName("oratimestampltz");
+ 					$$->typmods = list_make1(makeIntConst(6, -1));
+ 					$$->location = @1;
+ 				}
+ 			| TIMESTAMP '(' Iconst ')' WITH_LA LOCAL TIME ZONE
+ 				{
+-					$$ = OracleSystemTypeName("oratimestampltz");
++					if (enable_canonical_mode)
++						$$ = OracleSystemTypeName("timestamp with local time zone");
++					else
++						$$ = OracleSystemTypeName("oratimestampltz");
+ 					$$->typmods = list_make1(makeIntConst($3, @3));
+ 					$$->location = @1;
+ 				}
+@@ -15876,7 +15965,10 @@ Datetime:
+ 				{
+ 					if (ORA_PARSER == compatible_db)
+ 					{
+-						$$ = OracleSystemTypeName("oradate");
++						if (enable_canonical_mode)
++							$$ = OracleSystemTypeName("date");
++						else
++							$$ = OracleSystemTypeName("oradate");
+ 						$$->location = @1;
+ 					}
+ 					else
+@@ -15909,7 +16001,10 @@ ConstDatetime:
+ 		{
+ 			if (ORA_PARSER == compatible_db)
+ 			{
+-				$$ = OracleSystemTypeName("oratimestamp");
++				if (enable_canonical_mode)
++					$$ = OracleSystemTypeName("timestamp");
++				else
++					$$ = OracleSystemTypeName("oratimestamp");
+ 				$$->typmods = list_make1(makeIntConst(6, -1));
+ 				$$->location = @1;
+ 			}
+@@ -15918,7 +16013,10 @@ ConstDatetime:
+ 		{
+ 			if (ORA_PARSER == compatible_db)
+ 			{
+-				$$ = OracleSystemTypeName("oradate");
++				if (enable_canonical_mode)
++					$$ = OracleSystemTypeName("date");
++				else
++					$$ = OracleSystemTypeName("oradate");
+ 				$$->location = @1;
+ 			}
+ 		}
+@@ -19450,7 +19548,10 @@ AexprConst: Iconst
+ 							n->val.ival.ival == INTERVAL_MASK(MONTH) ||
+ 							n->val.ival.ival == (INTERVAL_MASK(YEAR) | INTERVAL_MASK(MONTH)))
+ 						{
+-							t = OracleSystemTypeName("yminterval");
++							if (enable_canonical_mode)
++								t = OracleSystemTypeName("interval year to month");
++							else
++								t = OracleSystemTypeName("yminterval");
+ 							t->typmods = $3;
+ 							t->location = @1;
+ 
+@@ -19458,7 +19559,10 @@ AexprConst: Iconst
+ 						}
+ 						else
+ 						{
+-							t = OracleSystemTypeName("dsinterval");
++							if (enable_canonical_mode)
++								t = OracleSystemTypeName("interval day to second");
++							else
++								t = OracleSystemTypeName("dsinterval");
+ 							t->typmods = $3;
+ 							t->location = @1;
+ 
+@@ -21341,7 +21445,9 @@ SystemFuncName(char *name)
+ List *
+ OracleSystemFuncName(char *name)
+ {
+-	return list_make2(makeString("sys"), makeString(name));
++	/* changed for synchdb */
++	//return list_make2(makeString("sys"), makeString(name));
++	return list_make1(makeString(name));
+ }
+ 
+ /* SystemTypeName()
+@@ -21364,8 +21470,10 @@ SystemTypeName(char *name)
+ TypeName *
+ OracleSystemTypeName(char *name)
+ {
+-	return makeTypeNameFromNameList(list_make2(makeString("sys"),
+-											   makeString(name)));
++	/* changed for synchdb */
++	return makeTypeNameFromNameList(list_make1(makeString(name)));
++	//return makeTypeNameFromNameList(list_make2(makeString("sys"),
++	//										   makeString(name)));
+ }
+ 
+ /* doNegate()
