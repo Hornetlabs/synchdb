@@ -103,6 +103,10 @@ public class DebeziumRunner {
 		private String olrHost;
 		private int olrPort;
 		private String olrSource;
+		private String ispnCacheType;
+		private String ispnMemoryType;
+		private int ispnMemorySize;
+		private String logminerStreamMode;
 
 		/* constructor requires all required parameters for a connector to work */
 		public MyParameters(String connectorName, int connectorType, String hostname, int port, String user, String password, String database, String table, String snapshottable,String snapshotMode, String dstdb)
@@ -216,6 +220,18 @@ public class DebeziumRunner {
 			this.olrSource = olrSource;
 			return this;
 		}
+		public MyParameters setIspn(String ispnCacheType, String ispnMemoryType, int ispnMemorySize)
+		{
+			this.ispnCacheType = ispnCacheType;
+			this.ispnMemoryType = ispnMemoryType;
+			this.ispnMemorySize = ispnMemorySize;
+			return this;
+		}
+		public MyParameters setLogminerStreamMode(String logminerStreamMode)
+		{
+			this.logminerStreamMode = logminerStreamMode;
+			return this;
+		}
 
 		/* add more setters here to incrementally set parameters */
 		public void print()
@@ -249,11 +265,15 @@ public class DebeziumRunner {
 			logger.warn("sslTruststorePass = " + this.sslTruststorePass);
 			logger.warn("logLevel = " + this.logLevel);
 			logger.warn("snapshottable = " + this.snapshottable);
+			logger.warn("logminerStreamMode = " + this.logminerStreamMode);
 			
 			logger.warn("olrHost = " + this.olrHost);
 			logger.warn("olrPort = " + this.olrPort);
 			logger.warn("olrSource = " + this.olrSource);
-
+			
+			logger.warn("ispnCacheType = " + this.ispnCacheType);
+			logger.warn("ispnMemoryType = " + this.ispnMemoryType);
+			logger.warn("ispnMemorySize = " + this.ispnMemorySize);
 		}
 
 	}
@@ -346,17 +366,23 @@ public class DebeziumRunner {
 
 	public void startEngine(MyParameters myParameters) throws Exception
 	{
-		String offsetfile = "/dev/shm/offsets.dat";
-		String schemahistoryfile = "/dev/shm/schemahistory.dat";
-		String signalfile= "/dev/shm/signalfile.dat";
+		String offsetfile = null;
+		String schemahistoryfile = null;
+		String signalfile = null;
+		String ispn_metadata_dir = null;
+		
 		Properties props = new Properties();
 
 		/* Initialize Logging */
-		ConsoleAppender consoleAppender = new ConsoleAppender();
-        consoleAppender.setLayout(new PatternLayout("%d{yyyy-MM-dd HH:mm:ss} %-5p %c{1}:%L - %m%n"));
-        consoleAppender.setTarget(ConsoleAppender.SYSTEM_OUT);
-        consoleAppender.activateOptions();
-		logger.addAppender(consoleAppender);
+		if (logger.getAppender("Console") == null)
+		{
+			ConsoleAppender consoleAppender = new ConsoleAppender();
+			consoleAppender.setName("Console");
+        	consoleAppender.setLayout(new PatternLayout("%d{yyyy-MM-dd HH:mm:ss} %-5p %c{1}:%L - %m%n"));
+        	consoleAppender.setTarget(ConsoleAppender.SYSTEM_OUT);
+        	consoleAppender.activateOptions();
+			logger.addAppender(consoleAppender);
+		}
 
 		switch (myParameters.logLevel)
 		{
@@ -450,6 +476,7 @@ public class DebeziumRunner {
 				offsetfile = "pg_synchdb/oracle_" + myParameters.connectorName + "_" + myParameters.dstdb + "_offsets.dat";
 				schemahistoryfile = "pg_synchdb/oracle_" + myParameters.connectorName + "_" + myParameters.dstdb + "_schemahistory.dat";
 				signalfile = "pg_synchdb/oracle_" + myParameters.connectorName + "_" + myParameters.dstdb + "_signal.dat";
+				ispn_metadata_dir = "pg_synchdb/ispn_" + myParameters.connectorName + "_" + myParameters.dstdb;
 
                 props.setProperty("database.dbname", myParameters.database);
 				if (myParameters.database.equals("null"))
@@ -473,7 +500,118 @@ public class DebeziumRunner {
 				}
         		else
             		logger.warn("olrHost is null - skip setting Openlog Replicator property");
+				if (myParameters.logminerStreamMode != null)
+				{
+					props.setProperty("database.connection.adapter", myParameters.logminerStreamMode);
+				}
+				else
+					logger.warn("logminerStreamMode is null - using the default mode");
 
+				if (myParameters.ispnCacheType != null &&
+					myParameters.ispnMemoryType != null &&
+					myParameters.ispnMemorySize > 0)
+				{
+					String memtype = "HEAP";
+
+					if (myParameters.ispnCacheType.equals("embedded"))
+						props.setProperty("log.mining.buffer.type", "infinispan_embedded");
+					else
+						/* todo: we always default to embedded as that is the mode we support now */
+						props.setProperty("log.mining.buffer.type", "infinispan_embedded");
+	
+					if (myParameters.ispnMemoryType.equals("off heap"))
+						memtype = "OFF_HEAP";
+					else if (myParameters.ispnMemoryType.equals("heap"))
+						memtype = "HEAP";
+					else
+						memtype = "HEAP";
+					
+					logger.warn("using infinispan with memtype " + memtype);
+					props.setProperty(
+				  	"log.mining.buffer.infinispan.cache.global",
+					  "<infinispan xmlns=\"urn:infinispan:config:14.0\">" +
+					    "<threads>" +
+					      "<blocking-bounded-queue-thread-pool name=\"myexec\" max-threads=\"10\" keepalive-time=\"10000\" queue-length=\"5000\"/>" +
+					    "</threads>" +
+					  "</infinispan>"
+					);
+
+					/* EVENT cache */
+					props.setProperty(
+					  "log.mining.buffer.infinispan.cache.events",
+					  "<local-cache name=\"events\">" +
+					    "<encoding>" +
+					      "<key media-type=\"application/x-protostream\"/>" +
+				    	  "<value media-type=\"application/x-protostream\"/>" +
+					    "</encoding>" +
+					    "<memory storage=\"" + memtype + "\" max-size=\"" + myParameters.ispnMemorySize + "MB\" when-full=\"REMOVE\"/>" +
+					    "<persistence passivation=\"true\">" +
+					      "<file-store read-only=\"false\" preload=\"false\" shared=\"false\">" +
+					        "<data path=\"" + ispn_metadata_dir + "/events/data\"/>" +
+				    	    "<index path=\"" + ispn_metadata_dir + "/events/index\"/>" +
+				        	"<write-behind/>" +
+					      "</file-store>" +
+					    "</persistence>" +
+					  "</local-cache>"
+					);
+
+					/* TRANSACTIONS cache */
+					props.setProperty(
+					  "log.mining.buffer.infinispan.cache.transactions",
+					  "<local-cache name=\"transactions\">" +
+					    "<encoding>" +
+					      "<key media-type=\"application/x-protostream\"/>" +
+					      "<value media-type=\"application/x-protostream\"/>" +
+					    "</encoding>" +
+					    "<memory storage=\"" + memtype + "\" max-size=\"" + myParameters.ispnMemorySize +"MB\" when-full=\"REMOVE\"/>" +
+				    	"<persistence passivation=\"true\">" +
+					      "<file-store read-only=\"false\" preload=\"false\" shared=\"false\">" +
+					        "<data path=\"" + ispn_metadata_dir + "/transactions/data\"/>" +
+					        "<index path=\"" + ispn_metadata_dir + "/transactions/index\"/>" +
+					        "<write-behind/>" +
+					      "</file-store>" +
+				    	"</persistence>" +
+					  "</local-cache>"
+					);
+
+					/* PROCESSED TRANSACTIONS cache */
+					props.setProperty(
+					  "log.mining.buffer.infinispan.cache.processed_transactions",
+					  "<local-cache name=\"processed-transactions\">" +
+					    "<encoding>" +
+					      "<key media-type=\"application/x-protostream\"/>" +
+					      "<value media-type=\"application/x-protostream\"/>" +
+					    "</encoding>" +
+				    	"<memory storage=\"" + memtype + "\" max-size=\"" + myParameters.ispnMemorySize +"MB\" when-full=\"REMOVE\"/>" +
+					    "<persistence passivation=\"true\">" +
+					      "<file-store read-only=\"false\" preload=\"false\" shared=\"false\">" +
+					        "<data path=\"" + ispn_metadata_dir + "/processed/data\"/>" +
+					        "<index path=\"" + ispn_metadata_dir + "/processed/index\"/>" +
+					        "<write-behind/>" +
+				    	  "</file-store>" +
+					    "</persistence>" +
+					  "</local-cache>"
+					);
+
+					/* SCHEMA CHANGES cache */
+					props.setProperty(
+					  "log.mining.buffer.infinispan.cache.schema_changes",
+					  "<local-cache name=\"schema-changes\">" +
+					    "<encoding>" +
+				    	  "<key media-type=\"application/x-protostream\"/>" +
+					      "<value media-type=\"application/x-protostream\"/>" +
+					    "</encoding>" +
+					    "<memory storage=\"" + memtype + "\" max-size=\"" + myParameters.ispnMemorySize + "MB\" when-full=\"REMOVE\"/>" +
+					    "<persistence passivation=\"true\">" +
+					      "<file-store read-only=\"false\" preload=\"false\" shared=\"false\">" +
+				    	    "<data path=\"" + ispn_metadata_dir + "/schema/data\"/>" +
+					        "<index path=\"" + ispn_metadata_dir + "/schema/index\"/>" +
+					        "<write-behind/>" +
+					      "</file-store>" +
+					    "</persistence>" +
+					  "</local-cache>"
+					);
+				}
 				break;
 			}
 			case TYPE_OPENLOG_REPLICATOR:
@@ -933,7 +1071,7 @@ public class DebeziumRunner {
 		System.gc();
 	}
 	
-	public String getConnectorOffset(int connectorType, String db, String name)
+	public String getConnectorOffset(int connectorType, String db, String name, String dstdb)
 	{
 		File inputFile = null;
 		Map<ByteBuffer, ByteBuffer> originalData = null;
@@ -944,19 +1082,19 @@ public class DebeziumRunner {
 		{
 			case TYPE_MYSQL:
 			{
-				inputFile = new File("pg_synchdb/mysql_" + name + "_offsets.dat");
+				inputFile = new File("pg_synchdb/mysql_" + name + "_" + dstdb + "_offsets.dat");
 				key = "[\"engine\",{\"server\":\"synchdb-connector\"}]";
 				break;
 			}
 			case TYPE_ORACLE:
 			{
-				inputFile = new File("pg_synchdb/oracle_" + name + "_offsets.dat");
+				inputFile = new File("pg_synchdb/oracle_" + name + "_" + dstdb + "_offsets.dat");
 				key = "[\"engine\",{\"server\":\"synchdb-connector\"}]";
 				break;
 			}
 			case TYPE_SQLSERVER:
 			{
-				inputFile = new File("pg_synchdb/sqlserver_" + name + "_offsets.dat");
+				inputFile = new File("pg_synchdb/sqlserver_" + name + "_" + dstdb + "_offsets.dat");
 				key = "[\"engine\",{\"server\":\"synchdb-connector\",\"database\":\"" + db + "\"}]";
 				break;
 			}

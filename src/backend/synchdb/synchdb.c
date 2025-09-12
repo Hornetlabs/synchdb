@@ -79,6 +79,8 @@ PG_FUNCTION_INFO_V1(synchdb_add_jmx_exporter_conninfo);
 PG_FUNCTION_INFO_V1(synchdb_del_jmx_exporter_conninfo);
 PG_FUNCTION_INFO_V1(synchdb_add_olr_conninfo);
 PG_FUNCTION_INFO_V1(synchdb_del_olr_conninfo);
+PG_FUNCTION_INFO_V1(synchdb_add_infinispan);
+PG_FUNCTION_INFO_V1(synchdb_del_infinispan);
 
 /* Global variables */
 SynchdbSharedState *sdb_state = NULL; /* Pointer to shared-memory state. */
@@ -94,7 +96,8 @@ int dbz_queue_size = 8192;
 char * dbz_skipped_operations = "t";
 int dbz_connect_timeout_ms = 30000;
 int dbz_query_timeout_ms = 600000;
-int jvm_max_heap_size = 0;
+int jvm_max_heap_size = 1024;
+int jvm_max_direct_buffer_size = 1024;
 int dbz_snapshot_thread_num = 2;
 int dbz_snapshot_fetch_size = 0; /* 0: auto */
 int dbz_snapshot_min_row_to_stream_results = 0; /* 0: always stream */
@@ -106,7 +109,8 @@ int synchdb_max_connector_workers = 30;
 int synchdb_error_strategy = STRAT_EXIT_ON_ERROR;
 int dbz_log_level = LOG_LEVEL_WARN;
 bool synchdb_log_event_on_error = true;
-int olr_read_buffer_size = 64;	/* in kilobytes */
+int olr_read_buffer_size = 64;	/* in MB */
+int dbz_logminer_stream_mode = LOGMINER_MODE_UNCOMMITTED;
 
 static const struct config_enum_entry error_strategies[] =
 {
@@ -126,6 +130,13 @@ static const struct config_enum_entry dbz_log_levels[] =
 	{"fatal", LOG_LEVEL_FATAL, false},
 	{"off", LOG_LEVEL_OFF, false},
 	{"trace", LOG_LEVEL_TRACE, false},
+	{NULL, 0, false}
+};
+
+static const struct config_enum_entry ora_logminer_stream_mode[] =
+{
+	{"uncommitted", LOGMINER_MODE_UNCOMMITTED, false},
+	{"committed", LOGMINER_MODE_COMMITTED, false},
 	{NULL, 0, false}
 };
 
@@ -164,10 +175,13 @@ static void start_debezium_engine(ConnectorType connectorType, const ConnectionI
 static void main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshotMode);
 static void cleanup(ConnectorType connectorType);
 static void set_extra_dbz_parameters(jobject myParametersObj, jclass myParametersClass,
-		const ExtraConnectionInfo * extraConnInfo, const OLRConnectionInfo * olrConnInfo);
+		const ExtraConnectionInfo * extraConnInfo, const OLRConnectionInfo * olrConnInfo,
+		const IspnInfo * ispnInfo);
 static void set_shm_connector_statistics(int connectorId, SynchdbStatistics * stats);
 #ifdef WITH_OLR
 static void is_snapshot_cdc_needed(const char* snapshotMode, bool isSnapshotDone, bool * snapshot, bool * cdc);
+static void try_reconnect_olr(ConnectionInfo * connInfo);
+static int olr_set_offset_from_raw(char * offsetdata);
 #endif
 
 /*
@@ -199,17 +213,19 @@ count_active_connectors(void)
  * @return: void
  */
 static void set_extra_dbz_parameters(jobject myParametersObj, jclass myParametersClass, const ExtraConnectionInfo * extraConnInfo,
-		const OLRConnectionInfo * olrConnInfo)
+		const OLRConnectionInfo * olrConnInfo, const IspnInfo * ispnInfo)
 {
 	jmethodID setBatchSize, setQueueSize, setSkippedOperations, setConnectTimeout, setQueryTimeout;
 	jmethodID setSnapshotThreadNum, setSnapshotFetchSize, setSnapshotMinRowToStreamResults;
 	jmethodID setIncrementalSnapshotChunkSize, setIncrementalSnapshotWatermarkingStrategy;
 	jmethodID setOffsetFlushIntervalMs, setCaptureOnlySelectedTableDDL;
 	jmethodID setSslmode, setSslKeystore, setSslKeystorePass, setSslTruststore, setSslTruststorePass;
-	jmethodID setLogLevel, setOlr;
+	jmethodID setLogLevel, setOlr, setIspn, setLogminerStreamMode;
 	jstring jdbz_skipped_operations, jdbz_watermarking_strategy;
 	jstring jdbz_sslmode, jdbz_sslkeystore, jdbz_sslkeystorepass, jdbz_ssltruststore, jdbz_ssltruststorepass;
 	jstring jolrHost, jolrSource;
+	jstring jispnMemoryType, jispnCacheType;
+	jstring jlogminerStreamMode;
 
 	setBatchSize = (*env)->GetMethodID(env, myParametersClass, "setBatchSize",
 			"(I)Lcom/example/DebeziumRunner$MyParameters;");
@@ -539,6 +555,67 @@ static void set_extra_dbz_parameters(jobject myParametersObj, jclass myParameter
 		if (jolrSource)
 				(*env)->DeleteLocalRef(env, jolrSource);
 	}
+
+	/* Infinispan Options for Oracle */
+	if (strcasecmp(ispnInfo->ispn_cache_type, "null"))
+	{
+		jispnCacheType = (*env)->NewStringUTF(env, ispnInfo->ispn_cache_type);
+		jispnMemoryType = (*env)->NewStringUTF(env, ispnInfo->ispn_memory_type);
+
+		setIspn = (*env)->GetMethodID(env, myParametersClass, "setIspn",
+				"(Ljava/lang/String;Ljava/lang/String;I)Lcom/example/DebeziumRunner$MyParameters;");
+		if (setIspn)
+		{
+			myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setIspn, jispnCacheType,
+					jispnMemoryType, ispnInfo->ispn_memory_size);
+			if (!myParametersObj)
+			{
+				elog(WARNING, "failed to call setIspn method");
+			}
+		}
+		else
+			elog(WARNING, "failed to find setIspn method");
+
+		if (jispnCacheType)
+				(*env)->DeleteLocalRef(env, jispnCacheType);
+		if (jispnMemoryType)
+				(*env)->DeleteLocalRef(env, jispnMemoryType);
+	}
+
+	/* Oracle logminer stream mode if defined */
+	if (dbz_logminer_stream_mode != LOGMINER_MODE_UNDEF)
+	{
+		if (dbz_logminer_stream_mode == LOGMINER_MODE_UNCOMMITTED)
+			jlogminerStreamMode = (*env)->NewStringUTF(env, "logminer");
+		else if (dbz_logminer_stream_mode == LOGMINER_MODE_COMMITTED)
+			/*
+			 * XXX: current version of debezium 2.7.x does not yet support
+			 * logminer in committed mode: "logminer_unbuffered", so we will
+			 * default to "logminer" as of now. When we upgrade debezium to
+			 * 3.2.x, we will fix this part accordingly. This can be considered
+			 * as a placeholder for now.
+			 */
+			jlogminerStreamMode = (*env)->NewStringUTF(env, "logminer");
+		else
+			jlogminerStreamMode = (*env)->NewStringUTF(env, "logminer");
+
+		setLogminerStreamMode = (*env)->GetMethodID(env, myParametersClass, "setLogminerStreamMode",
+				"(Ljava/lang/String;)Lcom/example/DebeziumRunner$MyParameters;");
+		if (setLogminerStreamMode)
+		{
+			myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setLogminerStreamMode, jlogminerStreamMode);
+			if (!myParametersObj)
+			{
+				elog(WARNING, "failed to call setLogminerStreamMode method");
+			}
+		}
+		else
+			elog(WARNING, "failed to find setLogminerStreamMode method");
+
+		if (jlogminerStreamMode)
+			(*env)->DeleteLocalRef(env, jlogminerStreamMode);
+	}
+
 	/*
 	 * additional parameters that we want to pass to Debezium on the java side
 	 * will be added here, Make sure to add the matching methods in the MyParameters
@@ -887,7 +964,8 @@ dbz_engine_start(const ConnectionInfo *connInfo, ConnectorType connectorType, co
 	}
 
 	/* set extra parameters */
-	set_extra_dbz_parameters(myParametersObj, myParametersClass, &(connInfo->extra), &(connInfo->olr));
+	set_extra_dbz_parameters(myParametersObj, myParametersClass, &(connInfo->extra), &(connInfo->olr),
+			&(connInfo->ispn));
 
 	/* Find the startEngine method */
 	mid = (*env)->GetMethodID(env, cls, "startEngine", "(Lcom/example/DebeziumRunner$MyParameters;)V");
@@ -947,9 +1025,10 @@ cleanup:
 static char *
 dbz_engine_get_offset(int connectorId)
 {
-	jstring jdb, result, jName;
+	jstring jdb, result, jName, jdstdb;
 	char *resultStr = NULL;
 	char *db = NULL, *name = NULL;
+	char *dstdb = NULL;
 	const char *tmp;
 	jthrowable exception;
 
@@ -974,6 +1053,15 @@ dbz_engine_get_offset(int connectorId)
 		return NULL;
 	}
 
+	/* Get the destination database name based on connector type */
+	dstdb = sdb_state->connectors[connectorId].conninfo.dstdb;
+	if (!dstdb)
+	{
+		elog(WARNING, "Destination database name not set for connector type: %d",
+				sdb_state->connectors[connectorId].type);
+		return NULL;
+	}
+
 	/* Get the unique name */
 	name = sdb_state->connectors[connectorId].conninfo.name;
 	if (!name)
@@ -986,7 +1074,8 @@ dbz_engine_get_offset(int connectorId)
 	if (!getoffsets)
 	{
 		getoffsets = (*env)->GetMethodID(env, cls, "getConnectorOffset",
-										 "(ILjava/lang/String;Ljava/lang/String;)Ljava/lang/String;");
+										 "(ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;)"
+										 "Ljava/lang/String;");
 		if (getoffsets == NULL)
 		{
 			elog(WARNING, "Failed to find getConnectorOffset method");
@@ -996,9 +1085,10 @@ dbz_engine_get_offset(int connectorId)
 
 	jdb = (*env)->NewStringUTF(env, db);
 	jName = (*env)->NewStringUTF(env, name);
+	jdstdb = (*env)->NewStringUTF(env, dstdb);
 
 	result = (jstring)(*env)->CallObjectMethod(env, obj, getoffsets,
-			(int)sdb_state->connectors[connectorId].type, jdb, jName);
+			(int)sdb_state->connectors[connectorId].type, jdb, jName, jdstdb);
 	/* Check for exceptions */
 	exception = (*env)->ExceptionOccurred(env);
 	if (exception)
@@ -1465,45 +1555,10 @@ processRequestInterrupt(ConnectionInfo *connInfo, ConnectorType type, int connec
 			 connectorStateAsString(*currstatecopy),
 			 connectorStateAsString(reqcopy->reqstate));
 #ifdef WITH_OLR
-		/* todo: put restart logic in a function */
 		if (type == TYPE_OLR)
 		{
-			elog(WARNING, "reconnecting...");
-			if (olr_client_init(connInfo->olr.olr_host, connInfo->olr.olr_port))
-				elog(DEBUG1, "failed to reconnect");
-			else
-			{
-				elog(WARNING, "reconnected, request replication...");
-
-				/* connInfo.srcdb is used as data source for OLR */
-				ret = olr_client_start_or_cont_replication(connInfo->olr.olr_source, true);
-				if (ret == -1)
-				{
-					set_shm_connector_errmsg(myConnectorId, "failed to start replication with olr server");
-					elog(ERROR, "failed to start replication with olr server");
-				}
-
-				if (ret == RES_ALREADY_STARTED || ret == RES_STARTING)
-				{
-					elog(WARNING, "replication already started or starting - sending continue");
-					ret = olr_client_start_or_cont_replication(connInfo->olr.olr_source, false);
-					if (ret == -1)
-					{
-						set_shm_connector_errmsg(myConnectorId, "failed to start replication with olr server");
-						elog(ERROR, "failed to start replication with olr server");
-					}
-				}
-				if (ret == RES_REPLICATE)
-				{
-					elog(WARNING, "replication requested...");
-					set_shm_connector_state(connectorId, STATE_SYNCING);
-				}
-				else
-				{
-					set_shm_connector_errmsg(myConnectorId, "openlog replicator is not ready to replicate after reconnection");
-					elog(ERROR, "openlog replicator is not ready to replicate, response code = %d", ret);
-				}
-			}
+			try_reconnect_olr(connInfo);
+			set_shm_connector_state(connectorId, STATE_SYNCING);
 		}
 		else
 #endif
@@ -1537,11 +1592,23 @@ processRequestInterrupt(ConnectionInfo *connInfo, ConnectorType type, int connec
 #ifdef WITH_OLR
 		if (type == TYPE_OLR)
 		{
-			elog(WARNING, "set offset to openlog replicator not supported yet");
-			reset_shm_request_state(connectorId);
-			pfree(reqcopy);
-			pfree(currstatecopy);
-			return;
+			set_shm_connector_state(connectorId, STATE_OFFSET_UPDATE);
+			ret = olr_set_offset_from_raw(reqcopy->reqdata);
+			if (ret < 0)
+			{
+				elog(WARNING, "Failed to set offset for %s connector", connectorTypeToString(type));
+				reset_shm_request_state(connectorId);
+				set_shm_connector_state(connectorId, STATE_PAUSED);
+				pfree(reqcopy);
+				pfree(currstatecopy);
+				return;
+			}
+
+			/* after new offset is set, change state back to STATE_PAUSED */
+			set_shm_connector_state(connectorId, STATE_PAUSED);
+
+			/* and also update this worker's shm offset */
+			set_shm_dbz_offset(connectorId);
 		}
 		else
 #endif
@@ -1576,20 +1643,21 @@ processRequestInterrupt(ConnectionInfo *connInfo, ConnectorType type, int connec
 		elog(WARNING, "got a restart request: %s", reqcopy->reqdata);
 		set_shm_connector_state(connectorId, STATE_RESTARTING);
 
+		/* get a copy of more recent conninfo from reqdata */
+		memcpy(&newConnInfo, &(reqcopy->reqconninfo), sizeof(ConnectionInfo));
+
 #ifdef WITH_OLR
 		if (type == TYPE_OLR)
 		{
-			/* todo support restart */
 			set_shm_connector_state(connectorId, STATE_RESTARTING);
+			olr_client_shutdown();
 			sleep(5);
+			try_reconnect_olr(&newConnInfo);
 			set_shm_connector_state(connectorId, STATE_SYNCING);
 		}
 		else
 #endif
 		{
-			/* get a copy of more recent conninfo from reqdata */
-			memcpy(&newConnInfo, &(reqcopy->reqconninfo), sizeof(ConnectionInfo));
-
 			elog(WARNING, "stopping dbz engine...");
 			ret = dbz_engine_stop();
 			if (ret)
@@ -1761,7 +1829,8 @@ initialize_jvm(JMXConnectionInfo * jmx)
 	/* Configure JVM options */
 	options[optcount++].optionString = psprintf("-Djava.class.path=%s", jar_path);
 	options[optcount++].optionString = "-Xrs"; // Reduce use of OS signals by JVM
-	options[optcount++].optionString = psprintf("-Xmx%dm", jvm_max_heap_size == 0 ? 0 : jvm_max_heap_size);
+	options[optcount++].optionString = psprintf("-Xmx%dm", jvm_max_heap_size);
+	options[optcount++].optionString = psprintf("-XX:MaxDirectMemorySize=%dm", jvm_max_direct_buffer_size);
 
 	/* jmx parameters if enabled */
 	if (jmx && strcasecmp(jmx->jmx_listenaddr, "null") &&
@@ -2026,39 +2095,7 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 							 * a little bit of delay in between...
 							 */
 							sleep(3);
-							elog(WARNING, "reconnecting...");
-							if (olr_client_init(connInfo->olr.olr_host, connInfo->olr.olr_port))
-								elog(DEBUG1, "failed to reconnect");
-							else
-							{
-								elog(WARNING, "reconnected, request replication...");
-
-								/* connInfo.srcdb is used as data source for OLR */
-								ret = olr_client_start_or_cont_replication(connInfo->olr.olr_source, true);
-								if (ret == -1)
-								{
-									set_shm_connector_errmsg(myConnectorId, "failed to start replication with olr server");
-									elog(ERROR, "failed to start replication with olr server");
-								}
-
-								if (ret == RES_ALREADY_STARTED || ret == RES_STARTING)
-								{
-									elog(WARNING, "replication already started or starting - sending continue");
-									ret = olr_client_start_or_cont_replication(connInfo->olr.olr_source, false);
-									if (ret == -1)
-									{
-										set_shm_connector_errmsg(myConnectorId, "failed to start replication with olr server");
-										elog(ERROR, "failed to start replication with olr server");
-									}
-								}
-								if (ret == RES_REPLICATE)
-									elog(WARNING, "replication requested...");
-								else
-								{
-									set_shm_connector_errmsg(myConnectorId, "openlog replicator is not ready to replicate after reconnection");
-									elog(ERROR, "openlog replicator is not ready to replicate, response code = %d", ret);
-								}
-							}
+							try_reconnect_olr(connInfo);
 						}
 					}
 				}
@@ -2714,7 +2751,95 @@ is_snapshot_cdc_needed(const char* snapshotMode, bool isSnapshotDone, bool * sna
 		*cdc = true;
 	}
 }
+
+static void
+try_reconnect_olr(ConnectionInfo * connInfo)
+{
+	int ret = -1;
+
+	if (olr_client_get_connect_status())
+	{
+		elog(WARNING, "already connected.");
+		return;
+	}
+
+	elog(WARNING, "reconnecting...");
+	if (olr_client_init(connInfo->olr.olr_host, connInfo->olr.olr_port))
+		elog(DEBUG1, "failed to reconnect");
+	else
+	{
+		elog(WARNING, "reconnected, request replication...");
+
+		/* connInfo.srcdb is used as data source for OLR */
+		ret = olr_client_start_or_cont_replication(connInfo->olr.olr_source, true);
+		if (ret == -1)
+		{
+			set_shm_connector_errmsg(myConnectorId, "failed to start replication with olr server");
+			elog(ERROR, "failed to start replication with olr server");
+		}
+
+		if (ret == RES_ALREADY_STARTED || ret == RES_STARTING)
+		{
+			elog(WARNING, "replication already started or starting - sending continue");
+			ret = olr_client_start_or_cont_replication(connInfo->olr.olr_source, false);
+			if (ret == -1)
+			{
+				set_shm_connector_errmsg(myConnectorId, "failed to start replication with olr server");
+				elog(ERROR, "failed to start replication with olr server");
+			}
+		}
+		if (ret == RES_REPLICATE)
+			elog(WARNING, "replication requested...");
+		else
+		{
+			set_shm_connector_errmsg(myConnectorId, "openlog replicator is not ready to replicate after reconnection");
+			elog(ERROR, "openlog replicator is not ready to replicate, response code = %d", ret);
+		}
+	}
+}
+
+static int
+olr_set_offset_from_raw(char * offsetdata)
+{
+	orascn scn = 0, c_scn = 0, c_idx = 0;
+	const char *scn_pos = strstr(offsetdata, "\"scn\":");
+	const char *c_scn_pos = strstr(offsetdata, "\"c_scn\":");
+	const char *c_idx_pos = strstr(offsetdata, "\"c_idx\":");
+
+	if (scn_pos)
+	{
+		sscanf(scn_pos, "\"scn\":%llu", &scn);
+	}
+	else
+	{
+		elog(WARNING, "bad offset string: scn missing...");
+		return -1;
+	}
+	if (c_scn_pos)
+	{
+		sscanf(c_scn_pos, "\"c_scn\":%llu", &c_scn);
+	}
+	else
+	{
+		elog(WARNING, "bad offset string: c_scn missing...");
+		return -1;
+	}
+	if (c_idx_pos)
+	{
+		sscanf(c_scn_pos, "\"c_idx\":%llu", &c_idx);
+	}
+	else
+	{
+		elog(WARNING, "bad offset string: c_idx missing...");
+		return -1;
+	}
+	elog(WARNING, "new offset: scn:%llu c_scn:%llu c_idx:%llu",
+			scn, c_scn, c_idx);
+	olr_client_set_scns(scn, c_scn, c_idx);
+	return 0;
+}
 #endif
+
 
 /*
  * increment_connector_statistics - increment statistics
@@ -2942,8 +3067,9 @@ set_shm_dbz_offset(int connectorId)
 #ifdef WITH_OLR
 	if (sdb_state->connectors[connectorId].type == TYPE_OLR)
 	{
-		offset = psprintf("{\"scn\":%llu, \"c_scn\":%llu}",
-				olr_client_get_scn(), olr_client_get_c_scn());
+		offset = psprintf("{\"scn\":%llu, \"c_scn\":%llu, \"c_idx\":%llu}",
+				olr_client_get_scn(), olr_client_get_c_scn(),
+				olr_client_get_c_idx());
 	}
 	else
 #endif
@@ -3211,10 +3337,33 @@ _PG_init(void)
 							&olr_read_buffer_size,
 							64,
 							8,
-							128,
+							512,
 							PGC_SIGHUP,
 							0,
 							NULL, NULL, NULL);
+
+	DefineCustomIntVariable("synchdb.jvm_max_direct_buffer_size",
+							"max direct buffer size to allocate safely to hold JSON change events",
+							NULL,
+							&jvm_max_direct_buffer_size,
+							1024,
+							0,
+							65536,
+							PGC_SIGHUP,
+							0,
+							NULL, NULL, NULL);
+
+	DefineCustomEnumVariable("synchdb.dbz_logminer_stream_mode",
+							 "debezium oracle connector logminer stream mode ",
+							 NULL,
+							 &dbz_logminer_stream_mode,
+							 LOGMINER_MODE_UNCOMMITTED,
+							 ora_logminer_stream_mode,
+							 PGC_SIGHUP,
+							 0,
+							 NULL,
+							 NULL,
+							 NULL);
 
 	if (process_shared_preload_libraries_in_progress)
 	{
@@ -5083,5 +5232,115 @@ synchdb_del_objmap(PG_FUNCTION_ARGS)
 			NameStr(*objtype),
 			NameStr(*srcobj));
 
+	PG_RETURN_INT32(ra_executeCommand(strinfo.data));
+}
+
+/*
+ * synchdb_add_infinispan
+ *
+ * This function configures an existing oracle connector to use infinispan as
+ * cache mechanism to support potentiall large transactions
+ */
+Datum
+synchdb_add_infinispan(PG_FUNCTION_ARGS)
+{
+	/* Parse input arguments */
+	Name name = PG_GETARG_NAME(0);
+	Name memoryType = PG_GETARG_NAME(1);	/* heap or off heap*/
+	unsigned int memorySize = PG_GETARG_UINT32(2);
+
+	IspnInfo ispninfo = {0};
+	StringInfoData strinfo;
+	initStringInfo(&strinfo);
+
+	/* only embedded infinispan is supported as of now */
+	strlcpy(ispninfo.ispn_cache_type, "embedded", INFINISPAN_TYPE_SIZE);
+
+	if (strcasecmp(NameStr(*memoryType), "heap") && strcasecmp(NameStr(*memoryType), "off heap"))
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("invalid infinispan memory type: expect 'heap' or 'off heap'")));
+	}
+	strlcpy(ispninfo.ispn_memory_type, NameStr(*memoryType), INFINISPAN_TYPE_SIZE);
+
+	if (memorySize == 0)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("invalid infinispan memory size")));
+	}
+	ispninfo.ispn_memory_size = memorySize;
+
+	appendStringInfo(&strinfo, "UPDATE %s SET data = data || json_build_object("
+			"'ispn_cache_type', '%s', "	/* only embedded infinispan is supported */
+			"'ispn_memory_type', '%s', "
+			"'ispn_memory_size', %u)::jsonb "
+			"WHERE name = '%s'",
+			SYNCHDB_CONNINFO_TABLE,
+			ispninfo.ispn_cache_type,
+			ispninfo.ispn_memory_type,
+			ispninfo.ispn_memory_size,
+			NameStr(*name));
+
+	PG_RETURN_INT32(ra_executeCommand(strinfo.data));
+}
+
+/*
+ * synchdb_del_infinispan
+ *
+ * This function deletes infinispan configuration from an existing oracle connector.
+ * This removes the configuration as well as the on-disk meta data and cached files.
+ */
+Datum
+synchdb_del_infinispan(PG_FUNCTION_ARGS)
+{
+	/* Parse input arguments */
+	int connectorId;
+	pid_t pid;
+	char * ispn_dir = NULL;
+	Name name = PG_GETARG_NAME(0);
+
+	StringInfoData strinfo;
+	initStringInfo(&strinfo);
+
+	/*
+	 * attach or initialize synchdb shared memory area so we know what is
+	 * going on
+	 */
+	synchdb_init_shmem();
+	if (!sdb_state)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("failed to init or attach to synchdb shared memory")));
+
+	connectorId = get_shm_connector_id_by_name(NameStr(*name), get_database_name(MyDatabaseId));
+	if (connectorId > 0)
+	{
+		pid = get_shm_connector_pid(connectorId);
+		if (pid != InvalidPid)
+		{
+			/* still running, check the connector state */
+			ereport(ERROR,
+					(errmsg("the connector needs to be in stopped state before infinispan "
+							"settings can be removed"),
+					errhint("use synchdb_stop_engine_bgw() to stop it first")));
+		}
+	}
+
+	/* remove on-disk cache and metadata created by infinispan */
+	ispn_dir = psprintf(SYNCHDB_INFINISPAN_DIR, NameStr(*name), get_database_name(MyDatabaseId));
+
+	if (!rmtree(ispn_dir, true))
+		elog(WARNING, "some infinispan metadata files may be left behind in %s",
+				ispn_dir);
+
+	appendStringInfo(&strinfo, "UPDATE %s SET data = data - ARRAY["
+			"'ispn_cache_type', "
+			"'ispn_memory_type', "
+			"'ispn_memory_size'] "
+			"WHERE name = '%s'",
+			SYNCHDB_CONNINFO_TABLE,
+			NameStr(*name));
 	PG_RETURN_INT32(ra_executeCommand(strinfo.data));
 }

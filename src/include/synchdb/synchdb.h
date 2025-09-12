@@ -45,6 +45,8 @@
 #define SYNCHDB_MAX_TZ_LEN 16
 #define SYNCHDB_MAX_TIMESTAMP_LEN 64
 
+#define INFINISPAN_TYPE_SIZE 32
+
 #define SYNCHDB_PG_MAJOR_VERSION  PG_VERSION_NUM / 100
 
 /*
@@ -59,6 +61,7 @@
 #define MAX_JAVA_OPTION_LENGTH 256
 #define SYNCHDB_OFFSET_FILE_PATTERN "pg_synchdb/%s_%s_%s_offsets.dat"
 #define SYNCHDB_SCHEMA_FILE_PATTERN "pg_synchdb/%s_%s_%s_schemahistory.dat"
+#define SYNCHDB_INFINISPAN_DIR "pg_synchdb/ispn_%s_%s"
 #define SYNCHDB_SECRET "930e62fb8c40086c23f543357a023c0c"
 #define SYNCHDB_CONNINFO_TABLE "synchdb_conninfo"
 #define SYNCHDB_ATTRIBUTE_TABLE "synchdb_attribute"
@@ -191,6 +194,16 @@ typedef enum _AlterSubType
 	SUBTYPE_DROP_CONSTRAINT
 } AlterSubType;
 
+/*
+ *
+ */
+typedef enum _OralogminerStreamMode
+{
+	LOGMINER_MODE_UNDEF,
+	LOGMINER_MODE_UNCOMMITTED,
+	LOGMINER_MODE_COMMITTED
+} OraLogminerStreamMode;
+
 /**
  * BatchInfo - Structure containing the metadata of a batch change request
  */
@@ -255,6 +268,16 @@ typedef struct _OLRConnectionInfo
 } OLRConnectionInfo;
 
 /**
+ * Infinispan settings - alternative caching mechanism for oracle connector
+ */
+typedef struct _IspnInfo
+{
+	char ispn_cache_type[INFINISPAN_TYPE_SIZE];
+	char ispn_memory_type[INFINISPAN_TYPE_SIZE];
+	unsigned int ispn_memory_size;
+} IspnInfo;
+
+/**
  * ConnectionInfo - DBZ Connection info. These are put in shared memory so
  * connector background workers can access when they are spawned.
  */
@@ -275,6 +298,7 @@ typedef struct _ConnectionInfo
     ExtraConnectionInfo extra;
     JMXConnectionInfo jmx;
     OLRConnectionInfo olr;
+    IspnInfo ispn;
 } ConnectionInfo;
 
 /**

@@ -48,9 +48,10 @@ static HTAB * build_olr_schema_jsonpos_hash(Jsonb * jb);
 static void destroyOLRDDL(OLR_DDL * ddlinfo);
 static void destroyOLRDML(OLR_DML * dmlinfo);
 static OLR_DDL * parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn,
-		orascn * c_scn, bool isfirst, bool islast);
+		orascn * c_scn, orascn * c_idx, bool isfirst, bool islast);
 static OLR_DML * parseOLRDML(Jsonb * jb, char op, Jsonb * payload,
-		orascn * scn, orascn * c_scn, bool isfirst, bool islast);
+		orascn * scn, orascn * c_scn, orascn * c_idx,
+		bool isfirst, bool islast);
 
 
 static char *
@@ -351,7 +352,7 @@ destroyOLRDML(OLR_DML * dmlinfo)
  * parseOLRDDL
  */
 static OLR_DDL *
-parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, bool isfirst, bool islast)
+parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * c_idx, bool isfirst, bool islast)
 {
 	JsonbValue * v = NULL;
 	JsonbValue vbuf;
@@ -383,6 +384,15 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, bool isfi
 		goto end;
 	}
 	*c_scn = DatumGetUInt64(DirectFunctionCall1(numeric_int8, NumericGetDatum(v->val.numeric)));
+
+	/* commit index - required */
+	v = getKeyJsonValueFromContainer(&jb->root, "c_idx", strlen("c_idx"), &vbuf);
+	if (!v)
+	{
+		elog(WARNING, "malformed change request - no c_idx value");
+		goto end;
+	}
+	* c_idx = DatumGetUInt64(DirectFunctionCall1(numeric_int8, NumericGetDatum(v->val.numeric)));
 
 	/* db - required */
 	v = getKeyJsonValueFromContainer(&jb->root, "db", strlen("db"), &vbuf);
@@ -1068,7 +1078,7 @@ end:
  * parseOLRDML
  */
 static OLR_DML *
-parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, bool isfirst, bool islast)
+parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * c_idx, bool isfirst, bool islast)
 {
 	JsonbValue * v = NULL;
 	JsonbValue vbuf;
@@ -1110,6 +1120,15 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 		return NULL;
 	}
 	*c_scn = DatumGetUInt64(DirectFunctionCall1(numeric_int8, NumericGetDatum(v->val.numeric)));
+
+	/* commit index - required */
+	v = getKeyJsonValueFromContainer(&jb->root, "c_idx", strlen("c_idx"), &vbuf);
+	if (!v)
+	{
+		elog(WARNING, "malformed change request - no c_idx value");
+		return NULL;
+	}
+	*c_idx = DatumGetUInt64(DirectFunctionCall1(numeric_int8, NumericGetDatum(v->val.numeric)));
 
 	/* db - required */
 	v = getKeyJsonValueFromContainer(&jb->root, "db", strlen("db"), &vbuf);
@@ -1928,7 +1947,7 @@ fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 	elog(DEBUG1, "op is %s", op);
 	if (!strcasecmp(op, "begin") || !strcasecmp(op, "commit"))
 	{
-		orascn scn = 0, c_scn = 0;
+		orascn scn = 0, c_scn = 0, c_idx = 0;
 
 		/* scn - required */
 		v = getKeyJsonValueFromContainer(&jb->root, "scn", strlen("scn"), &vbuf);
@@ -1953,6 +1972,18 @@ fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 			return -1;
 		}
 		c_scn = DatumGetUInt64(DirectFunctionCall1(numeric_int8, NumericGetDatum(v->val.numeric)));
+
+		/* commit index - required */
+		v = getKeyJsonValueFromContainer(&jb->root, "c_idx", strlen("c_idx"), &vbuf);
+		if (!v)
+		{
+			elog(WARNING, "malformed change request - no c_idx value");
+			increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
+			MemoryContextSwitchTo(oldContext);
+			MemoryContextDelete(tempContext);
+			return -1;
+		}
+		c_idx = DatumGetUInt64(DirectFunctionCall1(numeric_int8, NumericGetDatum(v->val.numeric)));
 
 		/* transaction boundary */
 		if (!strcasecmp(op, "begin"))
@@ -1993,7 +2024,7 @@ fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 			myBatchStats->stats_first_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
     	}
 
-    	olr_client_set_scns(scn, c_scn);
+    	olr_client_set_scns(scn, c_scn, c_idx);
     	*sendconfirm = true;
 	}
 	else if (!strcasecmp(op, "c") || !strcasecmp(op, "u") || !strcasecmp(op, "d"))
@@ -2001,7 +2032,7 @@ fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 		/* DMLs */
 		OLR_DML * olrdml = NULL;
 		PG_DML * pgdml = NULL;
-		orascn scn = 0, c_scn = 0;
+		orascn scn = 0, c_scn = 0, c_idx = 0;
 
 		/* increment batch statistics */
 		increment_connector_statistics(myBatchStats, STATS_DML, 1);
@@ -2016,7 +2047,7 @@ fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 
 		/* (1) parse */
 		set_shm_connector_state(myConnectorId, STATE_PARSING);
-		olrdml = parseOLRDML(jb, op[0], payload, &scn, &c_scn, isfirst, islast);
+		olrdml = parseOLRDML(jb, op[0], payload, &scn, &c_scn, &c_idx, isfirst, islast);
     	if (!olrdml)
 		{
 			set_shm_connector_state(myConnectorId, STATE_SYNCING);
@@ -2054,7 +2085,7 @@ fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
     	}
 
     	/* (4) record scn, c_scn and processing timestamps */
-    	olr_client_set_scns(scn, c_scn);
+    	olr_client_set_scns(scn, c_scn, c_idx);
     	* sendconfirm = true;
 
     	if (islast)
@@ -2083,7 +2114,7 @@ fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 		/* DDLs */
 		OLR_DDL * olrddl = NULL;
 		PG_DDL * pgddl = NULL;
-		orascn scn = 0, c_scn = 0;
+		orascn scn = 0, c_scn = 0, c_idx = 0;
 
 		/* increment batch statistics */
 		increment_connector_statistics(myBatchStats, STATS_DDL, 1);
@@ -2122,7 +2153,7 @@ fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 
 		/* (2) parse */
 		set_shm_connector_state(myConnectorId, STATE_PARSING);
-		olrddl = parseOLRDDL(jb, payload, &scn, &c_scn, isfirst, islast);
+		olrddl = parseOLRDDL(jb, payload, &scn, &c_scn, &c_idx, isfirst, islast);
     	if (!olrddl)
 		{
 			set_shm_connector_state(myConnectorId, STATE_SYNCING);
@@ -2134,7 +2165,7 @@ fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 			 * have to move forward with scn and c_scn so we do not receive these again
 			 * in case of connector restart.
 			 */
-	    	olr_client_set_scns(scn, c_scn);
+	    	olr_client_set_scns(scn, c_scn, c_idx);
 	    	* sendconfirm = true;
 
 			MemoryContextSwitchTo(oldContext);
@@ -2170,7 +2201,7 @@ fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
     	}
 
     	/* (5) record scn, c_scn and processing timestmaps */
-    	olr_client_set_scns(scn, c_scn);
+    	olr_client_set_scns(scn, c_scn, c_idx);
     	* sendconfirm = true;
 
     	if (islast)

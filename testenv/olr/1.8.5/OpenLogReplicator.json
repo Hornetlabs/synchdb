@@ -1,0 +1,48 @@
+{
+  "version": "1.8.5",
+  "source": [
+    {
+      "alias": "SOURCE",
+      "name": "ORACLE",
+      "reader": {
+        "type": "online",
+        "user": "DBZUSER",
+        "password": "dbz",
+        "server": "//ora19c:1521/FREE"
+      },
+      "format": {
+        "type": "json",
+		"column": 2,
+      	"db": 3,
+      	"interval-dts": 9,
+      	"interval-ytm": 4,
+      	"message": 2,
+      	"rid": 1,
+      	"schema": 7,
+      	"timestamp-all": 1,
+		"scn-type": 1
+      },
+      "memory": {
+        "min-mb": 256,
+        "max-mb": 512,
+		"swap-path": "/opt/OpenLogReplicator/olrswap"
+      },
+	  "filter": {
+        "table": [
+          {"owner": "DBZUSER", "table": ".*"}
+        ]
+      },
+	  "flags": 32
+    }
+  ],
+  "target": [
+    {
+      "alias": "DEBEZIUM",
+      "source": "SOURCE",
+      "writer": {
+        "type": "network",
+		"uri": "0.0.0.0:7070"
+      }
+    }
+  ]
+}

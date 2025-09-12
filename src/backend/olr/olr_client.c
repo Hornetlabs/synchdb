@@ -27,12 +27,16 @@ extern int olr_read_buffer_size;
 static NetioContext g_netioCtx = {0};
 static orascn g_scn = 0;
 static orascn g_c_scn = 0;
+static orascn g_c_idx = 0;
 static StringInfoData g_strinfo;
 static int g_offset = 0;
+static int g_read_buffer_size = 64 * 1024 * 1024;
 
 int
 olr_client_init(const char * hostname, unsigned int port)
 {
+	g_read_buffer_size = olr_read_buffer_size * 1024 * 1024;
+
 	initStringInfo(&g_strinfo);
 	if (netio_connect(&g_netioCtx, hostname, port))
 	{
@@ -134,7 +138,7 @@ olr_client_get_change(int myConnectorId, bool * dbzExitSignal, SynchdbStatistics
 		return -2;
 	}
 
-	nbytes = netio_read(&g_netioCtx, &g_strinfo, olr_read_buffer_size*1024);
+	nbytes = netio_read(&g_netioCtx, &g_strinfo, g_read_buffer_size);
 	if (nbytes > 0)
 	{
 		elog(DEBUG1, "%ld bytes read", nbytes);
@@ -180,8 +184,8 @@ olr_client_get_change(int myConnectorId, bool * dbzExitSignal, SynchdbStatistics
 				break;
 			}
 			/*
-			 * payload is not null-terminated so we make a copy of it first - kind of
-			 * inefficient here. todo.
+			 * XXX: payload is not null-terminated so we make a copy of it first - kind of
+			 * inefficient here.
 			 */
 			json_payload = pnstrdup(g_strinfo.data + g_offset + 4, json_len);
 
@@ -265,6 +269,7 @@ olr_client_confirm_scn(char * source)
 	request.tm_val_case = OPEN_LOG_REPLICATOR__PB__REDO_REQUEST__TM_VAL_SCN;
 	request.scn = olr_client_get_scn();
 	request.c_scn = olr_client_get_c_scn();
+	request.c_idx = olr_client_get_c_idx();
 
 	len = open_log_replicator__pb__redo_request__get_packed_size(&request);
 	buf = palloc0(len + 4);
@@ -284,10 +289,11 @@ olr_client_confirm_scn(char * source)
 }
 
 void
-olr_client_set_scns(orascn scn, orascn c_scn)
+olr_client_set_scns(orascn scn, orascn c_scn, orascn c_idx)
 {
 	g_scn = scn > 0? scn : g_scn;
 	g_c_scn = c_scn > 0 ? c_scn : g_c_scn;
+	g_c_idx = c_idx > 0 ? c_idx : g_c_idx;
 }
 
 orascn
@@ -302,12 +308,18 @@ olr_client_get_scn(void)
 	return g_scn;
 }
 
+orascn
+olr_client_get_c_idx(void)
+{
+	return g_c_idx;
+}
+
 bool
 olr_client_write_scn_state(ConnectorType type, const char * name, const char * dstdb, bool force)
 {
 	int fd;
 	static TimestampTz last_flush_time = 0;
-	orascn buf[2] = {g_scn, g_c_scn};
+	orascn buf[3] = {g_scn, g_c_scn, g_c_idx};
 	char * filename = psprintf(SYNCHDB_OFFSET_FILE_PATTERN,
 			get_shm_connector_name(type), name, dstdb);
 
@@ -346,7 +358,7 @@ bool
 olr_client_init_scn_state(ConnectorType type, const char * name, const char * dstdb)
 {
 	int fd;
-	orascn buf[2];
+	orascn buf[3];
 	char * filename = psprintf(SYNCHDB_OFFSET_FILE_PATTERN,
 			get_shm_connector_name(type), name, dstdb);
 
@@ -368,7 +380,8 @@ olr_client_init_scn_state(ConnectorType type, const char * name, const char * ds
 
 	g_scn = buf[0];
 	g_c_scn = buf[1];
-	elog(LOG, "initialize scn = %llu, c_scn = %llu", g_scn, g_c_scn);
+	g_c_idx = buf[2];
+	elog(LOG, "initialize scn = %llu, c_scn = %llu, c_idx = %llu", g_scn, g_c_scn, g_c_idx);
 	return true;
 }
 

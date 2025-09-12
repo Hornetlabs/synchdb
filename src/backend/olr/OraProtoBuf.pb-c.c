@@ -277,6 +277,12 @@ void   open_log_replicator__pb__redo_request__free_unpacked
   assert(message->base.descriptor == &open_log_replicator__pb__redo_request__descriptor);
   protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
 }
+void   open_log_replicator__pb__redo_response__attributes_entry__init
+                     (OpenLogReplicator__Pb__RedoResponse__AttributesEntry         *message)
+{
+  static const OpenLogReplicator__Pb__RedoResponse__AttributesEntry init_value = OPEN_LOG_REPLICATOR__PB__REDO_RESPONSE__ATTRIBUTES_ENTRY__INIT;
+  *message = init_value;
+}
 void   open_log_replicator__pb__redo_response__init
                      (OpenLogReplicator__Pb__RedoResponse         *message)
 {
@@ -979,7 +985,58 @@ const ProtobufCMessageDescriptor open_log_replicator__pb__redo_request__descript
   (ProtobufCMessageInit) open_log_replicator__pb__redo_request__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor open_log_replicator__pb__redo_response__field_descriptors[11] =
+static const ProtobufCFieldDescriptor open_log_replicator__pb__redo_response__attributes_entry__field_descriptors[2] =
+{
+  {
+    "key",
+    1,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_STRING,
+    0,   /* quantifier_offset */
+    offsetof(OpenLogReplicator__Pb__RedoResponse__AttributesEntry, key),
+    NULL,
+    &protobuf_c_empty_string,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "value",
+    2,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_STRING,
+    0,   /* quantifier_offset */
+    offsetof(OpenLogReplicator__Pb__RedoResponse__AttributesEntry, value),
+    NULL,
+    &protobuf_c_empty_string,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+};
+static const unsigned open_log_replicator__pb__redo_response__attributes_entry__field_indices_by_name[] = {
+  0,   /* field[0] = key */
+  1,   /* field[1] = value */
+};
+static const ProtobufCIntRange open_log_replicator__pb__redo_response__attributes_entry__number_ranges[1 + 1] =
+{
+  { 1, 0 },
+  { 0, 2 }
+};
+const ProtobufCMessageDescriptor open_log_replicator__pb__redo_response__attributes_entry__descriptor =
+{
+  PROTOBUF_C__MESSAGE_DESCRIPTOR_MAGIC,
+  "OpenLogReplicator.pb.RedoResponse.AttributesEntry",
+  "AttributesEntry",
+  "OpenLogReplicator__Pb__RedoResponse__AttributesEntry",
+  "OpenLogReplicator.pb",
+  sizeof(OpenLogReplicator__Pb__RedoResponse__AttributesEntry),
+  2,
+  open_log_replicator__pb__redo_response__attributes_entry__field_descriptors,
+  open_log_replicator__pb__redo_response__attributes_entry__field_indices_by_name,
+  1,  open_log_replicator__pb__redo_response__attributes_entry__number_ranges,
+  (ProtobufCMessageInit) open_log_replicator__pb__redo_response__attributes_entry__init,
+  NULL,NULL,NULL    /* reserved[123] */
+};
+static const ProtobufCFieldDescriptor open_log_replicator__pb__redo_response__field_descriptors[12] =
 {
   {
     "code",
@@ -1113,8 +1170,21 @@ static const ProtobufCFieldDescriptor open_log_replicator__pb__redo_response__fi
     0,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "attributes",
+    12,
+    PROTOBUF_C_LABEL_REPEATED,
+    PROTOBUF_C_TYPE_MESSAGE,
+    offsetof(OpenLogReplicator__Pb__RedoResponse, n_attributes),
+    offsetof(OpenLogReplicator__Pb__RedoResponse, attributes),
+    &open_log_replicator__pb__redo_response__attributes_entry__descriptor,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned open_log_replicator__pb__redo_response__field_indices_by_name[] = {
+  11,   /* field[11] = attributes */
   10,   /* field[10] = c_idx */
   9,   /* field[9] = c_scn */
   0,   /* field[0] = code */
@@ -1130,7 +1200,7 @@ static const unsigned open_log_replicator__pb__redo_response__field_indices_by_n
 static const ProtobufCIntRange open_log_replicator__pb__redo_response__number_ranges[1 + 1] =
 {
   { 1, 0 },
-  { 0, 11 }
+  { 0, 12 }
 };
 const ProtobufCMessageDescriptor open_log_replicator__pb__redo_response__descriptor =
 {
@@ -1140,7 +1210,7 @@ const ProtobufCMessageDescriptor open_log_replicator__pb__redo_response__descrip
   "OpenLogReplicator__Pb__RedoResponse",
   "OpenLogReplicator.pb",
   sizeof(OpenLogReplicator__Pb__RedoResponse),
-  11,
+  12,
   open_log_replicator__pb__redo_response__field_descriptors,
   open_log_replicator__pb__redo_response__field_indices_by_name,
   1,  open_log_replicator__pb__redo_response__number_ranges,

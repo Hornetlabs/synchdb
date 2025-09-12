@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-OLRVER="1.3.0"
+OLRVER="1.8.5"
 
 function have()
 {

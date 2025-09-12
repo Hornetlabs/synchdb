@@ -943,7 +943,10 @@ ra_getConninfoByName(const char * name, ConnectionInfo * conninfo, char ** conne
 			"coalesce(data->>'jmx_exporter_conf', 'null'), "
 			"coalesce(data->>'olr_host', 'null'), "
 			"coalesce(data->>'olr_port', 'null'), "
-			"coalesce(data->>'olr_source', 'null') "
+			"coalesce(data->>'olr_source', 'null'), "
+			"coalesce(data->>'ispn_cache_type', 'null'), "
+			"coalesce(data->>'ispn_memory_type', 'null'), "
+			"coalesce(data->>'ispn_memory_size', 'null') "
 			"FROM "
 			"synchdb_conninfo WHERE name = '%s'",
 			SYNCHDB_SECRET, SYNCHDB_SECRET, SYNCHDB_SECRET, SYNCHDB_SECRET, SYNCHDB_SECRET, name);
@@ -989,6 +992,10 @@ ra_getConninfoByName(const char * name, ConnectionInfo * conninfo, char ** conne
 	conninfo->olr.olr_port = atoi(TextDatumGetCString(res[31]));
 	strlcpy(conninfo->olr.olr_source, TextDatumGetCString(res[32]), SYNCHDB_CONNINFO_NAME_SIZE);
 
+	strlcpy(conninfo->ispn.ispn_cache_type, TextDatumGetCString(res[33]), INFINISPAN_TYPE_SIZE);
+	strlcpy(conninfo->ispn.ispn_memory_type, TextDatumGetCString(res[34]), INFINISPAN_TYPE_SIZE);
+	conninfo->ispn.ispn_memory_size = atoi(TextDatumGetCString(res[35]));
+
 	elog(LOG, "name=%s hostname=%s, port=%d, user=%s pwd=%s srcdb=%s "
 			"dstdb=%s table=%s snapshottable=%s connector=%s extras(ssl_mode=%s ssl_keystore=%s "
 			"ssl_keystore_pass=%s ssl_truststore=%s ssl_truststore_pass=%s) "
@@ -996,7 +1003,9 @@ ra_getConninfoByName(const char * name, ConnectionInfo * conninfo, char ** conne
 			"jmx_auth=%s jmx_auth_passwdfile=%s jmx_auth_accessfile=%s jmx_ssl=%s "
 			"jmx_ssl_keystore=%s jmx_ssl_keystore_pass=%s jmx_ssl_truststore=%s "
 			"jmx_ssl_truststore_pass=%s jmx_exporter=%s jmx_exporter_port=%d "
-			"jmx_exporter_conf=%s olr_host=%s olr_port=%d olr_source=%s)",
+			"jmx_exporter_conf=%s)"
+			"olr(olr_host=%s olr_port=%d olr_source=%s)"
+			"ispn(ispn_cache_type='%s' ispn_memory_type='%s' ispn_memory_size=%u)",
 			conninfo->name, conninfo->hostname, conninfo->port,
 			conninfo->user, conninfo->pwd, conninfo->srcdb,
 			conninfo->dstdb, conninfo->table, conninfo->snapshottable, *connector,
@@ -1009,7 +1018,9 @@ ra_getConninfoByName(const char * name, ConnectionInfo * conninfo, char ** conne
 			conninfo->jmx.jmx_ssl_keystore_pass, conninfo->jmx.jmx_ssl_truststore,
 			conninfo->jmx.jmx_ssl_truststore_pass, conninfo->jmx.jmx_exporter,
 			conninfo->jmx.jmx_exporter_port, conninfo->jmx.jmx_exporter_conf,
-			conninfo->olr.olr_host, conninfo->olr.olr_port, conninfo->olr.olr_source);
+			conninfo->olr.olr_host, conninfo->olr.olr_port, conninfo->olr.olr_source,
+			conninfo->ispn.ispn_cache_type, conninfo->ispn.ispn_memory_type,
+			conninfo->ispn.ispn_memory_size);
 
 	MemoryContextDelete(conninfoContext);
 	return 0;

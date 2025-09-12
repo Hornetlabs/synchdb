@@ -1563,7 +1563,7 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 			}
 			elog(WARNING, "last snapshot event is at: scn=%llu c_scn=%llu", scn, c_scn);
 
-			olr_client_set_scns(scn, c_scn > 0 ? c_scn : scn);
+			olr_client_set_scns(scn, c_scn > 0 ? c_scn : scn, 0);
 	    }
 #endif
     }

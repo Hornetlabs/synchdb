@@ -22,6 +22,7 @@ typedef struct OpenLogReplicator__Pb__Payload OpenLogReplicator__Pb__Payload;
 typedef struct OpenLogReplicator__Pb__SchemaRequest OpenLogReplicator__Pb__SchemaRequest;
 typedef struct OpenLogReplicator__Pb__RedoRequest OpenLogReplicator__Pb__RedoRequest;
 typedef struct OpenLogReplicator__Pb__RedoResponse OpenLogReplicator__Pb__RedoResponse;
+typedef struct OpenLogReplicator__Pb__RedoResponse__AttributesEntry OpenLogReplicator__Pb__RedoResponse__AttributesEntry;
 
 
 /* --- enums --- */
@@ -281,6 +282,17 @@ struct  OpenLogReplicator__Pb__RedoRequest
     , OPEN_LOG_REPLICATOR__PB__REQUEST_CODE__INFO, (char *)protobuf_c_empty_string, 0, 0,NULL, 0, 0, OPEN_LOG_REPLICATOR__PB__REDO_REQUEST__TM_VAL__NOT_SET, {0} }
 
 
+struct  OpenLogReplicator__Pb__RedoResponse__AttributesEntry
+{
+  ProtobufCMessage base;
+  char *key;
+  char *value;
+};
+#define OPEN_LOG_REPLICATOR__PB__REDO_RESPONSE__ATTRIBUTES_ENTRY__INIT \
+ { PROTOBUF_C_MESSAGE_INIT (&open_log_replicator__pb__redo_response__attributes_entry__descriptor) \
+    , (char *)protobuf_c_empty_string, (char *)protobuf_c_empty_string }
+
+
 typedef enum {
   OPEN_LOG_REPLICATOR__PB__REDO_RESPONSE__SCN_VAL__NOT_SET = 0,
   OPEN_LOG_REPLICATOR__PB__REDO_RESPONSE__SCN_VAL_SCN = 2,
@@ -311,6 +323,8 @@ struct  OpenLogReplicator__Pb__RedoResponse
   OpenLogReplicator__Pb__Payload **payload;
   uint64_t c_scn;
   uint64_t c_idx;
+  size_t n_attributes;
+  OpenLogReplicator__Pb__RedoResponse__AttributesEntry **attributes;
   OpenLogReplicator__Pb__RedoResponse__ScnValCase scn_val_case;
   union {
     uint64_t scn;
@@ -329,7 +343,7 @@ struct  OpenLogReplicator__Pb__RedoResponse
 };
 #define OPEN_LOG_REPLICATOR__PB__REDO_RESPONSE__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&open_log_replicator__pb__redo_response__descriptor) \
-    , OPEN_LOG_REPLICATOR__PB__RESPONSE_CODE__READY, (char *)protobuf_c_empty_string, 0,NULL, 0, 0, OPEN_LOG_REPLICATOR__PB__REDO_RESPONSE__SCN_VAL__NOT_SET, {0}, OPEN_LOG_REPLICATOR__PB__REDO_RESPONSE__TM_VAL__NOT_SET, {0}, OPEN_LOG_REPLICATOR__PB__REDO_RESPONSE__XID_VAL__NOT_SET, {0} }
+    , OPEN_LOG_REPLICATOR__PB__RESPONSE_CODE__READY, (char *)protobuf_c_empty_string, 0,NULL, 0, 0, 0,NULL, OPEN_LOG_REPLICATOR__PB__REDO_RESPONSE__SCN_VAL__NOT_SET, {0}, OPEN_LOG_REPLICATOR__PB__REDO_RESPONSE__TM_VAL__NOT_SET, {0}, OPEN_LOG_REPLICATOR__PB__REDO_RESPONSE__XID_VAL__NOT_SET, {0} }
 
 
 /* OpenLogReplicator__Pb__Value methods */
@@ -446,6 +460,9 @@ OpenLogReplicator__Pb__RedoRequest *
 void   open_log_replicator__pb__redo_request__free_unpacked
                      (OpenLogReplicator__Pb__RedoRequest *message,
                       ProtobufCAllocator *allocator);
+/* OpenLogReplicator__Pb__RedoResponse__AttributesEntry methods */
+void   open_log_replicator__pb__redo_response__attributes_entry__init
+                     (OpenLogReplicator__Pb__RedoResponse__AttributesEntry         *message);
 /* OpenLogReplicator__Pb__RedoResponse methods */
 void   open_log_replicator__pb__redo_response__init
                      (OpenLogReplicator__Pb__RedoResponse         *message);
@@ -484,6 +501,9 @@ typedef void (*OpenLogReplicator__Pb__SchemaRequest_Closure)
                   void *closure_data);
 typedef void (*OpenLogReplicator__Pb__RedoRequest_Closure)
                  (const OpenLogReplicator__Pb__RedoRequest *message,
+                  void *closure_data);
+typedef void (*OpenLogReplicator__Pb__RedoResponse__AttributesEntry_Closure)
+                 (const OpenLogReplicator__Pb__RedoResponse__AttributesEntry *message,
                   void *closure_data);
 typedef void (*OpenLogReplicator__Pb__RedoResponse_Closure)
                  (const OpenLogReplicator__Pb__RedoResponse *message,
@@ -526,6 +546,7 @@ extern const ProtobufCMessageDescriptor open_log_replicator__pb__payload__descri
 extern const ProtobufCMessageDescriptor open_log_replicator__pb__schema_request__descriptor;
 extern const ProtobufCMessageDescriptor open_log_replicator__pb__redo_request__descriptor;
 extern const ProtobufCMessageDescriptor open_log_replicator__pb__redo_response__descriptor;
+extern const ProtobufCMessageDescriptor open_log_replicator__pb__redo_response__attributes_entry__descriptor;
 extern const ProtobufCServiceDescriptor open_log_replicator__pb__open_log_replicator__descriptor;
 
 PROTOBUF_C__END_DECLS
