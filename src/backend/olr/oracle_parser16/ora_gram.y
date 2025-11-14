@@ -679,6 +679,9 @@ static void determineLanguage(List *options);
 					json_object_constructor_null_clause_opt
 					json_array_constructor_null_clause_opt
 
+/* added for synchdb to support notvalid without adding keyword */
+%type <ival> EnableOpts
+
 /*
  * Non-keyword token types.  These are hard-wired into the "flex" lexer.
  * They must be listed first so that their numeric codes do not depend on
@@ -2706,6 +2709,75 @@ alter_table_cmd:
                     //def->location = @3;
                     $$ = (Node *) n;
 				}
+            | MODIFY '(' ColId Typename opt_collate_clause alter_using ')'
+                {
+                    AlterTableCmd *n = makeNode(AlterTableCmd);
+                    ColumnDef *def = makeNode(ColumnDef);
+
+                    n->subtype = AT_AlterColumnType;
+                    n->name = $3;
+                    n->def = (Node *) def;
+                    /* We only use these fields of the ColumnDef node */
+                    def->typeName = $4;
+                    def->collClause = (CollateClause *) $5;
+                    def->raw_default = $6;
+                    //def->location = @3;
+                    $$ = (Node *) n;
+                }
+            | MODIFY ColId DEFAULT a_expr
+                {
+                    AlterTableCmd *n = makeNode(AlterTableCmd);
+
+                    n->subtype = AT_ColumnDefault;
+                    n->name = $2;
+                    n->def = (Node *) $4;   /* expression for the DEFAULT */
+                    $$ = (Node *) n;
+                }
+            | MODIFY '(' ColId DEFAULT a_expr ')'
+                {
+                    AlterTableCmd *n = makeNode(AlterTableCmd);
+
+                    n->subtype = AT_ColumnDefault;
+                    n->name = $3;
+                    n->def = (Node *) $5;   /* expression for the DEFAULT */
+                    $$ = (Node *) n;
+                }
+            | MODIFY ColId NOT NULL_P
+                {
+                    AlterTableCmd *n = makeNode(AlterTableCmd);
+
+                    n->subtype = AT_SetNotNull;
+                    n->name = $2;
+                    n->def = NULL;
+                    $$ = (Node *) n;
+                }
+            | MODIFY '(' ColId NOT NULL_P ')'
+                {
+                    AlterTableCmd *n = makeNode(AlterTableCmd);
+
+                    n->subtype = AT_SetNotNull;
+                    n->name = $3;
+                    n->def = NULL;
+                    $$ = (Node *) n;
+                }
+            | MODIFY ColId NULL_P
+                {
+                    AlterTableCmd *n = makeNode(AlterTableCmd);
+
+                    n->subtype = AT_DropNotNull;
+                    n->name = $2;
+                    n->def = NULL;
+                    $$ = (Node *) n;
+                }
+            | MODIFY '(' ColId NULL_P ')'
+                {
+                    AlterTableCmd *n = makeNode(AlterTableCmd);
+
+                    n->subtype = AT_DropNotNull;
+                    n->name = $3;
+                    n->def = NULL;
+                    $$ = (Node *) n;
+                }
 			/* ALTER TABLE <name> VALIDATE CONSTRAINT ... */
 			| VALIDATE CONSTRAINT name
 				{
@@ -4036,6 +4108,16 @@ ColConstraintElem:
 					n->cooked_expr = NULL;
 					n->skip_validation = false;
 					n->initially_valid = true;
+					$$ = (Node *) n;
+				}
+			| DEFAULT ON NULL_P b_expr
+				{
+					Constraint *n = makeNode(Constraint);
+
+					n->contype = CONSTR_DEFAULT;
+					n->location = @1;
+					n->raw_expr = $4;
+					n->cooked_expr = NULL;
 					$$ = (Node *) n;
 				}
 			| DEFAULT b_expr
@@ -6188,6 +6270,21 @@ ConstraintAttributeSpec:
 					$$ = newspec;
 				}
 		;
+/* added for synchdb as workaround - whatever token comes after ENABLE or DISABLE
+ * we do nothing
+ */
+EnableOpts:
+			/* empty */                     { $$ = 0; }
+			| VALIDATE                      { $$ = 0; }
+			| IDENT
+				{
+					if (pg_strcasecmp($1, "novalidate") == 0)
+						$$ = 0;
+					else
+						$$ = 0;
+					pfree($1);
+				}
+		;
 
 ConstraintAttributeElem:
 			NOT DEFERRABLE					{ $$ = CAS_NOT_DEFERRABLE; }
@@ -6197,12 +6294,8 @@ ConstraintAttributeElem:
 			| NOT VALID						{ $$ = CAS_NOT_VALID; }
 			| NO INHERIT					{ $$ = CAS_NO_INHERIT; }
 /* added for synchdb - just a workaround, it does not really supprot enabled or disabled constraint */
-			| DISABLE_P						{ $$ = CAS_NOT_VALID; }
-			| ENABLE_P						{ $$ = CAS_DEFERRABLE; }
-			| ENABLE_P VALIDATE				{ $$ = CAS_DEFERRABLE; }
-//			| ENABLE_P NOVALIDATE			{ $$ = CAS_NOT_VALID; }
-			| DISABLE_P VALIDATE			{ $$ = CAS_DEFERRABLE; }
-//			| DISABLE NOVALIDATE			{ $$ = CAS_NOT_VALID; }
+			| DISABLE_P EnableOpts                  { $$ = 0; }
+			| ENABLE_P EnableOpts                   { $$ = 0; }
 		;
 
 

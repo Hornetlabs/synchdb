@@ -1,7 +1,5 @@
-diff --git a/oracle_parser_orig/Makefile b/oracle_parser/Makefile
-index c7f9efb..493a7f2 100644
---- a/oracle_parser_orig/Makefile
-+++ b/oracle_parser/Makefile
+--- oracle_parser17.ivy/Makefile	2025-11-05 10:44:01.801873900 -0800
++++ oracle_parser17/Makefile	2025-09-02 15:39:45.268346957 -0700
 @@ -25,15 +25,15 @@
  # add the file for requirement "SQL PARSER"
  #
@@ -21,7 +19,7 @@ index c7f9efb..493a7f2 100644
  rpath =
  
  OBJS = ora_keywords.o ora_gram.o ora_scan.o liboracle_parser.o $(WIN32RES)
-@@ -45,7 +45,7 @@ GEN_KEYWORDLIST_DEPS = $(TOOLSDIR)/ora_gen_keywordlist.pl $(TOOLSDIR)/PerfectHas
+@@ -45,7 +45,7 @@
  
  all: all-shared-lib
  
@@ -30,7 +28,7 @@ index c7f9efb..493a7f2 100644
  
  install: all installdirs install-lib
  
-@@ -59,7 +59,7 @@ ora_gram.h: ora_gram.c
+@@ -59,7 +59,7 @@
  	touch $@
  
  ora_gram.c: BISONFLAGS += -d
@@ -39,7 +37,7 @@ index c7f9efb..493a7f2 100644
  
  ora_scan.c: FLEXFLAGS = -CF -p -p
  ora_scan.c: FLEX_NO_BACKUP=yes
-@@ -69,8 +69,8 @@ ora_scan.c: FLEX_FIX_WARNING=yes
+@@ -69,8 +69,8 @@
  ora_scan.o ora_gram.o ora_keywords.o liboracle_parser.o: ora_gram.h
  
  # generate SQL keyword lookup table to be included into ora_keywords*.o.

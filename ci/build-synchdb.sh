@@ -51,7 +51,19 @@ function build_synchdb()
         	./configure --prefix=${installdir}/usr/local && \
         	make && \
         	make install
+	
 	)
+
+	git clone https://github.com/laurenz/oracle_fdw.git --branch ORACLE_FDW_2_8_0 postgres/contrib/oracle_fdw
+	(
+		cd postgres/contrib/oracle_fdw && \
+			sed -i -e 's|FIND_INCLUDE := $(wildcard /usr/include/oracle/\*/client64 /usr/include/oracle/\*/client)|FIND_INCLUDE := $(wildcard /usr/include/oracle/*/client64 /usr/include/oracle/*/client $(OCI_INC_DIR))|' \
+				   -e 's|FIND_LIBDIRS := $(wildcard /usr/lib/oracle/\*/client64/lib /usr/lib/oracle/\*/client/lib)|FIND_LIBDIRS := $(wildcard /usr/lib/oracle/*/client64/lib /usr/lib/oracle/*/client/lib $(OCI_LIB_DIR))|' \
+			Makefile
+			make PG_CONFIG=${installdir}/usr/lib/postgresql/${PG_MAJOR}/bin/pg_config
+			make install PG_CONFIG=${installdir}/usr/lib/postgresql/${PG_MAJOR}/bin/pg_config
+	)
+
 
 	mkdir -p postgres/contrib/synchdb
 	rsync -a --delete \

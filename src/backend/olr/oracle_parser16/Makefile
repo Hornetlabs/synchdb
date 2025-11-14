@@ -14,8 +14,8 @@
 top_builddir = ../../../../../../
 include $(top_builddir)/src/Makefile.global
 
-PGFILEDESC = "liboracle_parser - raw parser for oracle"
-NAME = liboracle_parser
+PGFILEDESC = "libsynchdb_oracle_parser - raw parser for oracle"
+NAME = libsynchdb_oracle_parser
 
 # include our headers first
 override CPPFLAGS := -I./include -I$(srcdir) $(CPPFLAGS)

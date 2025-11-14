@@ -41,6 +41,8 @@ static DBZ_DDL * parseDBZDDL(Jsonb * jb, bool isfirst, bool islast);
 static DBZ_DML * parseDBZDML(Jsonb * jb, char op, ConnectorType type,
 		Jsonb * source, bool isfirst, bool islast);
 
+static bool isInSnapshot = false;
+
 static DdlType
 name_to_ddltype(const char * name)
 {
@@ -137,7 +139,6 @@ build_schema_jsonpos_hash(Jsonb * jb)
 	unsigned int contsize = 0;
 	Datum datum_elems[4] ={CStringGetTextDatum("schema"), CStringGetTextDatum("fields"),
 			CStringGetTextDatum("0"), CStringGetTextDatum("fields")};
-	bool isnull;
 
 	memset(&hash_ctl, 0, sizeof(hash_ctl));
 	hash_ctl.keysize = NAMEDATALEN;
@@ -149,7 +150,7 @@ build_schema_jsonpos_hash(Jsonb * jb)
 							&hash_ctl,
 							HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
 
-	schemadata = DatumGetJsonbP(jsonb_get_element(jb, &datum_elems[0], 4, &isnull, false));
+	schemadata = GET_JSONB_ELEM(jb, &datum_elems[0], 4);
 	if (schemadata)
 	{
 		contsize = JsonContainerSize(&schemadata->root);
@@ -362,9 +363,7 @@ parseDBZDDL(Jsonb * jb, bool isfirst, bool islast)
 		/* fetch payload.tableChanges.0.table.columns as jsonb */
     	Datum datum_elems[5] ={CStringGetTextDatum("payload"), CStringGetTextDatum("tableChanges"),
     			CStringGetTextDatum("0"), CStringGetTextDatum("table"), CStringGetTextDatum("columns")};
-    	bool isnull;
-
-    	ddlpayload = DatumGetJsonbP(jsonb_get_element(jb, &datum_elems[0], 5, &isnull, false));
+    	ddlpayload = GET_JSONB_ELEM(jb, &datum_elems[0], 5);
 		/*
 		 * following parser expects this json array named 'columns' from DBZ embedded:
 		 * "columns": [
@@ -598,7 +597,6 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 	Relation rel;
 	TupleDesc tupdesc;
 	int attnum, j = 0;
-	bool isnull = false;
 	HTAB * typeidhash;
 	HTAB * namejsonposhash;
 	HASHCTL hash_ctl;
@@ -904,7 +902,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 			 * 	in the above example.
 			 */
 			Datum datum_elems[2] ={CStringGetTextDatum("payload"), CStringGetTextDatum("after")};
-			dmlpayload = DatumGetJsonbP(jsonb_get_element(jb, &datum_elems[0], 2, &isnull, false));
+			dmlpayload = GET_JSONB_ELEM(jb, &datum_elems[0], 2);
 			if (dmlpayload)
 			{
 				int pause = 0;
@@ -1063,7 +1061,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 			 * 	}
 			 */
 			Datum datum_elems[2] = { CStringGetTextDatum("payload"), CStringGetTextDatum("before")};
-			dmlpayload = DatumGetJsonbP(jsonb_get_element(jb, &datum_elems[0], 2, &isnull, false));
+			dmlpayload = GET_JSONB_ELEM(jb, &datum_elems[0], 2);
 			if (dmlpayload)
 			{
 				int pause = 0;
@@ -1236,12 +1234,12 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 				if (i == 0)
 				{
 					Datum datum_elems[2] = { CStringGetTextDatum("payload"), CStringGetTextDatum("before")};
-					dmlpayload = DatumGetJsonbP(jsonb_get_element(jb, &datum_elems[0], 2, &isnull, false));
+					dmlpayload = GET_JSONB_ELEM(jb, &datum_elems[0], 2);
 				}
 				else
 				{
 					Datum datum_elems[2] = { CStringGetTextDatum("payload"), CStringGetTextDatum("after")};
-					dmlpayload = DatumGetJsonbP(jsonb_get_element(jb, &datum_elems[0], 2, &isnull, false));
+					dmlpayload = GET_JSONB_ELEM(jb, &datum_elems[0], 2);
 				}
 				if (dmlpayload)
 				{
@@ -1439,6 +1437,7 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 	Datum jsonb_datum;
 	Jsonb * jb;
 	Jsonb * source = NULL;
+	Jsonb * payload = NULL;
 	StringInfoData strinfo;
 	ConnectorType type;
 	MemoryContext tempContext, oldContext;
@@ -1446,7 +1445,7 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 	int ret = -1;
 	struct timeval tv;
 	Datum datum_elems[2] = {CStringGetTextDatum("payload"), CStringGetTextDatum("source")};
-	bool isnull;
+	Datum datum_payload[1] = {CStringGetTextDatum("payload")};
 
 	tempContext = AllocSetContextCreate(TopMemoryContext,
 										"FORMAT_CONVERTER",
@@ -1457,11 +1456,24 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 	initStringInfo(&strinfo);
 
     /* Convert event string to JSONB */
-    jsonb_datum = DirectFunctionCall1(jsonb_in, CStringGetDatum(event));
-    jb = DatumGetJsonbP(jsonb_datum);
+	PG_TRY();
+	{
+	    jsonb_datum = DirectFunctionCall1(jsonb_in, CStringGetDatum(event));
+	    jb = DatumGetJsonbP(jsonb_datum);
+	}
+	PG_CATCH();
+	{
+		FlushErrorState();
+		elog(WARNING, "bad json message: %s", event);
+		increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
+		MemoryContextSwitchTo(oldContext);
+		MemoryContextDelete(tempContext);
+		return -1;
+	}
+	PG_END_TRY();
 
     /* Obtain source element - required */
-	source = DatumGetJsonbP(jsonb_get_element(jb, &datum_elems[0], 2, &isnull, false));
+	source = GET_JSONB_ELEM(jb, &datum_elems[0], 2);
     if (source)
     {
 		JsonbValue * v = NULL;
@@ -1495,27 +1507,38 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 		tmp = pnstrdup(v->val.string.val, v->val.string.len);
 	    if (!strcmp(tmp, "true") || !strcmp(tmp, "last"))
 	    {
-	    	if (type == TYPE_OLR)
-	    	{
-	    		/* native openlog repliciator does not support schema synch mode yet- todo */
+			if (flag & CONNFLAG_SCHEMA_SYNC_MODE)
+			{
+				if (get_shm_connector_stage_enum(myConnectorId) != STAGE_SCHEMA_SYNC)
+					set_shm_connector_stage(myConnectorId, STAGE_SCHEMA_SYNC);
+			}
+			else
+			{
 				if (get_shm_connector_stage_enum(myConnectorId) != STAGE_INITIAL_SNAPSHOT)
 					set_shm_connector_stage(myConnectorId, STAGE_INITIAL_SNAPSHOT);
-	    	}
-	    	else
-	    	{
-				if (flag & CONNFLAG_SCHEMA_SYNC_MODE)
-				{
-					if (get_shm_connector_stage_enum(myConnectorId) != STAGE_SCHEMA_SYNC)
-						set_shm_connector_stage(myConnectorId, STAGE_SCHEMA_SYNC);
-				}
-				else
-				{
-					if (get_shm_connector_stage_enum(myConnectorId) != STAGE_INITIAL_SNAPSHOT)
-						set_shm_connector_stage(myConnectorId, STAGE_INITIAL_SNAPSHOT);
-				}
-	    	}
+			}
+
+			if (!isInSnapshot && !strcmp(tmp, "true"))
+			{
+				isInSnapshot = true;
+				/* first snapshot event: log the snapshot begin timestamp */
+				gettimeofday(&tv, NULL);
+				myBatchStats->snapstats.snapstats_begintime_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
+
+				/*
+				 * when begintime_ts is set, we assume it is the beginning of a snapshot, so
+				 * we set endtime_ts to 0 to indicate a fresh start.
+				 */
+				myBatchStats->snapstats.snapstats_endtime_ts = 0;
+			}
+
 	    	if (!strcmp(tmp, "last"))
+	    	{
 	    		islastsnapshot = true;
+	    		/* last snapshot event: log the snapshot begin timestamp */
+				gettimeofday(&tv, NULL);
+				myBatchStats->snapstats.snapstats_endtime_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
+	    	}
 	    }
 	    else
 	    {
@@ -1569,11 +1592,66 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
     }
     else
     {
-    	elog(WARNING, "malformed change request - no source element");
-    	increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
-    	MemoryContextSwitchTo(oldContext);
-    	MemoryContextDelete(tempContext);
-		return -1;
+		/* if payload.source is absent we assume this is a transaction boundary event */
+		payload = GET_JSONB_ELEM(jb, &datum_payload[0], 1);
+		if (payload)
+		{
+			JsonbValue * v = NULL;
+			JsonbValue vbuf;
+			char * tmp = NULL;
+
+			/* payload.status - required */
+			v = getKeyJsonValueFromContainer(&payload->root, "status", strlen("status"), &vbuf);
+			if (!v)
+			{
+				elog(WARNING, "malformed change request - no status in transaction boundary payload");
+				increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
+				MemoryContextSwitchTo(oldContext);
+				MemoryContextDelete(tempContext);
+				return -1;
+			}
+			increment_connector_statistics(myBatchStats, STATS_TX, 1);
+			tmp = pnstrdup(v->val.string.val, v->val.string.len);
+			elog(DEBUG1, "transaction boundary status: %s", tmp);
+			pfree(tmp);
+
+			/* tm - only at first and last record within a batch */
+			/* update processing timestamps */
+			if (islast)
+			{
+				v = getKeyJsonValueFromContainer(&payload->root, "ts_ms", strlen("ts_ms"), &vbuf);
+				if (v)
+				{
+					myBatchStats->genstats.stats_last_src_ts = DatumGetUInt64(DirectFunctionCall1(numeric_int8,
+							NumericGetDatum(v->val.numeric)));
+				}
+				gettimeofday(&tv, NULL);
+				myBatchStats->genstats.stats_last_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
+			}
+
+			if (isfirst)
+			{
+				v = getKeyJsonValueFromContainer(&jb->root, "ts_ms", strlen("ts_ms"), &vbuf);
+				if (v)
+				{
+					myBatchStats->genstats.stats_first_src_ts = DatumGetUInt64(DirectFunctionCall1(numeric_int8,
+							NumericGetDatum(v->val.numeric)));
+				}
+				gettimeofday(&tv, NULL);
+				myBatchStats->genstats.stats_first_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
+			}
+			MemoryContextSwitchTo(oldContext);
+			MemoryContextDelete(tempContext);
+			return -1;
+		}
+		else
+		{
+			elog(WARNING, "malformed change request - no source element");
+			increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
+			MemoryContextSwitchTo(oldContext);
+			MemoryContextDelete(tempContext);
+			return -1;
+		}
     }
 
     /* Check if it's a DDL or DML event */
@@ -1583,9 +1661,6 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
         /* Process DDL event */
     	DBZ_DDL * dbzddl = NULL;
     	PG_DDL * pgddl = NULL;
-
-    	/* increment batch statistics */
-    	increment_connector_statistics(myBatchStats, STATS_DDL, 1);
 
     	/* (1) parse */
     	set_shm_connector_state(myConnectorId, STATE_PARSING);
@@ -1632,23 +1707,32 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
     	/* (5) record only the first and last change event's processing timestamps only */
     	if (islast)
     	{
-			myBatchStats->stats_last_src_ts = dbzddl->src_ts_ms;
-			myBatchStats->stats_last_dbz_ts = dbzddl->dbz_ts_ms;
+			myBatchStats->genstats.stats_last_src_ts = dbzddl->src_ts_ms;
 			gettimeofday(&tv, NULL);
-			myBatchStats->stats_last_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
+			myBatchStats->genstats.stats_last_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
     	}
 
     	if (isfirst)
     	{
-			myBatchStats->stats_first_src_ts = dbzddl->src_ts_ms;
-			myBatchStats->stats_first_dbz_ts = dbzddl->dbz_ts_ms;
+			myBatchStats->genstats.stats_first_src_ts = dbzddl->src_ts_ms;
 			gettimeofday(&tv, NULL);
-			myBatchStats->stats_first_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
+			myBatchStats->genstats.stats_first_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
     	}
 
+    	/* increment DDLs only in CDC stage */
+    	if (!isInSnapshot)
+    		increment_connector_statistics(myBatchStats, STATS_DDL, 1);
+
+    	/* increment snapshot table count only in initial snapshot stage */
+    	if (isInSnapshot && dbzddl->type == DDL_CREATE_TABLE)
+    		increment_connector_statistics(myBatchStats, STATS_TABLES, 1);
+
 		/* (6) clean up */
+    	if (islastsnapshot)
+    		isInSnapshot = false;
+
     	set_shm_connector_state(myConnectorId, (islastsnapshot &&
-    			((flag & CONNFLAG_SCHEMA_SYNC_MODE) || (flag & CONNFLAG_EXIT_ON_SNAPSHOT_DONE)) ?
+    			((flag & CONNFLAG_SCHEMA_SYNC_MODE) || (flag & CONNFLAG_INITIAL_SNAPSHOT_MODE)) ?
     			STATE_SCHEMA_SYNC_DONE : STATE_SYNCING));
     	destroyDBZDDL(dbzddl);
     	destroyPGDDL(pgddl);
@@ -1658,9 +1742,6 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
         /* Process DML event */
     	DBZ_DML * dbzdml = NULL;
     	PG_DML * pgdml = NULL;
-
-    	/* increment batch statistics */
-    	increment_connector_statistics(myBatchStats, STATS_DML, 1);
 
     	/* (1) parse */
     	set_shm_connector_state(myConnectorId, STATE_PARSING);
@@ -1689,7 +1770,7 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 
     	/* (3) execute */
     	set_shm_connector_state(myConnectorId, STATE_EXECUTING);
-    	ret = ra_executePGDML(pgdml, type, myBatchStats);
+    	ret = ra_executePGDML(pgdml, type, myBatchStats, isInSnapshot);
     	if(ret)
     	{
     		set_shm_connector_state(myConnectorId, STATE_SYNCING);
@@ -1704,23 +1785,28 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
     	/* (4) record only the first and last change event's processing timestamps only */
     	if (islast)
     	{
-			myBatchStats->stats_last_src_ts = dbzdml->src_ts_ms;
-			myBatchStats->stats_last_dbz_ts = dbzdml->dbz_ts_ms;
+			myBatchStats->genstats.stats_last_src_ts = dbzdml->src_ts_ms;
 			gettimeofday(&tv, NULL);
-			myBatchStats->stats_last_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
+			myBatchStats->genstats.stats_last_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
     	}
 
     	if (isfirst)
     	{
-			myBatchStats->stats_first_src_ts = dbzdml->src_ts_ms;
-			myBatchStats->stats_first_dbz_ts = dbzdml->dbz_ts_ms;
+			myBatchStats->genstats.stats_first_src_ts = dbzdml->src_ts_ms;
 			gettimeofday(&tv, NULL);
-			myBatchStats->stats_first_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
+			myBatchStats->genstats.stats_first_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
     	}
 
+    	/* increment DMLs only in CDC stage */
+    	if (!isInSnapshot)
+    		increment_connector_statistics(myBatchStats, STATS_DML, 1);
+
        	/* (5) clean up */
+    	if (islastsnapshot)
+    		isInSnapshot = false;
+
     	set_shm_connector_state(myConnectorId, (islastsnapshot &&
-    			((flag & CONNFLAG_SCHEMA_SYNC_MODE) || (flag & CONNFLAG_EXIT_ON_SNAPSHOT_DONE)) ?
+    			((flag & CONNFLAG_SCHEMA_SYNC_MODE) || (flag & CONNFLAG_INITIAL_SNAPSHOT_MODE)) ?
     			STATE_SCHEMA_SYNC_DONE : STATE_SYNCING));
     	destroyDBZDML(dbzdml);
     	destroyPGDML(pgdml);

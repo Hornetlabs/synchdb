@@ -141,7 +141,7 @@ EOF
 	sleep 1
 	docker exec -i oracle sqlplus /nolog <<EOF
 CONNECT sys/oracle as sysdba;
-alter system set db_recovery_file_dest_size = 30G;
+alter system set db_recovery_file_dest_size = 40G;
 alter system set db_recovery_file_dest = '/opt/oracle/oradata/recovery_area' scope=spfile;
 shutdown immediate;
 startup mount;
@@ -293,15 +293,15 @@ function setup_ora19c()
 	# check if oracle has been initialized
     isinit=$(docker exec ora19c sh -c '[ -d /opt/oracle/oradata/recovery_area ]' && echo exists || echo missing)
     if [ "$isinit" == "exists" ]; then
-        echo "oracle19c has been setup already. Skip setup..."
-        return
+		echo "oracle19c has been setup already. Skip setup..."
+		return
     fi
 
 	docker exec -i ora19c mkdir /opt/oracle/oradata/recovery_area
 	sleep 1
 	docker exec -i ora19c sqlplus /nolog <<EOF
 CONNECT sys/oracle as sysdba;
-alter system set db_recovery_file_dest_size = 30G;
+alter system set db_recovery_file_dest_size = 40G;
 alter system set db_recovery_file_dest = '/opt/oracle/oradata/recovery_area' scope=spfile;
 shutdown immediate;
 startup mount;
@@ -381,6 +381,18 @@ GRANT SELECT ON SYS.V_$LOGFILE TO DBZUSER;
 GRANT SELECT ON SYS.V_$PARAMETER TO DBZUSER;
 GRANT SELECT ON SYS.V_$STANDBY_LOG TO DBZUSER;
 GRANT SELECT ON SYS.V_$TRANSPORTABLE_PLATFORM TO DBZUSER;
+
+GRANT CREATE PROCEDURE TO DBZUSER;
+GRANT CREATE ANY PROCEDURE TO DBZUSER;
+GRANT EXECUTE ON DBMS_RANDOM TO DBZUSER;
+GRANT CREATE SEQUENCE TO DBZUSER;
+GRANT CREATE TRIGGER TO DBZUSER;
+GRANT CREATE TYPE TO DBZUSER;
+GRANT CREATE TABLE TO DBZUSER;
+GRANT CREATE SESSION TO DBZUSER;
+GRANT CREATE VIEW TO DBZUSER;
+GRANT UNLIMITED TABLESPACE TO DBZUSER;
+
 DECLARE
     CURSOR C1 IS SELECT TOKSUF FROM XDB.XDB$TTSET;
     CMD VARCHAR2(2000);
@@ -422,12 +434,16 @@ EOF
 
 function setup_hammerdb()
 {
-	WHICH=${WHICH:?please provide which hammerdb type, mysql, sqlserver or oracle}
+	which=${WHICH:?please provide which hammerdb type, mysql, sqlserver or oracle}
 	echo "setting up hammerdb for $which..."
 	docker run -d --name hammerdb hgneon/hammerdb:5.0
 	echo "sleep to give container time to startup..."
 	sleep 5
-	
+
+	if [ $which == "olr" ]; then
+		which="ora19c"
+	fi
+
 	docker cp ./testenv/hammerdb/${which}_buildschema.tcl hammerdb:/buildschema.tcl
 	docker cp ./testenv/hammerdb/${which}_runtpcc.tcl hammerdb:/runtpcc.tcl
 	exit 0
@@ -443,6 +459,16 @@ function setup_oradata()
 	if [ ! -d ./testenv/olr/checkpoint ]; then
 		mkdir ./testenv/olr/checkpoint
 		sudo chown 54321:54321 -R ./testenv/olr/checkpoint
+	fi
+	
+	if [ ! -d ./testenv/olr/olrswap ]; then
+		mkdir ./testenv/olr/olrswap
+		sudo chown 54321:54321 -R ./testenv/olr/olrswap
+	fi
+	
+	if [ ! -d ./testenv/olr/fast-recovery-area ]; then
+		mkdir ./testenv/olr/fast-recovery-area
+		sudo chown 54321:54321 -R ./testenv/olr/fast-recovery-area
 	fi
 }
 

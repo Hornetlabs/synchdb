@@ -1,4 +1,4 @@
-
+import os
 import subprocess
 import socket
 import time
@@ -20,15 +20,12 @@ def get_container_ip(name: str, network: str = "synchdbnet") -> str | None:
         raise RuntimeError("docker inspect timed out")
 
     if proc.returncode != 0:
-        # e.g. "Error: No such object: <name>"
         err = (proc.stderr or "").strip()
         if "No such object" in err:
-            # print(f"[ERROR] cannot get container IP for {name}")
             return None
-        raise RuntimeError(f"docker inspect failed: {err}")
 
     ip = proc.stdout.strip()
-    return ip or None  # None if not attached to that network
+    return ip or None # None if not attached to that network
 
 MYSQL_HOST="127.0.0.1"
 MYSQL_PORT=3306
@@ -42,9 +39,9 @@ SQLSERVER_USER="sa"
 SQLSERVER_PASS="Password!"
 SQLSERVER_DB="testDB"
 
-ORACLE_HOST="127.0.0.1"
+ORACLE_HOST=get_container_ip(name="ora19c")
 ORACLE_PORT=1521
-ORACLE_USER="c##dbzuser"
+ORACLE_USER="DBZUSER"
 ORACLE_PASS="dbz"
 ORACLE_DB="FREE"
 
@@ -87,9 +84,9 @@ def getSchema(dbvendor):
     elif dbvendor == "sqlserver":
         return "dbo"
     elif dbvendor == "oracle":
-        return "c##dbzuser"
+        return ORACLE_USER
     else:
-        return "DBZUSER"
+        return ORA19C_USER
 
 def run_pg_query(cursor, query):
     cursor.execute(query)
@@ -223,7 +220,7 @@ def run_remote_query(where, query, srcdb=None):
             exit
             """
             if where == "oracle":
-                result = subprocess.check_output(["docker", "exec", "-i", "oracle", "sqlplus", "-S", f"{ORACLE_USER}/{ORACLE_PASS}@//{ORACLE_HOST}:{ORACLE_PORT}/{db}"], input=sql, text=True).strip()
+                result = subprocess.check_output(["docker", "exec", "-i", "ora19c", "sqlplus", "-S", f"{ORACLE_USER}/{ORACLE_PASS}@//{ORACLE_HOST}:{ORACLE_PORT}/{db}"], input=sql, text=True).strip()
             else:
                 global ORA19C_HOST
                 max_tries = 20
@@ -269,6 +266,16 @@ def create_synchdb_connector(cursor, vendor, name, srcdb=None):
         result = run_pg_query_one(cursor, f"SELECT synchdb_add_conninfo('{name}','{SQLSERVER_HOST}', {SQLSERVER_PORT}, '{SQLSERVER_USER}', '{SQLSERVER_PASS}', '{db}', 'postgres', 'null', 'null', 'sqlserver');")
 
     elif vendor == "oracle":
+        global ORACLE_HOST
+        max_tries = 20
+        tries = 0
+
+        while ORACLE_HOST is None and tries < max_tries:
+            ORACLE_HOST = get_container_ip(name="ora19c")
+            tries += 1
+            time.sleep(1)
+
+        assert ORACLE_HOST != None
         result = run_pg_query_one(cursor, f"SELECT synchdb_add_conninfo('{name}','{ORACLE_HOST}', {ORACLE_PORT}, '{ORACLE_USER}', '{ORACLE_PASS}', '{db}', 'postgres', 'null', 'null', 'oracle');")
     else:
         global ORA19C_HOST
@@ -310,3 +317,17 @@ def drop_default_pg_schema(cursor, vendor):
         row = run_pg_query_one(cursor, f"DROP SCHEMA IF EXISTS testdb CASCADE")
     else:
         row = run_pg_query_one(cursor, f"DROP SCHEMA IF EXISTS free CASCADE")
+
+def update_guc_conf(cursor, key, val, reload_conf=False):
+    temp_dir = "synchdb_testdir"
+    data_dir = os.path.join(temp_dir, "data")
+    conf_file = os.path.join(data_dir, "postgresql.conf")
+
+    # Append parameter
+    with open(conf_file, "a") as f:
+        f.write(f"\n{key} = {val}\n")
+
+    # Apply changes if requested
+    if reload_conf:
+        cursor.execute("SELECT pg_reload_conf()")
+

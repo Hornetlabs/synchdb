@@ -8,7 +8,7 @@ import pytest
 
 PG_PORT = "5432"
 PG_HOST = "127.0.0.1"
-OLRVER = "1.3.0"
+OLRVER = "1.8.5"
 
 @pytest.fixture(scope="session")
 def pg_instance(request):
@@ -26,12 +26,14 @@ def pg_instance(request):
     
     conf_file = os.path.join(data_dir, "postgresql.conf")
     with open(conf_file, "a") as f:
-#        f.write("\nlog_min_messages = debug1\n")
         f.write("\nsynchdb.naptime = 10\n")
         f.write("\nsynchdb.dbz_batch_size= 16384\n")
         f.write("\nsynchdb.dbz_queue_size= 32768\n")
         f.write("\nsynchdb.jvm_max_heap_size= 2048\n")
-        f.write("\nlog_min_messages = debug1\n")
+        f.write("\nsynchdb.olr_read_buffer_size = 128\n")
+        #f.write("\nlog_min_messages = debug1\n")
+        #f.write("\nsynchdb.olr_snapshot_engine = 'fdw'\n")
+        #f.write("\nsynchdb.cdc_start_delay_ms = 15000\n")
 
     # Start Postgres
     #print("[setup] setting up postgresql for test...")
@@ -110,10 +112,16 @@ def tpccmode(pytestconfig):
 @pytest.fixture(scope="session", autouse=True)
 def setup_remote_instance(dbvendor, request):
     env = os.environ.copy()
+    if dbvendor == "oracle":
+        dbvendor = "ora19c"
     env["DBTYPE"] = dbvendor
     env["WHICH"] = "n/a"
     env["OLRVER"] = OLRVER
-    env["INTERNAL"] = "0"
+
+    if dbvendor == "ora19c":
+        env["INTERNAL"] = "1"
+    else:
+        env["INTERNAL"] = "0"
 
     #print(f"[setup] setting up heterogeneous database {dbvendor}...")
     subprocess.run(["bash", "./ci/setup-remotedbs.sh"], check=True, env=env, stdout=subprocess.DEVNULL)
@@ -127,15 +135,20 @@ def hammerdb(dbvendor):
     env = os.environ.copy()
     env["DBTYPE"] = "hammerdb"
     env["WHICH"] = dbvendor
+    env["INTERNAL"] = "0"
+    
+    thedb = dbvendor
+    if dbvendor == "olr":
+        thedb = "ora19c"
 
     subprocess.run(["bash", "./ci/setup-remotedbs.sh"], check=True, env=env, stdout=subprocess.DEVNULL)
     subprocess.run(["docker", "network", "create", "tpccnet"], check=True, stdout=subprocess.DEVNULL)
-    subprocess.run(["docker", "network", "connect", "tpccnet", f"{dbvendor}"], check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(["docker", "network", "connect", "tpccnet", f"{thedb}"], check=True, stdout=subprocess.DEVNULL)
     subprocess.run(["docker", "network", "connect", "tpccnet", "hammerdb"], check=True, stdout=subprocess.DEVNULL)
     
     yield
     
-    subprocess.run(["docker", "network", "disconnect", "tpccnet", f"{dbvendor}"], check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(["docker", "network", "disconnect", "tpccnet", f"{thedb}"], check=True, stdout=subprocess.DEVNULL)
     subprocess.run(["docker", "network", "disconnect", "tpccnet", "hammerdb"], check=True, stdout=subprocess.DEVNULL)
     subprocess.run(["docker", "network", "rm", "tpccnet"], check=True, stdout=subprocess.DEVNULL)
     teardown_remote_instance("hammerdb")

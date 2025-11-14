@@ -10,8 +10,9 @@ jobs:
     runs-on: ubuntu-22.04
     name: Initialize parameters
     outputs:
-      pg16_version: '{ "major": "16", "full": "REL_16_4" }'
-      pg17_version: '{ "major": "17", "full": "REL_17_4" }'
+      pg16_version: '{ "major": "16", "full": "REL_16_9" }'
+      pg17_version: '{ "major": "17", "full": "REL_17_6" }'
+      pg18_version: '{ "major": "18", "full": "REL_18_0" }'
     steps:
       - name: set up parameters
         run: echo 'noop'
@@ -23,6 +24,7 @@ jobs:
         pg_version:
           - ${{ needs.params.outputs.pg16_version }}
           - ${{ needs.params.outputs.pg17_version }}
+          - ${{ needs.params.outputs.pg18_version }}
     runs-on: ubuntu-22.04
     steps:
     - uses: actions/checkout@v2
@@ -37,6 +39,18 @@ jobs:
       uses: stCarolas/setup-maven@v4.5
       with:
         maven-version: 3.9.8
+    - name: Setup Oracle Instant Client v23.9
+      run: |
+        mkdir -p $GITHUB_WORKSPACE/oci && cd $GITHUB_WORKSPACE/oci
+        wget -q https://download.oracle.com/otn_software/linux/instantclient/2390000/instantclient-basic-linux.x64-23.9.0.25.07.zip
+        wget -q https://download.oracle.com/otn_software/linux/instantclient/2390000/instantclient-sdk-linux.x64-23.9.0.25.07.zip
+        unzip -q instantclient-basic-linux.x64-23.9.0.25.07.zip
+        unzip -q -o instantclient-sdk-linux.x64-23.9.0.25.07.zip
+        echo "OCI_HOME=$GITHUB_WORKSPACE/oci/instantclient_23_9" >> $GITHUB_ENV
+        echo "OCI_LIB_DIR=$GITHUB_WORKSPACE/oci/instantclient_23_9" >> $GITHUB_ENV
+        echo "OCI_INC_DIR=$GITHUB_WORKSPACE/oci/instantclient_23_9/sdk/include" >> $GITHUB_ENV
+        echo "LD_LIBRARY_PATH=$GITHUB_WORKSPACE/oci/instantclient_23_9:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
+        echo "$GITHUB_WORKSPACE/oci/instantclient_23_9" >> $GITHUB_PATH
     - name: Install Protobuf
       run: |
         sudo apt-get update
@@ -57,10 +71,12 @@ jobs:
   test-synchdb:
     name: PG${{ fromJson(matrix.pg_version).major }}-${{ matrix.dbtypes }} Tests
     strategy:
+      fail-fast: false
       matrix:
         pg_version:
           - ${{ needs.params.outputs.pg16_version }}
           - ${{ needs.params.outputs.pg17_version }}
+          - ${{ needs.params.outputs.pg18_version }}
         dbtypes:
           - mysql
           - oracle
@@ -71,6 +87,13 @@ jobs:
     - params
     - build
     steps:
+    - name: Free disk space (runner)
+      run: |
+        echo "Before cleanup:" && df -h
+        docker system prune -af || true
+        docker builder prune -af || true
+        docker volume prune -af || true
+        echo "After cleanup:" && df -h
     - uses: actions/checkout@v2
     - uses: actions/download-artifact@v4
       with:
@@ -105,6 +128,18 @@ jobs:
         sudo tar xzvf synchdb-install-${{ fromJson(matrix.pg_version).major }}.tar.gz -C /
         sudo apt-get install -y docker-compose
         docker-compose --version
+    - name: Setup Oracle Instant Client v23.9
+      run: |
+        mkdir -p $GITHUB_WORKSPACE/oci && cd $GITHUB_WORKSPACE/oci
+        wget -q https://download.oracle.com/otn_software/linux/instantclient/2390000/instantclient-basic-linux.x64-23.9.0.25.07.zip
+        wget -q https://download.oracle.com/otn_software/linux/instantclient/2390000/instantclient-sdk-linux.x64-23.9.0.25.07.zip
+        unzip -q instantclient-basic-linux.x64-23.9.0.25.07.zip
+        unzip -q -o instantclient-sdk-linux.x64-23.9.0.25.07.zip
+        echo "OCI_HOME=$GITHUB_WORKSPACE/oci/instantclient_23_9" >> $GITHUB_ENV
+        echo "OCI_LIB_DIR=$GITHUB_WORKSPACE/oci/instantclient_23_9" >> $GITHUB_ENV
+        echo "OCI_INC_DIR=$GITHUB_WORKSPACE/oci/instantclient_23_9/sdk/include" >> $GITHUB_ENV
+        echo "LD_LIBRARY_PATH=$GITHUB_WORKSPACE/oci/instantclient_23_9:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
+        echo "$GITHUB_WORKSPACE/oci/instantclient_23_9" >> $GITHUB_PATH
     - name: Install Protobuf
       run: |
         sudo apt-get update

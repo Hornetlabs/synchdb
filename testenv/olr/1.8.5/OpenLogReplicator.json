@@ -23,8 +23,8 @@
 		"scn-type": 1
       },
       "memory": {
-        "min-mb": 256,
-        "max-mb": 512,
+        "min-mb": 512,
+        "max-mb": 1024,
 		"swap-path": "/opt/OpenLogReplicator/olrswap"
       },
 	  "filter": {

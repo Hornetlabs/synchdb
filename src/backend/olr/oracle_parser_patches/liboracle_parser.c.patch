@@ -1,8 +1,6 @@
-diff --git a/oracle_parser_orig/liboracle_parser.c b/oracle_parser/liboracle_parser.c
-index cfd1e80..c10cd6c 100644
---- a/oracle_parser_orig/liboracle_parser.c
-+++ b/oracle_parser/liboracle_parser.c
-@@ -74,7 +74,8 @@ typedef struct JumbleState
+--- oracle_parser17.ivy/liboracle_parser.c	2025-11-05 10:44:01.801873900 -0800
++++ oracle_parser17/liboracle_parser.c	2025-09-02 15:39:45.272347023 -0700
+@@ -74,7 +74,8 @@
  	int			highest_extern_param_id;
  } JumbleState;
  
@@ -12,7 +10,7 @@ index cfd1e80..c10cd6c 100644
  static raw_parser_hook_type prev_raw_parser = NULL;
  static get_keywords_hook_type prev_pg_get_keywords = NULL;
  static fill_in_constant_lengths_hook_type prev_fill_in_contant_lengths = NULL;
-@@ -82,17 +83,19 @@ quote_identifier_hook_type prev_quote_identifier = NULL;
+@@ -82,17 +83,19 @@
  
  void _PG_init(void);
  void _PG_fini(void);
@@ -35,7 +33,7 @@ index cfd1e80..c10cd6c 100644
  void
  _PG_init(void)
  {
-@@ -107,9 +110,6 @@ _PG_init(void)
+@@ -107,9 +110,6 @@
  	quote_identifier_hook		  = oracle_quote_identifier;
  }
  
@@ -45,7 +43,7 @@ index cfd1e80..c10cd6c 100644
  void
  _PG_fini(void)
  {
-@@ -118,6 +118,7 @@ _PG_fini(void)
+@@ -118,6 +118,7 @@
  	fill_in_constant_lengths_hook = prev_fill_in_contant_lengths;
  	quote_identifier_hook		  = prev_quote_identifier;
  }
@@ -53,7 +51,7 @@ index cfd1e80..c10cd6c 100644
  
  /*
   * comp_location: comparator for qsorting pgssLocationLen structs by location
-@@ -149,7 +150,7 @@ static char *str_udeescape(const char *str, char escape,
+@@ -149,7 +150,7 @@
   * list have the form required by the specified RawParseMode.
   */
  
@@ -62,7 +60,7 @@ index cfd1e80..c10cd6c 100644
  oracle_raw_parser(const char *str, RawParseMode mode)
  {
  	ora_core_yyscan_t yyscanner;
-@@ -1118,7 +1119,8 @@ invalid_pair:
+@@ -1118,7 +1119,8 @@
  	return NULL;				/* keep compiler quiet */
  }
  
@@ -72,7 +70,7 @@ index cfd1e80..c10cd6c 100644
  oracle_pg_get_keywords(PG_FUNCTION_ARGS)
  {
  	FuncCallContext *funcctx;
-@@ -1188,7 +1190,7 @@ oracle_pg_get_keywords(PG_FUNCTION_ARGS)
+@@ -1188,7 +1190,7 @@
  	SRF_RETURN_DONE(funcctx);
  }
  
@@ -81,7 +79,7 @@ index cfd1e80..c10cd6c 100644
  oracle_fill_in_constant_lengths(void *jjstate, const char *query,
  						 int query_loc)
  {
-@@ -1287,7 +1289,7 @@ oracle_fill_in_constant_lengths(void *jjstate, const char *query,
+@@ -1287,7 +1289,7 @@
  	ora_scanner_finish(yyscanner);
  }
  
@@ -90,7 +88,7 @@ index cfd1e80..c10cd6c 100644
  oracle_quote_identifier(const char *ident)
  {
  	/*
-@@ -1364,3 +1366,144 @@ oracle_quote_identifier(const char *ident)
+@@ -1364,3 +1366,144 @@
  
  	return result;
  }

@@ -22,6 +22,18 @@
 #include "postgres.h"
 #include "utils/netio_utils.h"
 
+static int g_connect_timeout_ms = 5000;
+static struct timeval g_read_timeout = {5, 0};
+
+void
+netio_set_timeouts(int connect_timeout, int read_timeout)
+{
+	/* both inputs are expressed in milliseconds */
+	g_connect_timeout_ms = connect_timeout;
+	g_read_timeout.tv_sec = read_timeout / 1000;
+	g_read_timeout.tv_usec = (read_timeout % 1000) * 1000;
+}
+
 int
 netio_connect(NetioContext *ctx, const char *host, int port)
 {
@@ -73,7 +85,7 @@ netio_connect(NetioContext *ctx, const char *host, int port)
 		if (errnum == EINPROGRESS)
 		{
 			struct pollfd pfd = { .fd = ctx->sockfd, .events = POLLOUT };
-			if (poll(&pfd, 1, 5000) > 0)	/* todo: configurable conn timeout */
+			if (poll(&pfd, 1, g_connect_timeout_ms) > 0)
 			{
 				int err = 0;
 				socklen_t len = sizeof(err);
@@ -131,7 +143,6 @@ ssize_t
 netio_read(NetioContext *ctx, StringInfoData * buf, int size)
 {
 	fd_set readfds;
-	struct timeval timeout = {2, 0};
 	char tmp[8192];
 	ssize_t total_read = 0;
 	int sel = -1;
@@ -143,7 +154,7 @@ netio_read(NetioContext *ctx, StringInfoData * buf, int size)
 	FD_SET(ctx->sockfd, &readfds);
 
 	sel = select(ctx->sockfd + 1, &readfds, NULL, NULL,
-			&timeout);
+			&g_read_timeout);
 	if (sel <= 0)
 	{
 		/* No data to read or error */

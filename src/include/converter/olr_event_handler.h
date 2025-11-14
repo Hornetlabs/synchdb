@@ -24,7 +24,7 @@ typedef enum _OlrType
 	OLRTYPE_STRING
 } OlrType;
 
-int fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
+int fc_processOLRChangeEvent(void * event, SynchdbStatistics * myBatchStats,
 		const char * name, bool * sendconfirm, bool isfirst, bool islast);
 
 void unload_oracle_parser(void);

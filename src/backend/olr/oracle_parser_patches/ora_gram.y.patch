@@ -1,7 +1,5 @@
-diff --git a/oracle_parser_orig/ora_gram.y b/oracle_parser/ora_gram.y
-index 346717f..a98b47f 100644
---- a/oracle_parser_orig/ora_gram.y
-+++ b/oracle_parser/ora_gram.y
+--- oracle_parser17.ivy/ora_gram.y	2025-11-05 10:44:01.821874190 -0800
++++ oracle_parser17/ora_gram.y	2025-09-17 16:03:48.235143261 -0700
 @@ -55,6 +55,7 @@
  #include "ora_gramparse.h"
  #include "nodes/makefuncs.h"
@@ -27,7 +25,26 @@ index 346717f..a98b47f 100644
  
  /*
   * Location tracking support --- simpler than bison's default, since we only
-@@ -2547,20 +2557,36 @@ alter_table_cmd:
+@@ -690,6 +700,9 @@
+ 					json_object_constructor_null_clause_opt
+ 					json_array_constructor_null_clause_opt
+ 
++/* added for synchdb to support notvalid without adding keyword */
++%type <ival> EnableOpts
++
+ /*
+  * Non-keyword token types.  These are hard-wired into the "flex" lexer.
+  * They must be listed first so that their numeric codes do not depend on
+@@ -2531,7 +2544,7 @@
+ 					n->def = $4;
+ 					$$ = (Node *) n;
+ 				}
+-						/* ALTER TABLE <name> ALTER [COLUMN] <colname> DROP INVISIBLE */
++			/* ALTER TABLE <name> ALTER [COLUMN] <colname> DROP INVISIBLE */
+ 			| ALTER opt_column ColId DROP INVISIBLE
+ 				{
+ 					AlterTableCmd *n = makeNode(AlterTableCmd);
+@@ -2547,20 +2560,105 @@
  					n->name = $3;
  					$$ = (Node *)n;
  				}
@@ -36,28 +53,92 @@ index 346717f..a98b47f 100644
  				{
  					AlterTableCmd *n = makeNode(AlterTableCmd);
 -					n->subtype = AT_SetInvisible;
--					n->name = $2;
--					$$ = (Node *)n;
--				}
--			| MODIFY ColId VISIBLE
--				{
--					AlterTableCmd *n = makeNode(AlterTableCmd);
--					n->subtype = AT_DropInvisible;
--					n->name = $2;
--					$$ = (Node *)n;
-+                    ColumnDef *def = makeNode(ColumnDef);
++					ColumnDef *def = makeNode(ColumnDef);
 +
-+                    n->subtype = AT_AlterColumnType;
-+                    n->name = $2;
-+                    n->def = (Node *) def;
-+                    /* We only use these fields of the ColumnDef node */
-+                    def->typeName = $3;
-+                    def->collClause = (CollateClause *) $4;
-+                    def->raw_default = $5;
-+                    //def->location = @3;
-+                    $$ = (Node *) n;
-+
++					n->subtype = AT_AlterColumnType;
+ 					n->name = $2;
+-					$$ = (Node *)n;
++					n->def = (Node *) def;
++					/* We only use these fields of the ColumnDef node */
++					def->typeName = $3;
++					def->collClause = (CollateClause *) $4;
++					def->raw_default = $5;
++					//def->location = @3;
++					$$ = (Node *) n;
  				}
+-			| MODIFY ColId VISIBLE
++			| MODIFY '(' ColId Typename opt_collate_clause alter_using ')'
+ 				{
+ 					AlterTableCmd *n = makeNode(AlterTableCmd);
+-					n->subtype = AT_DropInvisible;
++					ColumnDef *def = makeNode(ColumnDef);
++
++					n->subtype = AT_AlterColumnType;
++					n->name = $3;
++					n->def = (Node *) def;
++					/* We only use these fields of the ColumnDef node */
++					def->typeName = $4;
++					def->collClause = (CollateClause *) $5;
++					def->raw_default = $6;
++					//def->location = @3;
++					$$ = (Node *) n;
++				}
++			| MODIFY ColId DEFAULT a_expr
++				{
++					AlterTableCmd *n = makeNode(AlterTableCmd);
++			        
++					n->subtype = AT_ColumnDefault;
+ 					n->name = $2;
+-					$$ = (Node *)n;
++					n->def = (Node *) $4;   /* expression for the DEFAULT */
++					$$ = (Node *) n;
++				}
++			| MODIFY '(' ColId DEFAULT a_expr ')'
++				{
++					AlterTableCmd *n = makeNode(AlterTableCmd);
++
++					n->subtype = AT_ColumnDefault;
++					n->name = $3;
++					n->def = (Node *) $5;   /* expression for the DEFAULT */
++					$$ = (Node *) n;
+ 				}
++			| MODIFY ColId NOT NULL_P
++				{
++					AlterTableCmd *n = makeNode(AlterTableCmd);
++
++					n->subtype = AT_SetNotNull;
++					n->name = $2;
++					n->def = NULL;
++					$$ = (Node *) n;
++			    }
++			| MODIFY '(' ColId NOT NULL_P ')'
++                {
++					AlterTableCmd *n = makeNode(AlterTableCmd);
++
++					n->subtype = AT_SetNotNull;
++					n->name = $3;
++					n->def = NULL;
++					$$ = (Node *) n;
++                }
++			| MODIFY ColId NULL_P
++                {
++					AlterTableCmd *n = makeNode(AlterTableCmd);
++
++					n->subtype = AT_DropNotNull;
++					n->name = $2;
++					n->def = NULL;
++					$$ = (Node *) n;
++                }
++            | MODIFY '(' ColId NULL_P ')'
++                {
++					AlterTableCmd *n = makeNode(AlterTableCmd);
++
++					n->subtype = AT_DropNotNull;
++					n->name = $3;
++					n->def = NULL;
++					$$ = (Node *) n;
++                }
++
 +			//| MODIFY ColId INVISIBLE
 +			//	{
 +			//		AlterTableCmd *n = makeNode(AlterTableCmd);
@@ -75,21 +156,58 @@ index 346717f..a98b47f 100644
  			/* ALTER TABLE <name> ALTER [COLUMN] <colname> DROP NOT NULL */
  			| ALTER opt_column ColId DROP NOT NULL_P
  				{
-@@ -6412,6 +6438,13 @@ ConstraintAttributeElem:
+@@ -4168,6 +4266,17 @@
+ 					n->initially_valid = true;
+ 					$$ = (Node *) n;
+ 				}
++			/* added for synchdb */
++			| DEFAULT ON NULL_P b_expr
++				{
++					Constraint *n = makeNode(Constraint);
++
++                    n->contype = CONSTR_DEFAULT;
++                    n->location = @1;
++                    n->raw_expr = $4;
++                    n->cooked_expr = NULL;
++                    $$ = (Node *) n;
++				}
+ 			| DEFAULT b_expr
+ 				{
+ 					Constraint *n = makeNode(Constraint);
+@@ -6405,6 +6514,22 @@
+ 				}
+ 		;
+ 
++/* added for synchdb as workaround - whatever token comes after ENABLE or DISABLE,
++ * we do nothing
++ */
++EnableOpts:
++			/* empty */			{ $$ = 0; }
++			| VALIDATE			{ $$ = 0; }
++    		| IDENT
++				{
++					if (pg_strcasecmp($1, "novalidate") == 0)
++						$$ = 0;
++					else
++						$$ = 0;
++					pfree($1);
++				}
++		;
++
+ ConstraintAttributeElem:
+ 			NOT DEFERRABLE					{ $$ = CAS_NOT_DEFERRABLE; }
+ 			| DEFERRABLE					{ $$ = CAS_DEFERRABLE; }
+@@ -6412,6 +6537,9 @@
  			| INITIALLY DEFERRED			{ $$ = CAS_INITIALLY_DEFERRED; }
  			| NOT VALID						{ $$ = CAS_NOT_VALID; }
  			| NO INHERIT					{ $$ = CAS_NO_INHERIT; }
 +/* added for synchdb - just a workaround, it does not really supprot enabled or disabled constraint */
-+			| DISABLE_P						{ $$ = CAS_NOT_VALID; }
-+			| ENABLE_P						{ $$ = CAS_DEFERRABLE; }
-+			| ENABLE_P VALIDATE				{ $$ = CAS_DEFERRABLE; }
-+//			| ENABLE_P NOVALIDATE			{ $$ = CAS_NOT_VALID; }
-+			| DISABLE_P VALIDATE			{ $$ = CAS_DEFERRABLE; }
-+//			| DISABLE NOVALIDATE			{ $$ = CAS_NOT_VALID; }
++			| DISABLE_P EnableOpts			{ $$ = 0; }
++			| ENABLE_P EnableOpts			{ $$ = 0; }
  		;
  
  
-@@ -15380,7 +15413,10 @@ SimpleTypename:
+@@ -15380,7 +15508,10 @@
  						 */
  						if (n->val.ival.ival == (INTERVAL_MASK(YEAR) | INTERVAL_MASK(MONTH)))
  						{
@@ -101,7 +219,7 @@ index 346717f..a98b47f 100644
  							$$->typmods = $2;
  							$$->location = @1;
  						}
-@@ -15389,7 +15425,10 @@ SimpleTypename:
+@@ -15389,7 +15520,10 @@
  													 INTERVAL_MASK(MINUTE) |
  													 INTERVAL_MASK(SECOND)))
  						{
@@ -113,7 +231,7 @@ index 346717f..a98b47f 100644
  							$$->typmods = $2;
  							$$->location = @1;
  						}
-@@ -15696,30 +15735,39 @@ CharacterWithLength:  character '(' Iconst ')'
+@@ -15696,30 +15830,39 @@
  				{
  					if (ORA_PARSER == compatible_db)
  					{
@@ -147,6 +265,7 @@ index 346717f..a98b47f 100644
 +							}
  							else
 -								$1 = "oracharbyte";
+-						}
 +							{
 +								if ($3 > CHAR_TYPE_LENGTH_MAX)
 +									ereport(ERROR,
@@ -159,19 +278,18 @@ index 346717f..a98b47f 100644
 +								else
 +									$1 = "oracharbyte";
 +							}
-+
-+							$$ = OracleSystemTypeName($1);
-+							$$->typmods = list_make1(makeIntConst($3, @3));
-+							$$->location = @1;
- 						}
--
+ 
 -						$$ = OracleSystemTypeName($1);
 -						$$->typmods = list_make1(makeIntConst($3, @3));
 -						$$->location = @1;
++							$$ = OracleSystemTypeName($1);
++							$$->typmods = list_make1(makeIntConst($3, @3));
++							$$->location = @1;
++						}
  					}
  					else
  					{
-@@ -15734,29 +15782,39 @@ CharacterWithoutLength:	 character
+@@ -15734,29 +15877,39 @@
  				{
  					if (ORA_PARSER == compatible_db)
  					{
@@ -228,7 +346,7 @@ index 346717f..a98b47f 100644
  					}
  					else
  					{
-@@ -15769,21 +15827,22 @@ CharacterWithoutLength:	 character
+@@ -15769,21 +15922,22 @@
  				}
  		;
  
@@ -266,7 +384,7 @@ index 346717f..a98b47f 100644
  
  opt_varying:
  			VARYING									{ $$ = true; }
-@@ -15792,22 +15851,26 @@ opt_varying:
+@@ -15792,22 +15946,26 @@
  
  OracleCharacter: character '(' Iconst CHAR_P ')'
  					{
@@ -303,7 +421,7 @@ index 346717f..a98b47f 100644
  						$$ = OracleSystemTypeName($1);
  						$$->typmods = list_make1(makeIntConst($3, @3));
  						$$->location = @1;
-@@ -15823,10 +15886,20 @@ Datetime:
+@@ -15823,10 +15981,20 @@
  				{
  					if (ORA_PARSER == compatible_db)
  					{
@@ -327,7 +445,7 @@ index 346717f..a98b47f 100644
  						$$->typmods = list_make1(makeIntConst($3, @3));
  						$$->location = @1;
  					}
-@@ -15844,10 +15917,20 @@ Datetime:
+@@ -15844,10 +16012,20 @@
  				{
  					if (ORA_PARSER == compatible_db)
  					{
@@ -351,7 +469,7 @@ index 346717f..a98b47f 100644
  						$$->typmods = list_make1(makeIntConst(6, -1));
  						$$->location = @1;
  					}
-@@ -15862,13 +15945,19 @@ Datetime:
+@@ -15862,13 +16040,19 @@
  				}
  			| TIMESTAMP WITH_LA LOCAL TIME ZONE
  				{
@@ -373,7 +491,7 @@ index 346717f..a98b47f 100644
  					$$->typmods = list_make1(makeIntConst($3, @3));
  					$$->location = @1;
  				}
-@@ -15876,7 +15965,10 @@ Datetime:
+@@ -15876,7 +16060,10 @@
  				{
  					if (ORA_PARSER == compatible_db)
  					{
@@ -385,7 +503,7 @@ index 346717f..a98b47f 100644
  						$$->location = @1;
  					}
  					else
-@@ -15909,7 +16001,10 @@ ConstDatetime:
+@@ -15909,7 +16096,10 @@
  		{
  			if (ORA_PARSER == compatible_db)
  			{
@@ -397,7 +515,7 @@ index 346717f..a98b47f 100644
  				$$->typmods = list_make1(makeIntConst(6, -1));
  				$$->location = @1;
  			}
-@@ -15918,7 +16013,10 @@ ConstDatetime:
+@@ -15918,7 +16108,10 @@
  		{
  			if (ORA_PARSER == compatible_db)
  			{
@@ -409,7 +527,7 @@ index 346717f..a98b47f 100644
  				$$->location = @1;
  			}
  		}
-@@ -19450,7 +19548,10 @@ AexprConst: Iconst
+@@ -19450,7 +19643,10 @@
  							n->val.ival.ival == INTERVAL_MASK(MONTH) ||
  							n->val.ival.ival == (INTERVAL_MASK(YEAR) | INTERVAL_MASK(MONTH)))
  						{
@@ -421,7 +539,7 @@ index 346717f..a98b47f 100644
  							t->typmods = $3;
  							t->location = @1;
  
-@@ -19458,7 +19559,10 @@ AexprConst: Iconst
+@@ -19458,7 +19654,10 @@
  						}
  						else
  						{
@@ -433,7 +551,7 @@ index 346717f..a98b47f 100644
  							t->typmods = $3;
  							t->location = @1;
  
-@@ -21341,7 +21445,9 @@ SystemFuncName(char *name)
+@@ -21341,7 +21540,9 @@
  List *
  OracleSystemFuncName(char *name)
  {
@@ -444,7 +562,7 @@ index 346717f..a98b47f 100644
  }
  
  /* SystemTypeName()
-@@ -21364,8 +21470,10 @@ SystemTypeName(char *name)
+@@ -21364,8 +21565,10 @@
  TypeName *
  OracleSystemTypeName(char *name)
  {

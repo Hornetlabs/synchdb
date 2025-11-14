@@ -16,6 +16,7 @@
 #include "utils/memutils.h"
 #include "utils/lsyscache.h"
 #include "utils/snapmgr.h"
+#include "utils/jsonfuncs.h"
 #include "parser/parser.h"
 #include "mb/pg_wchar.h"
 #include "nodes/parsenodes.h"
@@ -34,16 +35,19 @@ extern bool synchdb_log_event_on_error;
 extern char * g_eventStr;
 extern HTAB * dataCacheHash;
 extern char * dbz_skipped_operations;
+extern bool synchdb_log_event_on_error;
+extern char * g_eventStr;
 
 /* Oracle raw parser function prototype */
 typedef List * (*oracle_raw_parser_fn)(const char *str, RawParseMode mode);
-static oracle_raw_parser_fn oracle_raw_parser = NULL;
+static oracle_raw_parser_fn synchdb_oracle_raw_parser = NULL;
 static void * handle = NULL;
 
 static char * strtoupper(const char *input);
 static OlrType getOlrTypeFromString(const char * typestring);
 static void strip_after_column_def(StringInfoData *sql);
 static bool is_whitelist_sql(StringInfoData * sql);
+static bool is_whitelist_table(const char * table);
 static HTAB * build_olr_schema_jsonpos_hash(Jsonb * jb);
 static void destroyOLRDDL(OLR_DDL * ddlinfo);
 static void destroyOLRDML(OLR_DML * dmlinfo);
@@ -100,6 +104,17 @@ getOlrTypeFromString(const char * typestring)
 	elog(DEBUG1, "unexpected dbz type %s - default to numeric type "
 			"representation", typestring);
 	return OLRTYPE_UNDEF;
+}
+
+static bool
+is_whitelist_table(const char * table)
+{
+	/* special checking to exclude LOG_MINING_FLUSH table created by Debezium. */
+	if (!strcasecmp(table, DBZ_LOG_MINING_FLUSH_TABLE))
+	{
+		return false;
+	}
+	return true;
 }
 
 void
@@ -208,7 +223,6 @@ build_olr_schema_jsonpos_hash(Jsonb * jb)
 	int i = 0, j = 0;
 	unsigned int contsize = 0;
 	Datum datum_elems[1] ={CStringGetTextDatum("columns")};
-	bool isnull;
 
 	memset(&hash_ctl, 0, sizeof(hash_ctl));
 	hash_ctl.keysize = NAMEDATALEN;
@@ -219,8 +233,8 @@ build_olr_schema_jsonpos_hash(Jsonb * jb)
 							512,
 							&hash_ctl,
 							HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
-	/* fixme - can crash if jsonb_get_element cannot find the element */
-	schemadata = DatumGetJsonbP(jsonb_get_element(jb, &datum_elems[0], 1, &isnull, false));
+
+	schemadata = GET_JSONB_ELEM(jb, &datum_elems[0], 1);
 	if (schemadata)
 	{
 		contsize = JsonContainerSize(&schemadata->root);
@@ -359,7 +373,6 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 	Jsonb * jbschema;
 	OLR_DDL * olrddl = NULL;
 	OLR_DDL_COLUMN * ddlcol = NULL;
-	bool isnull = false;
 	Datum datum_path_schema[1] = {CStringGetTextDatum("schema")};
 	char * db = NULL, * schema = NULL, * table = NULL;
 	StringInfoData sql;
@@ -404,7 +417,7 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 	db = pnstrdup(v->val.string.val, v->val.string.len);
 
 	/* fetch payload.0.schema */
-	jbschema = DatumGetJsonbP(jsonb_get_element(payload, &datum_path_schema[0], 1, &isnull, false));
+	jbschema = GET_JSONB_ELEM(payload, &datum_path_schema[0], 1);
 	if (!jbschema)
 	{
 		elog(WARNING, "malformed change request - no payload.0.schema struct");
@@ -416,6 +429,13 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 	if (v)
 	{
 		schema = pnstrdup(v->val.string.val, v->val.string.len);
+
+		/* we want to make sure the owner matches our conninfo record */
+		if (strcasecmp(schema, get_shm_connector_user_by_id(myConnectorId)))
+		{
+			elog(DEBUG1, "skip ddl with non matching owner...");
+			goto end;
+		}
 	}
 	else
 	{
@@ -437,6 +457,12 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 	}
 	table = pnstrdup(v->val.string.val, v->val.string.len);
 
+	if (!is_whitelist_table(table))
+	{
+		elog(DEBUG1, "table %s is not white-listed...", table);
+		goto end;
+	}
+
 	/* fetch sql - required */
 	initStringInfo(&sql);
 	v = getKeyJsonValueFromContainer(&payload->root, "sql", strlen("sql"), &vbuf);
@@ -447,7 +473,7 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 	}
 
 	appendBinaryStringInfo(&sql, v->val.string.val, v->val.string.len);
-	remove_double_quotes(&sql);
+	//remove_double_quotes(&sql);
 
 	if (!is_whitelist_sql(&sql))
 	{
@@ -471,7 +497,7 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 	/* Parse the Oracle SQL */
 	PG_TRY();
 	{
-		ptree = oracle_raw_parser(sql.data, RAW_PARSE_DEFAULT);
+		ptree = synchdb_oracle_raw_parser(sql.data, RAW_PARSE_DEFAULT);
 	}
 	PG_CATCH();
 	{
@@ -627,7 +653,7 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 								ddlcol->optional = false;
 							}
 							else
-								elog(DEBUG1, "unsupported constraint type %d", constr->contype);
+								elog(WARNING, "unsupported constraint type %d", constr->contype);
 						}
 					}
 					olrddl->columns = lappend(olrddl->columns, ddlcol);
@@ -663,6 +689,18 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 
 			if (pklist.data)
 				pfree(pklist.data);
+
+			/*
+			 * special checking on potential table name mismatch, always use the table name
+			 * from the parser
+			 */
+			if (strcasecmp(tableName, table))
+			{
+				elog(WARNING, "table name mismatch, using %s instead of %s",
+						tableName, table);
+				pfree(table);
+				table = pstrdup(tableName);
+			}
 		}
 		else if (IsA(stmt, AlterTableStmt))
 		{
@@ -784,7 +822,7 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 									ddlcol->optional = false;
 								}
 								else
-									elog(DEBUG1, "unsupported constraint type %d", constr->contype);
+									elog(WARNING, "unsupported constraint type %d", constr->contype);
 							}
 
 							if (pklist.len > 1)	/* longer than '[' */
@@ -951,7 +989,7 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 						}
 						else
 						{
-							elog(DEBUG1, "unsupported constraint type %d", constr->contype);
+							elog(WARNING, "unsupported constraint type %d", constr->contype);
 						}
 						break;
 					}
@@ -965,9 +1003,26 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 						olrddl->subtype = SUBTYPE_DROP_CONSTRAINT;
 						break;
 					}
+					case AT_ColumnDefault:
+					{
+						elog(WARNING, "AT_ColumnDefault not supported yet");
+						destroyOLRDDL(olrddl);
+						olrddl = NULL;
+						goto end;
+						break;
+					}
+					case AT_DropNotNull:
+					case AT_SetNotNull:
+					{
+						elog(WARNING, "AT_SetNotNull or AT_DropNotNull not supported yet");
+						destroyOLRDDL(olrddl);
+						olrddl = NULL;
+						goto end;
+						break;
+					}
 					default:
 					{
-						elog(WARNING, "  Unhandled ALTER subtype: %d", cmd->subtype);
+						elog(WARNING, "Unhandled ALTER subtype: %d", cmd->subtype);
 						destroyOLRDDL(olrddl);
 						olrddl = NULL;
 						goto end;
@@ -1013,7 +1068,7 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 				}
 			}
 			else
-				elog(DEBUG1, "unsupported drop type %d", dropStmt->removeType);
+				elog(WARNING, "unsupported drop type %d", dropStmt->removeType);
 		}
 		else if (IsA(stmt, TruncateStmt))
 		{
@@ -1055,7 +1110,7 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 		}
 		else
 		{
-			elog(WARNING, "unsupported stmt type: %d ",  nodeTag(stmt));
+			elog(DEBUG1, "unsupported stmt type: %d ",  nodeTag(stmt));
 			destroyOLRDDL(olrddl);
 			olrddl = NULL;
 			goto end;
@@ -1083,7 +1138,6 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 	JsonbValue * v = NULL;
 	JsonbValue vbuf;
 	Jsonb * jbschema;
-	bool isnull = false;
 	OLR_DML * olrdml = NULL;
 	StringInfoData strinfo, objid;
 	bool found;
@@ -1159,7 +1213,7 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 	elog(DEBUG1, "scn %llu c_scn %llu db %s op is %c", *scn, *c_scn, db, op);
 
 	/* fetch payload.0.schema */
-	jbschema = DatumGetJsonbP(jsonb_get_element(payload, &datum_path_schema[0], 1, &isnull, false));
+	jbschema = GET_JSONB_ELEM(payload, &datum_path_schema[0], 1);
 	if (!jbschema)
 	{
 		elog(WARNING, "malformed change request - no payload.0.schema struct");
@@ -1187,14 +1241,14 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 	}
 	table = pnstrdup(v->val.string.val, v->val.string.len);
 
-	/* special checking to exclude LOG_MINING_FLUSH table created by Debezium. */
-	if (!strcasecmp(table, DBZ_LOG_MINING_FLUSH_TABLE))
+	if (!is_whitelist_table(table))
 	{
-		elog(WARNING, "debezium log mining flush table %s ignored...", DBZ_LOG_MINING_FLUSH_TABLE);
+		elog(DEBUG1, "table %s is not white-listed", table);
 		destroyOLRDML(olrdml);
 		olrdml = NULL;
 		goto end;
 	}
+
 	appendStringInfo(&objid, "%s", table);
 
 	/* table name transformation and normalized objectid to lower case */
@@ -1274,6 +1328,9 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "no valid OID found for schema '%s'", olrdml->schema);
 			set_shm_connector_errmsg(myConnectorId, msg);
 
+			if (synchdb_log_event_on_error && g_eventStr != NULL)
+				elog(LOG, "%s", g_eventStr);
+
 			/* trigger pg's error shutdown routine */
 			elog(ERROR, "%s", msg);
 		}
@@ -1284,6 +1341,9 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 			char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
 			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "no valid OID found for table '%s'", olrdml->table);
 			set_shm_connector_errmsg(myConnectorId, msg);
+
+			if (synchdb_log_event_on_error && g_eventStr != NULL)
+				elog(LOG, "%s", g_eventStr);
 
 			/* trigger pg's error shutdown routine */
 			elog(ERROR, "%s", msg);
@@ -1372,7 +1432,7 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 			DBZ_DML_COLUMN_VALUE * colval = NULL;
 			Datum datum_elems[1] = {CStringGetTextDatum("after")};
 
-			dmldata = DatumGetJsonbP(jsonb_get_element(payload, &datum_elems[0], 1, &isnull, false));
+			dmldata = GET_JSONB_ELEM(payload, &datum_elems[0], 1);
 			if (dmldata)
 			{
 				int pause = 0;
@@ -1534,9 +1594,9 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 			for (i = 0; i < 2; i++)
 			{
 				if (i == 0)
-					dmldata = DatumGetJsonbP(jsonb_get_element(payload, &datum_elems_before[0], 1, &isnull, false));
+					dmldata = GET_JSONB_ELEM(payload, &datum_elems_before[0], 1);
 				else
-					dmldata = DatumGetJsonbP(jsonb_get_element(payload, &datum_elems_after[0], 1, &isnull, false));
+					dmldata = GET_JSONB_ELEM(payload, &datum_elems_after[0], 1);
 				if (dmldata)
 				{
 					int pause = 0;
@@ -1702,7 +1762,7 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 			DBZ_DML_COLUMN_VALUE * colval = NULL;
 			Datum datum_elems[1] = {CStringGetTextDatum("before")};
 
-			dmldata = DatumGetJsonbP(jsonb_get_element(payload, &datum_elems[0], 1, &isnull, false));
+			dmldata = GET_JSONB_ELEM(payload, &datum_elems[0], 1);
 			if (dmldata)
 			{
 				int pause = 0;
@@ -1876,7 +1936,7 @@ end:
  * Main function to process Openlog Replicator change event
  */
 int
-fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
+fc_processOLRChangeEvent(void * event, SynchdbStatistics * myBatchStats,
 		const char * name, bool * sendconfirm, bool isfirst, bool islast)
 {
 	Datum jsonb_datum;
@@ -1886,7 +1946,6 @@ fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 	JsonbValue vbuf;
 	char * op = NULL;
 	int ret = -1;
-	bool isnull = false;
 	MemoryContext tempContext, oldContext;
 	struct timeval tv;
 
@@ -1901,13 +1960,21 @@ fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
     /* Convert event string to JSONB */
 	PG_TRY();
 	{
-	    jsonb_datum = DirectFunctionCall1(jsonb_in, CStringGetDatum(event));
+#if SYNCHDB_PG_MAJOR_VERSION >= 1700
+		jsonb_datum = jsonb_from_text((text *) event, false);
+#else
+	    jsonb_datum = DirectFunctionCall1(jsonb_in, CStringGetDatum((char *) event));
+#endif
 	    jb = DatumGetJsonbP(jsonb_datum);
 	}
 	PG_CATCH();
 	{
 		FlushErrorState();
-		elog(WARNING, "bad json message: %s", event);
+#if SYNCHDB_PG_MAJOR_VERSION >= 1700
+		elog(DEBUG1, "bad json message: %s", text_to_cstring(event));
+#else
+		elog(DEBUG1, "bad json message: %s", (char *) event);
+#endif
 		increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
 		MemoryContextSwitchTo(oldContext);
 		MemoryContextDelete(tempContext);
@@ -1915,10 +1982,14 @@ fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 	}
 	PG_END_TRY();
 
-	elog(DEBUG1, "%s", event);
+#if SYNCHDB_PG_MAJOR_VERSION >= 1700
+	elog(DEBUG1, "%s", text_to_cstring(event));
+#else
+	elog(DEBUG1, "%s", (char *) event);
+#endif
 
 	/* payload - required */
-	payload = DatumGetJsonbP(jsonb_get_element(jb, &datum_path_payload[0], 2, &isnull, false));
+	payload = GET_JSONB_ELEM(jb, &datum_path_payload[0], 2);
 	if (!payload)
 	{
 		elog(WARNING, "malformed change request - no payload struct");
@@ -1989,12 +2060,12 @@ fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 		if (!strcasecmp(op, "begin"))
 		{
 			/* todo */
-			increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
+			increment_connector_statistics(myBatchStats, STATS_TX, 1);
 		}
 		else if (!strcasecmp(op, "commit"))
 		{
 			/* todo */
-			increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
+			increment_connector_statistics(myBatchStats, STATS_TX, 1);
 		}
 		set_shm_connector_state(myConnectorId, STATE_SYNCING);
 
@@ -2005,11 +2076,11 @@ fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 			v = getKeyJsonValueFromContainer(&jb->root, "tm", strlen("tm"), &vbuf);
 			if (v)
 			{
-				myBatchStats->stats_last_src_ts = DatumGetUInt64(DirectFunctionCall1(numeric_int8,
+				myBatchStats->genstats.stats_last_src_ts = DatumGetUInt64(DirectFunctionCall1(numeric_int8,
 						NumericGetDatum(v->val.numeric))) / 1000 / 1000;
 			}
 			gettimeofday(&tv, NULL);
-			myBatchStats->stats_last_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
+			myBatchStats->genstats.stats_last_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
     	}
 
     	if (isfirst)
@@ -2017,11 +2088,11 @@ fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 			v = getKeyJsonValueFromContainer(&jb->root, "tm", strlen("tm"), &vbuf);
 			if (v)
 			{
-				myBatchStats->stats_first_src_ts = DatumGetUInt64(DirectFunctionCall1(numeric_int8,
+				myBatchStats->genstats.stats_first_src_ts = DatumGetUInt64(DirectFunctionCall1(numeric_int8,
 						NumericGetDatum(v->val.numeric))) / 1000 / 1000;
 			}
 			gettimeofday(&tv, NULL);
-			myBatchStats->stats_first_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
+			myBatchStats->genstats.stats_first_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
     	}
 
     	olr_client_set_scns(scn, c_scn, c_idx);
@@ -2072,7 +2143,7 @@ fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 
     	/* (3) execute */
     	set_shm_connector_state(myConnectorId, STATE_EXECUTING);
-    	ret = ra_executePGDML(pgdml, TYPE_OLR, myBatchStats);
+    	ret = ra_executePGDML(pgdml, TYPE_OLR, myBatchStats, false);
     	if(ret)
     	{
     		set_shm_connector_state(myConnectorId, STATE_SYNCING);
@@ -2090,18 +2161,16 @@ fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 
     	if (islast)
     	{
-			myBatchStats->stats_last_src_ts = olrdml->src_ts_ms;
-			myBatchStats->stats_last_dbz_ts = olrdml->dbz_ts_ms;
+			myBatchStats->genstats.stats_last_src_ts = olrdml->src_ts_ms;
 			gettimeofday(&tv, NULL);
-			myBatchStats->stats_last_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
+			myBatchStats->genstats.stats_last_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
     	}
 
     	if (isfirst)
     	{
-			myBatchStats->stats_first_src_ts = olrdml->src_ts_ms;
-			myBatchStats->stats_first_dbz_ts = olrdml->dbz_ts_ms;
+			myBatchStats->genstats.stats_first_src_ts = olrdml->src_ts_ms;
 			gettimeofday(&tv, NULL);
-			myBatchStats->stats_first_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
+			myBatchStats->genstats.stats_first_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
     	}
 
        	/* (5) clean up */
@@ -2120,7 +2189,7 @@ fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 		increment_connector_statistics(myBatchStats, STATS_DDL, 1);
 
 		/* (1) make sure oracle parser is ready to use - todo move earlier */
-		if (oracle_raw_parser == NULL)
+		if (synchdb_oracle_raw_parser == NULL)
 		{
 			char * oralib_path = NULL, * error = NULL;
 
@@ -2139,14 +2208,14 @@ fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 			}
 			pfree(oralib_path);
 
-			oracle_raw_parser = (oracle_raw_parser_fn) dlsym(handle, "oracle_raw_parser");
+			synchdb_oracle_raw_parser = (oracle_raw_parser_fn) dlsym(handle, "synchdb_oracle_raw_parser");
 			if ((error = dlerror()) != NULL)
 			{
-				set_shm_connector_errmsg(myConnectorId, "failed to load oracle_raw_parser symbol");
+				set_shm_connector_errmsg(myConnectorId, "failed to load synchdb_oracle_raw_parser symbol");
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-						 errmsg("failed to load oracle_raw_parser function symbol"),
-						 errhint("make sure oracle_raw_parser() function in oracle_parser.so is "
+						 errmsg("failed to load synchdb_oracle_raw_parser function symbol"),
+						 errhint("make sure synchdb_oracle_raw_parser() function in libsynchdb_oracle_parser.so is "
 								 "publicly accessible ")));
 			}
 		}
@@ -2206,18 +2275,16 @@ fc_processOLRChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 
     	if (islast)
     	{
-			myBatchStats->stats_last_src_ts = olrddl->src_ts_ms;
-			myBatchStats->stats_last_dbz_ts = olrddl->dbz_ts_ms;
+			myBatchStats->genstats.stats_last_src_ts = olrddl->src_ts_ms;
 			gettimeofday(&tv, NULL);
-			myBatchStats->stats_last_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
+			myBatchStats->genstats.stats_last_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
     	}
 
     	if (isfirst)
     	{
-			myBatchStats->stats_first_src_ts = olrddl->src_ts_ms;
-			myBatchStats->stats_first_dbz_ts = olrddl->dbz_ts_ms;
+			myBatchStats->genstats.stats_first_src_ts = olrddl->src_ts_ms;
 			gettimeofday(&tv, NULL);
-			myBatchStats->stats_first_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
+			myBatchStats->genstats.stats_first_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
     	}
 
 		/* (6) update attribute map table */

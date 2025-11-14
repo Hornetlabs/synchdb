@@ -67,7 +67,8 @@ typedef struct pg_dml
 
 /* Function prototypes */
 int ra_executePGDDL(PG_DDL * pgddl, ConnectorType type);
-int ra_executePGDML(PG_DML * pgdml, ConnectorType type, SynchdbStatistics * myBatchStats);
+int ra_executePGDML(PG_DML * pgdml, ConnectorType type, SynchdbStatistics * myBatchStats,
+		bool isInSnapshot);
 int ra_getConninfoByName(const char * name, ConnectionInfo * conninfo, char ** connector);
 int ra_executeCommand(const char * query);
 int ra_listConnInfoNames(char ** out, int * numout);
@@ -76,5 +77,10 @@ int ra_listObjmaps(const char * name, ObjectMap ** out, int * numout);
 
 void destroyPGDDL(PG_DDL * ddlinfo);
 void destroyPGDML(PG_DML * dmlinfo);
+orascn ra_run_orafdw_initial_snapshot_spi(ConnectionInfo * conninfo, int flag,
+		const char * snapshot_tables, orascn scn_req, bool fdw_use_subtx,
+		bool write_schema_hist, const char * snapshotMode);
+int ra_get_fdw_snapshot_err_table_list(const char *name, char **out, int *numout, orascn * scn_out);
+int dump_schema_history_to_file(const char * connector_name, const char *out_path);
 
 #endif /* SYNCHDB_REPLICATION_AGENT_H_ */

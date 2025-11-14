@@ -210,5 +210,8 @@ int list_sort_cmp(const ListCell *a, const ListCell *b);
 PG_DDL * convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type);
 void updateSynchdbAttribute(DBZ_DDL * dbzddl, PG_DDL * pgddl, ConnectorType conntype, const char * name);
 PG_DML * convert2PGDML(DBZ_DML * dbzdml, ConnectorType type);
+bool fc_translate_datatype(ConnectorType connectorType,
+		const char * ext_datatype, int ext_length, int ext_scale,
+		char ** pg_datatype, int * pg_datatype_len);
 
 #endif /* SYNCHDB_FORMAT_CONVERTER_H_ */

@@ -4,6 +4,17 @@ import time
 import re
 from common import run_pg_query, run_pg_query_one, getConnectorName, create_and_start_synchdb_connector, run_remote_query
 
+def output_tpcc_buildschema_results(dbvendor, pg_diff_ms, tables, rows):
+    rows_per_sec = rows * 1000 / pg_diff_ms if pg_diff_ms > 0 else 0
+    
+    with open(f"{dbvendor}_hammerdb_benchmark_result.txt", "a") as f:
+        f.write(f"\n--- SynchDB Initial Snapshot Result ({dbvendor}) ---\n")
+        f.write(f"replication duration: {pg_diff_ms} ms\n")
+        f.write(f"tables migrated: {tables}\n")
+        f.write(f"rows migrated: {rows}\n")
+        f.write(f"rows per second: {rows_per_sec:.2f}\n")
+
+
 def output_tpcc_and_synchdb_results(dbvendor, nopm, tpm, pg_diff_ms, avgbatchsize, dmls, batchesdone):
     dmls_per_sec = dmls * 1000 / pg_diff_ms if pg_diff_ms > 0 else 0
 
@@ -66,54 +77,47 @@ def test_tpcc_buildschema(pg_cursor, dbvendor, hammerdb):
         run_remote_query(dbvendor, "ALTER TABLE orders ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS")
         run_remote_query(dbvendor, "ALTER TABLE stock ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS")
         run_remote_query(dbvendor, "ALTER TABLE warehouse ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS")
-
+        # give oracle some time to archive redo logs
+        time.sleep(30)
         result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial", srcdb="FREE")
         assert result == 0
     
     # try to get the first non-zero timestammps from synchdb_stats_view
     loopcnt=0
     while True:
-        rows = run_pg_query_one(pg_cursor, f"SELECT ddls, dmls, avg_batch_size, batches_done, first_src_ts, first_dbz_ts, first_pg_ts FROM synchdb_stats_view WHERE name = '{name}'")
-        if rows != None and rows[4] != 0 and rows[5] != 0 and rows[6] != 0:
-            ddls = rows[0]
-            dmls = rows[1]
-            avgbatchsize = rows[2]
-            batchesdone = rows[3]
-            first_src_ts = rows[4]
-            first_dbz_ts = rows[5]
-            first_pg_ts = rows[6]
+        rows = run_pg_query_one(pg_cursor, f"SELECT tables, rows, snapshot_begin_ts FROM synchdb_snapstats WHERE name = '{name}'")
+        if rows != None and rows[2] != 0:
+            tables = rows[0]
+            nrows = rows[1]
+            begin_ts = rows[2]
             break
         else:
             if loopcnt <= 240:
-                print("sleep 1s before trying to fetch first timestamps again...")
+                print("sleep 1s before trying to fetch snapshot begin timestamps again...")
                 loopcnt = loopcnt + 1
             else:
                 print(f"no timestamps are fetched after {loopcnt} fetches...")
                 break
             time.sleep(1)
 
-    assert first_src_ts > 0 and first_dbz_ts > 0 and first_pg_ts > 0
-    print(f"first timetamps are: {first_src_ts} {first_dbz_ts} {first_pg_ts}, total batches done = {batchesdone}")
+    assert begin_ts > 0
+    print(f"snapshot begin timetamp is {begin_ts}, current tables = {tables} and rows = {nrows}")
 
     time.sleep(20)
     
     stopcount=0
     lasttup=None
     while True:
-        currtup = run_pg_query_one(pg_cursor, f"SELECT ddls, dmls, avg_batch_size, batches_done, last_src_ts, last_dbz_ts, last_pg_ts FROM synchdb_stats_view WHERE name = '{name}'")
+        currtup = run_pg_query_one(pg_cursor, f"SELECT tables, rows, snapshot_end_ts FROM synchdb_snapstats WHERE name = '{name}'")
         print(currtup)
 
         if currtup == lasttup:
             if stopcount > 5:
                 print("no new updates in stats. Considering current sync session as done")
-                ddls = currtup[0]
-                dmls = currtup[1]
-                avgbatchsize = currtup[2]
-                batchesdone = currtup[3]
-                last_src_ts = currtup[4]
-                last_dbz_ts = currtup[5]
-                last_pg_ts = currtup[6]
-                print(f"last timestamps are {last_src_ts} {last_dbz_ts} {last_pg_ts}")
+                tables = currtup[0]
+                nrows = currtup[1]
+                end_ts = currtup[2]
+                print(f"snapshot end timestamp is {end_ts}, current tables = {tables} and rows = {nrows}")
                 break    
             else:
                 stopcount = stopcount + 1
@@ -122,12 +126,13 @@ def test_tpcc_buildschema(pg_cursor, dbvendor, hammerdb):
             stopcount = 0
         time.sleep(20)
 
-    assert last_src_ts > 0 and last_dbz_ts > 0 and last_pg_ts > 0
+    assert end_ts > 0
     
-    pg_diff_ms = last_pg_ts - first_pg_ts
-    print(f"initial snapshotting tpcc tables takes {pg_diff_ms} ms with average batch size = {avgbatchsize}, DML processed = {dmls}, total batches done = {batchesdone}")
+    pg_diff_ms = end_ts - begin_ts
+    print(f"initial snapshotting tpcc tables takes {pg_diff_ms} ms that migrates {tables} tables totalling {nrows} rows")
 
-    output_tpcc_and_synchdb_results(dbvendor, 0, 0, pg_diff_ms, avgbatchsize, dmls, batchesdone)
+    ## fixme ##
+    output_tpcc_buildschema_results(dbvendor, pg_diff_ms, tables, nrows)
     assert True
 
 # TPCC test is running at the same time as synchdb replication
@@ -150,12 +155,19 @@ def test_tpcc_run(pg_cursor, dbvendor, hammerdb, tpccmode):
 
         #subprocess.run(["docker", "exec", "hammerdb", "./hammerdbcli", "auto", "/runtpcc.tcl"], check=True)
         if dbvendor == "mysql":
-            nopm, tpm = map(int, re.search(r"achieved (\d+) NOPM from (\d+)",
-                subprocess.run(
+            #nopm, tpm = map(int, re.search(r"achieved (\d+) NOPM from (\d+)",
+            #    subprocess.run(
+            #        ["docker", "exec", "hammerdb", "./hammerdbcli", "auto", "/runtpcc.tcl"],
+            #        check=True, capture_output=True, text=True
+            #    ).stdout
+            #).groups())
+            result = subprocess.run(
                     ["docker", "exec", "hammerdb", "./hammerdbcli", "auto", "/runtpcc.tcl"],
-                    check=True, capture_output=True, text=True
-                ).stdout
-            ).groups())
+                    check=True, capture_output=True  # no text=True -> returns bytes
+                    )
+            out = result.stdout.decode("utf-8", errors="replace").replace("\r", "")
+            m = re.search(r"achieved\s+(\d+)\s+NOPM\s+from\s+(\d+)", out, re.I)
+            nopm, tpm = map(int, m.groups())
         else:
             result = subprocess.run(
                 ["docker", "exec", "-e", "LD_LIBRARY_PATH=/usr/local/unixODBC/lib:/home/instantclient_21_18/", "-e", "TMP=/tmp", "-e", "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/mssql-tools18/bin:/opt/mssql-tools18/bin:/usr/local/unixODBC/bin", "hammerdb", "./hammerdbcli", "auto", "/runtpcc.tcl"],
@@ -194,15 +206,15 @@ def test_tpcc_run(pg_cursor, dbvendor, hammerdb, tpccmode):
     # try to get the first non-zero timestammps from synchdb_stats_view
     loopcnt=0
     while True:
-        rows = run_pg_query_one(pg_cursor, f"SELECT ddls, dmls, avg_batch_size, batches_done, first_src_ts, first_dbz_ts, first_pg_ts FROM synchdb_stats_view WHERE name = '{name}'")
-        if rows != None and rows[4] != 0 and rows[5] != 0 and rows[6] != 0:
+        rows = run_pg_query_one(pg_cursor, f"SELECT ddls, dmls, average_batch_size, batches_done, first_src_ts, first_pg_ts FROM synchdb_genstats, synchdb_cdcstats WHERE synchdb_genstats.name = synchdb_cdcstats.name and synchdb_cdcstats.name = '{name}'")
+        #rows = run_pg_query_one(pg_cursor, f"SELECT ddls, dmls, avg_batch_size, batches_done, first_src_ts, first_dbz_ts, first_pg_ts FROM synchdb_stats_view WHERE name = '{name}'")
+        if rows != None and rows[4] != 0 and rows[5] != 0:
             ddls = rows[0]
             dmls = rows[1]
             avgbatchsize = rows[2]
             batchesdone = rows[3]
             first_src_ts = rows[4]
-            first_dbz_ts = rows[5]
-            first_pg_ts = rows[6]
+            first_pg_ts = rows[5]
             break
         else:
             if loopcnt <= 240:
@@ -213,14 +225,15 @@ def test_tpcc_run(pg_cursor, dbvendor, hammerdb, tpccmode):
                 break
             time.sleep(1)
     
-    assert first_src_ts > 0 and first_dbz_ts > 0 and first_pg_ts > 0
-    print(f"first timetamps are: {first_src_ts} {first_dbz_ts} {first_pg_ts}, total batches done = {batchesdone}")
+    assert first_src_ts > 0 and first_pg_ts > 0
+    print(f"first timetamps are: {first_src_ts} {first_pg_ts}, total batches done = {batchesdone}")
 
     time.sleep(5)
     stopcount=0
     lasttup=None
     while True:
-        currtup = run_pg_query_one(pg_cursor, f"SELECT ddls, dmls, avg_batch_size, batches_done, last_src_ts, last_dbz_ts, last_pg_ts FROM synchdb_stats_view WHERE name = '{name}'")
+        currtup = run_pg_query_one(pg_cursor, f"SELECT ddls, dmls, average_batch_size, batches_done, last_src_ts, last_pg_ts FROM synchdb_genstats, synchdb_cdcstats WHERE synchdb_genstats.name = synchdb_cdcstats.name and synchdb_cdcstats.name = '{name}'")
+        #currtup = run_pg_query_one(pg_cursor, f"SELECT ddls, dmls, avg_batch_size, batches_done, last_src_ts, last_dbz_ts, last_pg_ts FROM synchdb_stats_view WHERE name = '{name}'")
         print(currtup)
 
         if currtup == lasttup:
@@ -231,9 +244,8 @@ def test_tpcc_run(pg_cursor, dbvendor, hammerdb, tpccmode):
                 avgbatchsize = currtup[2]
                 batchesdone = currtup[3]
                 last_src_ts = currtup[4]
-                last_dbz_ts = currtup[5]
-                last_pg_ts = currtup[6]
-                print(f"last timestamps are {last_src_ts} {last_dbz_ts} {last_pg_ts}")
+                last_pg_ts = currtup[5]
+                print(f"last timestamps are {last_src_ts} {last_pg_ts}")
                 break
             else:
                 stopcount = stopcount + 1
@@ -242,7 +254,7 @@ def test_tpcc_run(pg_cursor, dbvendor, hammerdb, tpccmode):
             stopcount = 0
         time.sleep(20)
 
-    assert last_src_ts > 0 and last_dbz_ts > 0 and last_pg_ts > 0
+    assert last_src_ts > 0 and last_pg_ts > 0
 
     pg_diff_ms = last_pg_ts - first_pg_ts
 

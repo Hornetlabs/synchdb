@@ -88,7 +88,7 @@ void _PG_fini(void);
 static int	oracle_comp_location(const void *a, const void *b);
 
 /* only export raw parser routine */
-extern PGDLLEXPORT List * oracle_raw_parser(const char *str, RawParseMode mode);
+extern PGDLLEXPORT List * synchdb_oracle_raw_parser(const char *str, RawParseMode mode);
 
 static Datum oracle_pg_get_keywords(PG_FUNCTION_ARGS);
 static void oracle_fill_in_constant_lengths(void *jjstate, const char *query, int query_loc);
@@ -143,7 +143,7 @@ static char *str_udeescape(const char *str, char escape,
 
 
 /*
- * oracle_raw_parser
+ * synchdb_oracle_raw_parser
  *		Given a query in string form, do lexical and grammatical analysis.
  *
  * Returns a list of raw (un-analyzed) parse trees.  The contents of the
@@ -151,7 +151,7 @@ static char *str_udeescape(const char *str, char escape,
  */
 
 List *
-oracle_raw_parser(const char *str, RawParseMode mode)
+synchdb_oracle_raw_parser(const char *str, RawParseMode mode)
 {
 	ora_core_yyscan_t yyscanner;
 	ora_base_yy_extra_type yyextra;

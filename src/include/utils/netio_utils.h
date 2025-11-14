@@ -24,6 +24,7 @@ typedef struct
 	int errcode;
 } NetioContext;
 
+void netio_set_timeouts(int connect_timeout, int read_timeout);
 int netio_connect(NetioContext *ctx, const char *host, int port);
 ssize_t netio_write(NetioContext *ctx, const void *buf, size_t len);
 ssize_t netio_read(NetioContext *ctx, StringInfoData * buf, int size);

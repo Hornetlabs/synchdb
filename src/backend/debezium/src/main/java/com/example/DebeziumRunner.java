@@ -107,6 +107,7 @@ public class DebeziumRunner {
 		private String ispnMemoryType;
 		private int ispnMemorySize;
 		private String logminerStreamMode;
+		private int cdcDelay;
 
 		/* constructor requires all required parameters for a connector to work */
 		public MyParameters(String connectorName, int connectorType, String hostname, int port, String user, String password, String database, String table, String snapshottable,String snapshotMode, String dstdb)
@@ -232,6 +233,11 @@ public class DebeziumRunner {
 			this.logminerStreamMode = logminerStreamMode;
 			return this;
 		}
+		public MyParameters setCdcDelay(int cdcDelay)
+        {
+            this.cdcDelay = cdcDelay;
+            return this;
+        }
 
 		/* add more setters here to incrementally set parameters */
 		public void print()
@@ -266,6 +272,7 @@ public class DebeziumRunner {
 			logger.warn("logLevel = " + this.logLevel);
 			logger.warn("snapshottable = " + this.snapshottable);
 			logger.warn("logminerStreamMode = " + this.logminerStreamMode);
+			logger.warn("cdcDelay = " + this.cdcDelay);
 			
 			logger.warn("olrHost = " + this.olrHost);
 			logger.warn("olrPort = " + this.olrPort);
@@ -794,9 +801,10 @@ public class DebeziumRunner {
 		props.setProperty("incremental.snapshot.watermarking.strategy", myParameters.incrementalSnapshotWatermarkingStrategy);
 		props.setProperty("incremental.snapshot.allow.schema.changes", "false");
 		props.setProperty("min.row.count.to.stream.results", String.valueOf(myParameters.snapshotMinRowToStreamResults));
-
+		//props.setProperty("provide.transaction.metadata", "true");
 		//props.setProperty("read.only", "true");
-		
+		if (myParameters.cdcDelay > 0)
+			props.setProperty("streaming.delay.ms", String.valueOf(myParameters.cdcDelay));
 
 		logger.info("Hello from DebeziumRunner class!");
 
@@ -1209,6 +1217,37 @@ public class DebeziumRunner {
             throw new RuntimeException(e);
         }
     }
+
+	public void createOffsetFile(String filename, int type, String db, String value)
+	{
+		File out = new File(filename);
+
+		/* Build the Debezium FileOffsetBackingStore key - must align with ones in setConnectorOffset() */
+		final String key;
+		switch (type)
+		{
+			case TYPE_MYSQL:
+			case TYPE_ORACLE:
+				/* Debezium key for mysql/oracle doesn’t include database */
+				key = "[\"engine\",{\"server\":\"synchdb-connector\"}]";
+				break;
+			case TYPE_SQLSERVER:
+				/* SQL Server includes the database name */
+				key = "[\"engine\",{\"server\":\"synchdb-connector\",\"database\":\"" + db + "\"}]";
+				break;
+			default:
+				throw new IllegalArgumentException("Unsupported connector type: " + type);
+		}
+
+		Map<byte[], byte[]> map = new HashMap<>();
+		map.put(key.getBytes(StandardCharsets.US_ASCII),
+				value.getBytes(StandardCharsets.US_ASCII));
+
+		/* Write serialized HashMap<byte[],byte[]> */
+		writeOffsetFile(out, map);
+
+		logger.info("Created new Debezium offset file at" + out.getAbsolutePath() + " with 1 entry with value " + value);
+	}
 
 	public void jvmMemDump()
 	{

@@ -1,8 +1,6 @@
-diff --git a/include_orig/utils/ora_compatible.h b/include/utils/ora_compatible.h
-index 9d4cfd3..3030bfa 100644
---- a/include_orig/utils/ora_compatible.h
-+++ b/include/utils/ora_compatible.h
-@@ -59,4 +59,18 @@ typedef enum
+--- oracle_parser17.ivy/include/utils/ora_compatible.h	2025-11-05 10:54:30.135690070 -0800
++++ oracle_parser17/include/utils/ora_compatible.h	2025-09-02 15:39:45.272347023 -0700
+@@ -59,4 +59,18 @@
  	NLS_LENGTH_CHAR
  } NlsLengthSemantics;
  

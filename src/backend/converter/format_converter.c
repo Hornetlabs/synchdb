@@ -39,6 +39,7 @@
 #include "common/base64.h"
 #include "port/pg_bswap.h"
 #include "utils/datetime.h"
+#include "utils/memutils.h"
 
 /* synchdb includes */
 #include "converter/format_converter.h"
@@ -53,14 +54,14 @@ extern bool synchdb_dml_use_spi;
 extern int myConnectorId;
 
 /* data transformation related hash tables */
-HTAB * dataCacheHash;
-static HTAB * objectMappingHash;
-static HTAB * transformExpressionHash;
+HTAB * dataCacheHash = NULL;
+static HTAB * objectMappingHash = NULL;
+static HTAB * transformExpressionHash = NULL;
 
 /* data type mapping related hash tables */
-static HTAB * mysqlDatatypeHash;
-static HTAB * oracleDatatypeHash;
-static HTAB * sqlserverDatatypeHash;
+static HTAB * mysqlDatatypeHash = NULL;
+static HTAB * oracleDatatypeHash = NULL;
+static HTAB * sqlserverDatatypeHash = NULL;
 
 DatatypeHashEntry mysql_defaultTypeMappings[] =
 {
@@ -113,7 +114,6 @@ DatatypeHashEntry mysql_defaultTypeMappings[] =
 	{{"mediumtext", false}, "text", -1},
 	{{"tinytext", false}, "text", -1},
 	{{"json", false}, "jsonb", -1},
-	/* spatial types - map to text by default */
 	{{"geometry", false}, "text", -1},
 	{{"geometrycollection", false}, "text", -1},
 	{{"geomcollection", false}, "text", -1},
@@ -191,11 +191,17 @@ DatatypeHashEntry oracle_defaultTypeMappings[] =
 	{{"rowid", false}, "text", 0},
 	{{"urowid", false}, "text", 0},
 	{{"xmltype", false}, "text", 0},
-	/* large objects */
 	{{"bfile", false}, "text", 0},
 	{{"blob", false}, "bytea", 0},
 	{{"clob", false}, "text", 0},
-	{{"nclob", false}, "text", 0}
+	{{"nclob", false}, "text", 0},
+	{{"sdo_geometry", false}, "text", 0},
+	{{"sdo_topo_geometry", false}, "text", 0},
+	{{"sdo_georaster", false}, "text", 0},
+	{{"uritype", false}, "text", 0},
+	{{"anytype", false}, "text", 0},
+	{{"anydata", false}, "text", 0},
+	{{"anydataset", false}, "text", 0},
 };
 #define SIZE_ORACLE_DATATYPE_MAPPING (sizeof(oracle_defaultTypeMappings) / sizeof(DatatypeHashEntry))
 
@@ -209,8 +215,8 @@ DatatypeHashEntry sqlserver_defaultTypeMappings[] =
 	{{"bigint", false}, "bigint", 0},
 	{{"smallint", false}, "smallint", 0},
 	{{"tinyint", false}, "smallint", 0},
-	{{"numeric", false}, "numeric", 0},
-	{{"decimal", false}, "numeric", 0},
+	{{"numeric", false}, "numeric", -1},
+	{{"decimal", false}, "numeric", -1},
 	{{"bit(1)", false}, "bool", 0},
 	{{"bit", false}, "bit", 0},
 	{{"money", false}, "money", 0},
@@ -233,8 +239,10 @@ DatatypeHashEntry sqlserver_defaultTypeMappings[] =
 	{{"varbinary", false}, "bytea", 0},
 	{{"image", false}, "bytea", 0},
 	{{"uniqueidentifier", false}, "uuid", 0},
-	{{"xml", false}, "text", 0},
-	/* spatial types - map to text by default */
+	{{"xml", false}, "xml", 0},
+	{{"json", false}, "jsonb", -1},
+	{{"hierarchyid", false}, "text", 0},
+	{{"vector", false}, "text", 0},
 	{{"geometry", false}, "text", 0},
 	{{"geography", false}, "text", 0},
 };
@@ -246,6 +254,7 @@ static int count_active_columns(TupleDesc tupdesc);
 static void bytearray_to_escaped_string(const unsigned char *byte_array,
 		size_t length, char *output_string);
 static long long derive_value_from_byte(const unsigned char * bytes, int len);
+static char * derive_decimal_string_from_byte(const unsigned char *bytes, int len);
 static void reverse_byte_array(unsigned char * array, int length);
 static void trim_leading_zeros(char *str);
 static void prepend_zeros(char *str, int num_zeros);
@@ -371,7 +380,7 @@ bytearray_to_escaped_string(const unsigned char *byte_array, size_t length, char
 /*
  * derive_value_from_byte
  *
- * computes the int value from given byte
+ * computes the int value from given byte. Safe for len < 7.
  */
 static long long
 derive_value_from_byte(const unsigned char * bytes, int len)
@@ -395,6 +404,104 @@ derive_value_from_byte(const unsigned char * bytes, int len)
 	}
 	return value;
 }
+
+/*
+ * derive_decimal_string_from_byte
+ *
+ * Converts a big-endian two's-complement byte array to a decimal string.
+ * No integer overflow, works for any byte length.
+ */
+static char *
+derive_decimal_string_from_byte(const unsigned char *bytes, int len)
+{
+	bool neg;
+	unsigned char *mag;
+	int offset;
+	int maglen;
+	char digits[128];     /* enough for DECIMAL(38) and more */
+	int nd;
+	int i;                /* declare once and reuse */
+	int outlen;
+	char *out;
+	char *p;
+
+	neg = (bytes[0] & 0x80) != 0;
+	mag = (unsigned char *) palloc(len);
+	memcpy(mag, bytes, len);
+
+	/* If negative, convert to magnitude via two's complement */
+	if (neg)
+	{
+		for (i = 0; i < len; i++)
+			mag[i] = (unsigned char) ~mag[i];
+
+		for (i = len - 1; i >= 0; i--)
+		{
+			unsigned int v = (unsigned int) mag[i] + 1;
+			mag[i] = (unsigned char) (v & 0xFF);
+			if ((v & 0x100) == 0)
+				break;
+		}
+	}
+
+	/* strip leading zero bytes */
+	offset = 0;
+	while (offset < len && mag[offset] == 0)
+		offset++;
+	maglen = len - offset;
+	mag += offset;
+
+	/* if value is zero, just return "0" */
+	if (maglen == 0)
+	{
+		out = pstrdup("0");
+		return out;
+	}
+
+	nd = 0;
+
+	/* working copy */
+	{
+		unsigned char *work = (unsigned char *) palloc(maglen);
+		memcpy(work, mag, maglen);
+
+		while (1)
+		{
+			unsigned remainder = 0;
+			i = 0;
+			while (i < maglen && work[i] == 0)
+				i++;
+			if (i == maglen)
+				break;
+
+			for (i = 0; i < maglen; i++)
+			{
+				unsigned acc = (remainder << 8) | work[i];
+				work[i] = (unsigned char) (acc / 10);
+				remainder = acc % 10;
+			}
+			digits[nd++] = (char) ('0' + remainder);
+		}
+
+		pfree(work);
+	}
+
+	/* allocate final string with sign if needed */
+	outlen = nd + (neg ? 1 : 0);
+	out = (char *) palloc(outlen + 1);
+	p = out;
+
+	if (neg)
+		*p++ = '-';
+
+	for (i = nd - 1; i >= 0; i--)
+		*p++ = digits[i];
+
+	*p = '\0';  /* fixed misleading indentation */
+
+	return out;
+}
+
 
 /*
  * reverse_byte_array
@@ -574,8 +681,19 @@ populate_primary_keys(StringInfoData * strinfo, const char * id, const char * js
 		return;
 	}
 
-	jsonb_datum = DirectFunctionCall1(jsonb_in, CStringGetDatum(jsonin));
-	jb = DatumGetJsonbP(jsonb_datum);
+	/* Convert event string to JSONB */
+	PG_TRY();
+	{
+		jsonb_datum = DirectFunctionCall1(jsonb_in, CStringGetDatum(jsonin));
+		jb = DatumGetJsonbP(jsonb_datum);
+	}
+	PG_CATCH();
+	{
+		FlushErrorState();
+		elog(WARNING, "bad primary key json message: %s", jsonin);
+		return;
+	}
+	PG_END_TRY();
 
 	it = JsonbIteratorInit(&jb->root);
 	while ((r = JsonbIteratorNext(&it, &v, false)) != WJB_DONE)
@@ -709,7 +827,7 @@ init_mysql(void)
 
 	info.keysize = sizeof(DatatypeHashKey);
 	info.entrysize = sizeof(DatatypeHashEntry);
-	info.hcxt = CurrentMemoryContext;
+	info.hcxt = TopMemoryContext;
 
 	mysqlDatatypeHash = hash_create("mysql datatype hash",
 							 256,
@@ -757,7 +875,7 @@ init_oracle(void)
 
 	info.keysize = sizeof(DatatypeHashKey);
 	info.entrysize = sizeof(DatatypeHashEntry);
-	info.hcxt = CurrentMemoryContext;
+	info.hcxt = TopMemoryContext;
 
 	oracleDatatypeHash = hash_create("oracle datatype hash",
 							 256,
@@ -805,7 +923,7 @@ init_sqlserver(void)
 
 	info.keysize = sizeof(DatatypeHashKey);
 	info.entrysize = sizeof(DatatypeHashEntry);
-	info.hcxt = CurrentMemoryContext;
+	info.hcxt = TopMemoryContext;
 
 	sqlserverDatatypeHash = hash_create("sqlserver datatype hash",
 							 256,
@@ -1473,8 +1591,19 @@ expand_struct_value(char * in, DBZ_DML_COLUMN_VALUE * colval, ConnectorType conn
 			if (colval->timerep == DATA_VARIABLE_SCALE)
 			{
 				initStringInfo(&strinfo);
-				jsonb_datum = DirectFunctionCall1(jsonb_in, CStringGetDatum(in));
-				jb = DatumGetJsonbP(jsonb_datum);
+
+				PG_TRY();
+				{
+					jsonb_datum = DirectFunctionCall1(jsonb_in, CStringGetDatum(in));
+					jb = DatumGetJsonbP(jsonb_datum);
+				}
+				PG_CATCH();
+				{
+					FlushErrorState();
+					elog(WARNING, "bad json struct to expand: %s", in);
+					return;
+				}
+				PG_END_TRY();
 
 				getPathElementString(jb, "scale", &strinfo, true);
 				if (!strcasecmp(strinfo.data, "null"))
@@ -1518,56 +1647,88 @@ static char *
 handle_base64_to_numeric_with_scale(const char * in, int scale)
 {
 	int newlen = 0, decimalpos = 0;
-	long long value = 0;
-	char buffer[32] = {0};
+	char * value = 0;
+	char buffer[128] = {0};
 	int tmpoutlen = pg_b64_dec_len(strlen(in));
 	unsigned char * tmpout = (unsigned char *) palloc0(tmpoutlen + 1);
 	char * out = NULL;
+	bool isneg = false;
 
+#if SYNCHDB_PG_MAJOR_VERSION >= 1800
+	tmpoutlen = pg_b64_decode(in, strlen(in), tmpout, tmpoutlen);
+#else
 	tmpoutlen = pg_b64_decode(in, strlen(in), (char *)tmpout, tmpoutlen);
-	value = derive_value_from_byte(tmpout, tmpoutlen);
-	snprintf(buffer, sizeof(buffer), "%lld", value);
+#endif
+	value = derive_decimal_string_from_byte(tmpout, tmpoutlen);
+	/* if value is negative, we set isneg = true */
+	if (value[0] == '-')
+	{
+		isneg = true;
+		/* skip minus sign for processing below */
+		snprintf(buffer, sizeof(buffer), "%s", value + 1);
+	}
+	else
+		snprintf(buffer, sizeof(buffer), "%s", value);
 	if (scale > 0)
 	{
 		if (strlen(buffer) > scale)
 		{
 			/* ex: 123 -> 1.23*/
-			newlen = strlen(buffer) + 1;	/* plus 1 decimal */
+			newlen = strlen(buffer) + 1 + (isneg ? 1 : 0);	/* plus 1 decimal and minus sign is needed */
 			out = (char *) palloc0(newlen + 1);	/* plus 1 terminating null */
+
 			decimalpos = strlen(buffer) - scale;
-			strncpy(out, buffer, decimalpos);
-			out[decimalpos] = '.';
-			strcpy(out + decimalpos + 1, buffer + decimalpos);
+			strncpy(out + (isneg ? 1 : 0), buffer, decimalpos);
+			out[decimalpos + (isneg ? 1 : 0)] = '.';
+			strcpy(out + decimalpos + 1 + (isneg ? 1 : 0), buffer + decimalpos);
+			if (isneg)
+				out[0] = '-';
 		}
 		else if (strlen(buffer) == scale)
 		{
 			/* ex: 123 -> 0.123 */
-			newlen = strlen(buffer) + 2;	/* plus 1 decimal and 1 zero */
+			newlen = strlen(buffer) + 2 + (isneg ? 1 : 0);	/* plus 1 decimal, 1 zero and minus sign is needed*/
 			out = (char *) palloc0(newlen + 1);	/* plus 1 terminating null */
-			snprintf(out, newlen + 1, "0.%s", buffer);
+			if (isneg)
+				snprintf(out, newlen + 1, "-0.%s", buffer);
+			else
+				snprintf(out, newlen + 1, "0.%s", buffer);
 		}
 		else
 		{
-			/* ex: 1 -> 0.001*/
-			int scale_factor = 1, i = 0;
-			double res = 0.0;
+			/* ex: 1 -> 0.001 when scale = 3 */
+			int i = 0;
+			int val_len = strlen(buffer);
+			int zero_count = scale - val_len;
+			char *p;
 
-			/* plus 1 decimal and 1 zero and the zeros as a result of left shift */
-			newlen = strlen(buffer) + (scale - strlen(buffer)) + 2;
-			out = (char *) palloc0(newlen + 1);	/* plus 1 terminating null */
+			/* plus 1 decimal, 1 zero, minus sign if needed and leading zeros */
+			newlen = val_len + zero_count + 2 + (isneg ? 1 : 0);
+			out = (char *) palloc0(newlen + 1);  /* plus terminating null */
 
-			for (i = 0; i< scale; i++)
-				scale_factor *= 10;
+			p = out;
+			if (isneg)
+				*p++ = '-';
 
-			res = (double)value / (double)scale_factor;
-			snprintf(out, newlen + 1, "%g", res);
+			*p++ = '0';
+			*p++ = '.';
+
+			/* insert leading zeros */
+			for (i = 0; i < zero_count; i++)
+				*p++ = '0';
+
+			/* copy the digits from buffer */
+			strcpy(p, buffer);
 		}
 	}
 	else
 	{
-		newlen = strlen(buffer);	/* no decimal */
+		newlen = strlen(buffer) + (isneg ? 1 : 0);	/* no decimal + minus sign if needed */
 		out = (char *) palloc0(newlen + 1);
-		strlcpy(out, buffer, newlen + 1);
+		if (isneg)
+			snprintf(out, newlen + 1, "-%s", buffer);
+		else
+			strlcpy(out, buffer, newlen + 1);
 	}
 	return out;
 }
@@ -1589,7 +1750,11 @@ handle_base64_to_bit(const char * in, bool addquote, int typemod)
 	unsigned char * tmpout = (unsigned char *) palloc0(tmpoutlen);
 	char * out = NULL;
 
+#if SYNCHDB_PG_MAJOR_VERSION >= 1800
+	tmpoutlen = pg_b64_decode(in, strlen(in), tmpout, tmpoutlen);
+#else
 	tmpoutlen = pg_b64_decode(in, strlen(in), (char*)tmpout, tmpoutlen);
+#endif
 	if (addquote)
 	{
 		/* 8 bits per byte + 2 single quotes + b + terminating null */
@@ -1713,7 +1878,11 @@ handle_base64_to_date(const char * in, bool addquote, int timerep)
 	int tmpoutlen = pg_b64_dec_len(strlen(in));
 	unsigned char * tmpout = (unsigned char *) palloc0(tmpoutlen + 1);
 
+#if SYNCHDB_PG_MAJOR_VERSION >= 1800
+	tmpoutlen = pg_b64_decode(in, strlen(in), tmpout, tmpoutlen);
+#else
 	tmpoutlen = pg_b64_decode(in, strlen(in), (char *)tmpout, tmpoutlen);
+#endif
 	input = derive_value_from_byte(tmpout, tmpoutlen);
 	return construct_datestr(input, addquote, timerep);
 }
@@ -1819,7 +1988,11 @@ handle_base64_to_timestamp(const char * in, bool addquote, int timerep, int type
 	int tmpoutlen = pg_b64_dec_len(strlen(in));
 	unsigned char * tmpout = (unsigned char *) palloc0(tmpoutlen + 1);
 
+#if SYNCHDB_PG_MAJOR_VERSION >= 1800
+	tmpoutlen = pg_b64_decode(in, strlen(in), tmpout, tmpoutlen);
+#else
 	tmpoutlen = pg_b64_decode(in, strlen(in), (char *)tmpout, tmpoutlen);
+#endif
 	input = derive_value_from_byte(tmpout, tmpoutlen);
 	return construct_timestampstr(input, addquote, timerep, typemod);
 }
@@ -1994,7 +2167,11 @@ handle_base64_to_time(const char * in, bool addquote, int timerep, int typemod)
 	int tmpoutlen = pg_b64_dec_len(strlen(in));
 	unsigned char * tmpout = (unsigned char *) palloc0(tmpoutlen + 1);
 
+#if SYNCHDB_PG_MAJOR_VERSION >= 1800
+	tmpoutlen = pg_b64_decode(in, strlen(in), tmpout, tmpoutlen);
+#else
 	tmpoutlen = pg_b64_decode(in, strlen(in), (char *)tmpout, tmpoutlen);
+#endif
 	input = derive_value_from_byte(tmpout, tmpoutlen);
 	return construct_timetr(input, addquote, timerep, typemod);
 }
@@ -2024,7 +2201,11 @@ handle_base64_to_byte(const char * in, bool addquote)
 	unsigned char * tmpout = (unsigned char *) palloc0(tmpoutlen);
 	char * out = NULL;
 
+#if SYNCHDB_PG_MAJOR_VERSION >= 1800
+	tmpoutlen = pg_b64_decode(in, strlen(in), tmpout, tmpoutlen);
+#else
 	tmpoutlen = pg_b64_decode(in, strlen(in), (char*)tmpout, tmpoutlen);
+#endif
 	if (addquote)
 	{
 		/* hexstring + 2 single quotes + '\x' + terminating null */
@@ -2193,7 +2374,11 @@ handle_base64_to_interval(const char * in, bool addquote, int timerep, int typem
 	unsigned char * tmpout = (unsigned char *) palloc0(tmpoutlen);
 	long long input = 0;
 
+#if SYNCHDB_PG_MAJOR_VERSION >= 1800
+	tmpoutlen = pg_b64_decode(in, strlen(in), tmpout, tmpoutlen);
+#else
 	tmpoutlen = pg_b64_decode(in, strlen(in), (char *)tmpout, tmpoutlen);
+#endif
 	input = derive_value_from_byte(tmpout, tmpoutlen);
 	return construct_intervalstr(input, addquote, timerep, typemod);
 }
@@ -2307,6 +2492,19 @@ handle_data_by_type_category(char * in, DBZ_DML_COLUMN_VALUE * colval, Connector
 					}
 					break;
 				}
+#ifdef WITH_OLR
+				case OLRTYPE_NUMBER:
+				{
+					/* OLR represents date as nanoseconds since epoch*/
+					if (strstr(colval->typname, "date"))
+						out = handle_numeric_to_date(in, addquote, TIME_NANOTIMESTAMP);
+					else if (strstr(colval->typname, "timestamp"))
+						out = handle_numeric_to_timestamp(in, addquote, TIME_NANOTIMESTAMP, colval->typemod);
+					else
+						out = handle_numeric_to_time(in, addquote, TIME_NANOTIMESTAMP, colval->typemod);
+					break;
+				}
+#endif
 				default:
 				{
 					if (strstr(colval->typname, "date"))
@@ -2376,6 +2574,14 @@ handle_data_by_type_category(char * in, DBZ_DML_COLUMN_VALUE * colval, Connector
 						out = pstrdup(in);
 					break;
 				}
+#ifdef WITH_OLR
+				case OLRTYPE_NUMBER:
+				{
+					/* oracle number represented as interval - usd nanoseconds */
+					out = handle_numeric_to_interval(in, addquote, TIME_NANOTIMESTAMP, colval->typemod);
+					break;
+				}
+#endif
 				default:
 				{
 					out = handle_numeric_to_interval(in, addquote, colval->timerep, colval->typemod);
@@ -2748,8 +2954,20 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 		 */
 		if (out[0] == '{' && out[strlen(out) - 1] == '}' && strstr(out, "\"wkb\""))
 		{
-			jsonb_datum = DirectFunctionCall1(jsonb_in, CStringGetDatum(out));
-			jb = DatumGetJsonbP(jsonb_datum);
+
+			PG_TRY();
+			{
+				jsonb_datum = DirectFunctionCall1(jsonb_in, CStringGetDatum(out));
+				jb = DatumGetJsonbP(jsonb_datum);
+			}
+			PG_CATCH();
+			{
+				FlushErrorState();
+				elog(WARNING, "bad geometric expression out: %s", out);
+				/* skip transform on out */
+				return out;
+			}
+			PG_END_TRY();
 
 			getPathElementString(jb, "wkb", &strinfo, true);
 			if (!strcasecmp(strinfo.data, "null"))
@@ -3259,12 +3477,14 @@ updateSynchdbAttribute(DBZ_DDL * dbzddl, PG_DDL * pgddl, ConnectorType conntype,
 					"ext_atttypename = null WHERE "
 					"lower(ext_attname) = lower('%s') AND "
 					"lower(name) = lower('%s') AND "
-					"lower(type) = lower('%s');",
+					"lower(type) = lower('%s') AND "
+					"lower(ext_tbname) = lower('%s');",
 					SYNCHDB_ATTRIBUTE_TABLE,
 					pgcol->position,
 					pgcol->attname,
 					name,
-					connectorTypeToString(conntype));
+					connectorTypeToString(conntype),
+					dbzddl->id);
 		}
 	}
 	else
@@ -4041,10 +4261,10 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 			}
 
 			/* database mapped to schema */
-			appendStringInfo(&strinfo, "CREATE SCHEMA IF NOT EXISTS %s; ", db);
+			appendStringInfo(&strinfo, "CREATE SCHEMA IF NOT EXISTS \"%s\"; ", db);
 
 			/* table stays as table, schema ignored */
-			appendStringInfo(&strinfo, "CREATE TABLE IF NOT EXISTS %s.%s (", db, table);
+			appendStringInfo(&strinfo, "CREATE TABLE IF NOT EXISTS \"%s\".\"%s\" (", db, table);
 			pgddl->schema = pstrdup(db);
 			pgddl->tbname = pstrdup(table);
 
@@ -4147,7 +4367,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 			if (schema && table)
 			{
 				/* table stays as table under the schema */
-				appendStringInfo(&strinfo, "DROP TABLE IF EXISTS %s.%s;", schema, table);
+				appendStringInfo(&strinfo, "DROP TABLE IF EXISTS \"%s\".\"%s\";", schema, table);
 				pgddl->schema = pstrdup(schema);
 				pgddl->tbname = pstrdup(table);
 			}
@@ -4155,7 +4375,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 			{
 				/* table stays as table but no schema */
 				schema = pstrdup("public");
-				appendStringInfo(&strinfo, "DROP TABLE IF EXISTS %s;", table);
+				appendStringInfo(&strinfo, "DROP TABLE IF EXISTS \"%s\";", table);
 				pgddl->schema = pstrdup("public");
 				pgddl->tbname = pstrdup(table);
 			}
@@ -4179,7 +4399,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 			}
 			/* make schema points to db */
 			schema = db;
-			appendStringInfo(&strinfo, "DROP TABLE IF EXISTS %s.%s;", schema, table);
+			appendStringInfo(&strinfo, "DROP TABLE IF EXISTS \"%s\".\"%s\";", schema, table);
 			pgddl->schema = pstrdup(schema);
 			pgddl->tbname = pstrdup(table);
 		}
@@ -4232,7 +4452,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 			if (schema && table)
 			{
 				/* table stays as table under the schema */
-				appendStringInfo(&strinfo, "ALTER TABLE %s.%s ", schema, table);
+				appendStringInfo(&strinfo, "ALTER TABLE \"%s\".\"%s\" ", schema, table);
 				pgddl->schema = pstrdup(schema);
 				pgddl->tbname = pstrdup(table);
 			}
@@ -4240,7 +4460,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 			{
 				/* table stays as table but no schema */
 				schema = pstrdup("public");
-				appendStringInfo(&strinfo, "ALTER TABLE %s ", table);
+				appendStringInfo(&strinfo, "ALTER TABLE \"%s\" ", table);
 				pgddl->schema = pstrdup("public");
 				pgddl->tbname = pstrdup(table);
 			}
@@ -4272,7 +4492,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 
 			/* make schema points to db */
 			schema = db;
-			appendStringInfo(&strinfo, "ALTER TABLE %s.%s ", schema, table);
+			appendStringInfo(&strinfo, "ALTER TABLE \"%s\".\"%s\" ", schema, table);
 			pgddl->schema = pstrdup(schema);
 			pgddl->tbname = pstrdup(table);
 		}
@@ -4310,7 +4530,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 			elog(ERROR, "%s", msg);
 		}
 
-		elog(DEBUG1, "namespace %s.%s has PostgreSQL OID %d", schema, table, tableoid);
+		elog(DEBUG1, "namespace \"%s\".\"%s\" has PostgreSQL OID %d", schema, table, tableoid);
 
 		rel = table_open(tableoid, AccessShareLock);
 		tupdesc = RelationGetDescr(rel);
@@ -4967,7 +5187,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 			if (schema && table)
 			{
 				/* table stays as table under the schema */
-				appendStringInfo(&strinfo, "TRUNCATE TABLE %s.%s;", schema, table);
+				appendStringInfo(&strinfo, "TRUNCATE TABLE \"%s\".\"%s\";", schema, table);
 				pgddl->schema = pstrdup(schema);
 				pgddl->tbname = pstrdup(table);
 			}
@@ -4975,7 +5195,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 			{
 				/* table stays as table but no schema */
 				schema = pstrdup("public");
-				appendStringInfo(&strinfo, "TRUNCATE TABLE %s;", table);
+				appendStringInfo(&strinfo, "TRUNCATE TABLE \"%s\";", table);
 				pgddl->schema = pstrdup("public");
 				pgddl->tbname = pstrdup(table);
 			}
@@ -4999,7 +5219,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 			}
 			/* make schema points to db */
 			schema = db;
-			appendStringInfo(&strinfo, "TRUNCATE TABLE %s.%s;", schema, table);
+			appendStringInfo(&strinfo, "TRUNCATE TABLE \"%s\".\"%s\";", schema, table);
 			pgddl->schema = pstrdup(schema);
 			pgddl->tbname = pstrdup(table);
 		}
@@ -5020,4 +5240,68 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 
 	elog(DEBUG1, "pgsql: %s ", pgddl->ddlquery);
 	return pgddl;
+}
+
+bool
+fc_translate_datatype(ConnectorType connectorType,
+		const char * ext_datatype, int ext_length, int ext_scale,
+		char ** pg_datatype, int * pg_datatype_len)
+{
+	DatatypeHashEntry * entry;
+	DatatypeHashKey key = {0};
+	bool found = 0;
+	HTAB * thehash = NULL;
+
+	switch (connectorType)
+	{
+		case TYPE_MYSQL:
+			thehash = mysqlDatatypeHash;
+			break;
+		case TYPE_ORACLE:
+		case TYPE_OLR:
+			thehash = oracleDatatypeHash;
+			break;
+		case TYPE_SQLSERVER:
+			thehash = sqlserverDatatypeHash;
+			break;
+		default:
+		{
+			elog(WARNING, "unsupported connector type");
+			return false;
+		}
+	}
+	if (!thehash)
+	{
+		elog(WARNING, "data type hash not initialized.");
+		return false;
+	}
+
+	key.autoIncremented = false;
+
+	/* handle per-connector special cases */
+	if ((connectorType == TYPE_MYSQL || connectorType == TYPE_SQLSERVER) &&
+			ext_length == 1 && !strcasecmp(ext_datatype, "bit"))
+	{
+		/* special case: bit with length 1 -> include length in lookup key */
+		snprintf(key.extTypeName, sizeof(key.extTypeName), "%s(%d)",
+				ext_datatype, ext_length);
+	}
+	else if (connectorType == TYPE_ORACLE && ext_scale == 0 &&
+			!strcasecmp(ext_datatype, "number"))
+	{
+		/* special case: NUMBER with scale 0 -> include both length and scale in lookup key */
+		snprintf(key.extTypeName, sizeof(key.extTypeName), "%s(%d,%d)",
+				ext_datatype, ext_length, ext_scale);
+	}
+	else
+		snprintf(key.extTypeName, sizeof(key.extTypeName), "%s", ext_datatype);
+
+	entry = (DatatypeHashEntry *) hash_search(thehash, &key, HASH_FIND, &found);
+	if (found)
+	{
+		*pg_datatype = pstrdup(entry->pgsqlTypeName);
+		*pg_datatype_len = entry->pgsqlTypeLength;
+		return true;
+	}
+	return false;
 }

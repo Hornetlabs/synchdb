@@ -55,6 +55,7 @@
 #include "ora_gramparse.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
+#include "nodes/nodetags_ext.h"
 #include "parser/parser.h"
 #include "parser/scansup.h"
 #include "storage/lmgr.h"
@@ -64,41 +65,37 @@
 #include "utils/numeric.h"
 #include "utils/ora_compatible.h"
 #include "utils/xml.h"
+#include "parser/parse_param.h"
+#include "catalog/pg_attribute.h"
 
+/* static configuration to oracle parser */
+int compatible_db = ORA_PARSER;
+int nls_length_semantics = NLS_LENGTH_BYTE;
+bool identifier_case_from_pg_dump = false;
+bool enable_case_switch = true;
+bool enable_emptystring_to_NULL = false;
+bool enable_canonical_mode = true;
+int identifier_case_switch = INTERCHANGE;
 
 /*
- * Location tracking support --- simpler than bison's default, since we only
- * want to track the start position not the end position of each nonterminal.
+ * Location tracking support.  Unlike bison's default, we only want
+ * to track the start position not the end position of each nonterminal.
+ * Nonterminals that reduce to empty receive position "-1".  Since a
+ * production's leading RHS nonterminal(s) may have reduced to empty,
+ * we have to scan to find the first one that's not -1.
  */
 #define YYLLOC_DEFAULT(Current, Rhs, N) \
 	do { \
-		if ((N) > 0) \
-			(Current) = (Rhs)[1]; \
-		else \
-			(Current) = (-1); \
+		(Current) = (-1); \
+		for (int _i = 1; _i <= (N); _i++) \
+		{ \
+			if ((Rhs)[_i] >= 0) \
+			{ \
+				(Current) = (Rhs)[_i]; \
+				break; \
+			} \
+		} \
 	} while (0)
-
-/*
- * The above macro assigns -1 (unknown) as the parse location of any
- * nonterminal that was reduced from an empty rule, or whose leftmost
- * component was reduced from an empty rule.  This is problematic
- * for nonterminals defined like
- *		OptFooList: / * EMPTY * / { ... } | OptFooList Foo { ... } ;
- * because we'll set -1 as the location during the first reduction and then
- * copy it during each subsequent reduction, leaving us with -1 for the
- * location even when the list is not empty.  To fix that, do this in the
- * action for the nonempty rule(s):
- *		if (@$ < 0) @$ = @2;
- * (Although we have many nonterminals that follow this pattern, we only
- * bother with fixing @$ like this when the nonterminal's parse location
- * is actually referenced in some rule.)
- *
- * A cleaner answer would be to make YYLLOC_DEFAULT scan all the Rhs
- * locations until it's found one that's not -1.  Then we'd get a correct
- * location for any nonterminal that isn't entirely empty.  But this way
- * would add overhead to every rule reduction, and so far there's not been
- * a compelling reason to pay that overhead.
- */
 
 /*
  * Bison doesn't allocate anything that needs to live across parser calls,
@@ -158,6 +155,8 @@ typedef struct KeyActions
 #define CAS_INITIALLY_DEFERRED		0x08
 #define CAS_NOT_VALID				0x10
 #define CAS_NO_INHERIT				0x20
+#define CAS_NOT_ENFORCED			0x40
+#define CAS_ENFORCED				0x80
 
 
 #define parser_yyerror(msg)  ora_scanner_yyerror(msg, yyscanner)
@@ -198,7 +197,7 @@ static void doNegateFloat(Float *v);
 static Node *makeAndExpr(Node *lexpr, Node *rexpr, int location);
 static Node *makeOrExpr(Node *lexpr, Node *rexpr, int location);
 static Node *makeNotExpr(Node *expr, int location);
-static Node *makeAArrayExpr(List *elements, int location);
+static Node *makeAArrayExpr(List *elements, int location, int end_location);
 static Node *makeSQLValueFunction(SQLValueFunctionOp op, int32 typmod,
 								  int location);
 static Node *makeXmlExpr(XmlExprOp op, char *name, List *named_args,
@@ -212,8 +211,8 @@ static void SplitColQualList(List *qualList,
 							 List **constraintList, CollateClause **collClause,
 							 ora_core_yyscan_t yyscanner);
 static void processCASbits(int cas_bits, int location, const char *constrType,
-			   bool *deferrable, bool *initdeferred, bool *not_valid,
-			   bool *no_inherit, ora_core_yyscan_t yyscanner);
+			   bool *deferrable, bool *initdeferred, bool *is_enforced,
+			   bool *not_valid, bool *no_inherit, ora_core_yyscan_t yyscanner);
 static PartitionStrategy parsePartitionStrategy(char *strategy);
 static void preprocess_pubobj_list(List *pubobjspec_list,
 								   ora_core_yyscan_t yyscanner);
@@ -281,6 +280,8 @@ static void determineLanguage(List *options);
 	MergeWhenClause *mergewhen;
 	struct KeyActions *keyactions;
 	struct KeyAction *keyaction;
+	ReturningClause *retclause;
+	ReturningOptionKind retoptionkind;
 	package_alter_flag	alter_flag;
 }
 
@@ -325,7 +326,7 @@ static void determineLanguage(List *options);
 		CreateSubscriptionStmt AlterSubscriptionStmt DropSubscriptionStmt
 
 %type <node>	select_no_parens select_with_parens select_clause
-				simple_select values_clause
+				simple_select values_clause values_clause_no_parens
 				PLpgSQL_Expr PLAssignStmt
 
 %type <str>			opt_single_name
@@ -451,7 +452,8 @@ static void determineLanguage(List *options);
 				opclass_purpose opt_opfamily transaction_mode_list_or_empty
 				OptTableFuncElementList TableFuncElementList opt_type_modifiers
 				prep_type_clause
-				execute_param_clause using_clause returning_clause
+				execute_param_clause using_clause
+				returning_with_clause returning_options
 				opt_enum_val_list enum_val_list table_func_column_list
 				create_generic_options alter_generic_options
 				relation_expr_list dostmt_opt_list
@@ -461,6 +463,9 @@ static void determineLanguage(List *options);
 				drop_option_list pub_obj_list
 				numeric_opt_type_modifiers
 
+%type <retclause> returning_clause
+%type <node>	returning_option
+%type <retoptionkind> returning_option_kind
 %type <node>	opt_routine_body
 %type <groupclause> group_clause
 %type <list>	group_by_list
@@ -533,7 +538,7 @@ static void determineLanguage(List *options);
 %type <defelt>	def_elem reloption_elem old_aggr_elem operator_def_elem
 %type <node>	def_arg columnElem where_clause where_or_current_clause
 				a_expr b_expr c_expr AexprConst indirection_el opt_slice_bound
-				columnref in_expr having_clause func_table xmltable array_expr
+				columnref having_clause func_table xmltable array_expr
 				OptWhereClause operator_def_arg
 %type <list>	rowsfrom_item rowsfrom_list opt_col_def_list
 %type <boolean> opt_ordinality
@@ -649,13 +654,18 @@ static void determineLanguage(List *options);
 %type <str>		opt_existing_window_name
 %type <boolean> opt_if_not_exists
 %type <boolean> opt_unique_null_treatment
-%type <ival>	generated_when override_kind
+%type <ival>	generated_when override_kind opt_virtual_or_stored
 %type <partspec>	PartitionSpec OptPartitionSpec
 %type <partelem>	part_elem
 %type <list>		part_params
 %type <partboundspec> PartitionBoundSpec
 %type <list>		hash_partbound
 %type <defelt>		hash_partbound_elem
+
+%type <node> param_mode
+%type <node> param_mode_item
+%type <list> param_mode_list
+%type <str>  opt_param_name
 
 %type <list>	identity_clause identity_options drop_identity
 %type <boolean>	opt_with opt_by
@@ -690,6 +700,9 @@ static void determineLanguage(List *options);
 					json_object_constructor_null_clause_opt
 					json_array_constructor_null_clause_opt
 
+/* added for synchdb to support notvalid without adding keyword */
+%type <ival> EnableOpts
+
 /*
  * Non-keyword token types.  These are hard-wired into the "flex" lexer.
  * They must be listed first so that their numeric codes do not depend on
@@ -705,6 +718,7 @@ static void determineLanguage(List *options);
 %token <str>	IDENT UIDENT FCONST SCONST USCONST BCONST XCONST Op
 %token <str>	BFCONST	BDCONST
 %token <ival>	ICONST PARAM
+%token <str>	ORAPARAM
 %token			TYPECAST DOT_DOT COLON_EQUALS EQUALS_GREATER
 %token			LESS_EQUALS GREATER_EQUALS NOT_EQUALS LESS_LESS GREATER_GREATER
 
@@ -738,7 +752,7 @@ static void determineLanguage(List *options);
 	DETACH DICTIONARY DISABLE_P DISCARD DISTINCT DO DOCUMENT_P DOMAIN_P
 	DOUBLE_P DROP
 
-	EACH ELSE EMPTY_P ENABLE_P ENCODING ENCRYPTED END_P ENUM_P ERROR_P ESCAPE
+	EACH ELSE EMPTY_P ENABLE_P ENCODING ENCRYPTED END_P ENFORCED ENUM_P ERROR_P ESCAPE
 	EVENT EXCEPT EXCLUDE EXCLUDING EXCLUSIVE EXEC EXECUTE EXISTS EXPLAIN EXPRESSION EXTEND
 	EXTENSION EXTERNAL
 
@@ -772,7 +786,7 @@ static void determineLanguage(List *options);
 	NOT NOTHING NOTIFY NOTNULL NOWAIT NULL_P NULLIF
 	NULLS_P NUMBER_P NUMERIC NVL NVL2
 
-	OBJECT_P OF OFF OFFSET OIDS OLD OMIT ON ONLY OPERATOR OPTION OPTIONS OR
+	OBJECT_P OBJECTS_P OF OFF OFFSET OIDS OLD OMIT ON ONLY OPERATOR OPTION OPTIONS OR
 	ORDER ORDINALITY OTHERS OUT_P OUTER_P
 	OVER OVERLAPS OVERLAY OVERRIDING OWNED OWNER PACKAGES 
 
@@ -786,12 +800,11 @@ static void determineLanguage(List *options);
 	RANGE READ REAL REASSIGN RECHECK RECURSIVE REF_P REFERENCES REFERENCING
 	REFRESH REINDEX RELATIVE_P RELEASE RENAME REPEATABLE REPLACE REPLICA
 	RESET RESTART RESTRICT RETURN RETURNING RETURNS REVOKE RIGHT ROLE ROLLBACK ROLLUP
-	ROUTINE ROUTINES ROW ROWS  ROWTYPE RULE
+	ROUTINE ROUTINES ROW ROWID ROWS  ROWTYPE RULE
 
 	SAVEPOINT SCALAR SCALE SCHEMA SCHEMAS SCROLL SEARCH SECOND_P SECURITY SELECT
 	SEQUENCE SEQUENCES
 	SERIALIZABLE SERVER SESSION SESSION_USER SET SETS SETOF SHARD SHARE SHOW
-
 	SIMILAR SIMPLE SKIP SMALLINT SNAPSHOT SOME SOURCE SPECIFICATION SQL_P STABLE STANDALONE_P
 	START STATEMENT STATISTICS STDIN STDOUT STORAGE STORED STRICT_P STRING_P STRIP_P
 	SUBSCRIPTION SUBSTRING SUPPORT SYMMETRIC SYSDATE SYSID SYSTEM_P SYSTEM_USER SYSTIMESTAMP
@@ -805,7 +818,7 @@ static void determineLanguage(List *options);
 	UNLISTEN UNLOGGED UNTIL UPDATE UPDATEXML USER USERENV USING
 
 	VACUUM VALID VALIDATE VALIDATOR VALUE_P VALUES VARCHAR VARCHAR2 VARIADIC VARYING
-	VERBOSE VERSION_P VIEW VIEWS VISIBLE VOLATILE
+	VERBOSE VERSION_P VIEW VIEWS VIRTUAL VISIBLE VOLATILE
 
 	WHEN WHERE WHITESPACE_P WINDOW WITH WITHIN WITHOUT WORK WRAPPER WRITE
 
@@ -854,6 +867,11 @@ static void determineLanguage(List *options);
 %type <objtype> package_type
 %type <boolean> package_is_or_as package_body_is_or_as
 
+
+%type <boolean> OptViewForce
+%type <node>	ora_alter_view_cmd
+%type <list>	ora_alter_view_cmds
+
 /*
  * The grammar thinks these are keywords, but they are not in the kwlist.h
  * list and so can never be entered directly.  The filter in parser.c
@@ -879,6 +897,11 @@ static void determineLanguage(List *options);
 %token		MODE_PLPGSQL_ASSIGN1
 %token		MODE_PLPGSQL_ASSIGN2
 %token		MODE_PLPGSQL_ASSIGN3
+
+%token          MODE_PLISQL_EXPR
+%token          MODE_PLISQL_ASSIGN1
+%token          MODE_PLISQL_ASSIGN2
+%token          MODE_PLISQL_ASSIGN3
 
 
 /* Precedence: lowest to highest */
@@ -984,7 +1007,7 @@ parse_toplevel:
 			| MODE_PLPGSQL_EXPR PLpgSQL_Expr
 			{
 				pg_yyget_extra(yyscanner)->parsetree =
-					list_make1(makeRawStmt($2, 0));
+					list_make1(makeRawStmt($2, @2));
 			}
 			| MODE_PLPGSQL_ASSIGN1 PLAssignStmt
 			{
@@ -992,7 +1015,7 @@ parse_toplevel:
 
 				n->nnames = 1;
 				pg_yyget_extra(yyscanner)->parsetree =
-					list_make1(makeRawStmt((Node *) n, 0));
+					list_make1(makeRawStmt((Node *) n, @2));
 			}
 			| MODE_PLPGSQL_ASSIGN2 PLAssignStmt
 			{
@@ -1000,7 +1023,7 @@ parse_toplevel:
 
 				n->nnames = 2;
 				pg_yyget_extra(yyscanner)->parsetree =
-					list_make1(makeRawStmt((Node *) n, 0));
+					list_make1(makeRawStmt((Node *) n, @2));
 			}
 			| MODE_PLPGSQL_ASSIGN3 PLAssignStmt
 			{
@@ -1008,19 +1031,41 @@ parse_toplevel:
 
 				n->nnames = 3;
 				pg_yyget_extra(yyscanner)->parsetree =
-					list_make1(makeRawStmt((Node *) n, 0));
+					list_make1(makeRawStmt((Node *) n, @2));
 			}
+			| MODE_PLISQL_EXPR PLpgSQL_Expr
+                        {
+                                pg_yyget_extra(yyscanner)->parsetree =
+                                        list_make1(makeRawStmt($2, 0));
+                        }
+                        | MODE_PLISQL_ASSIGN1 PLAssignStmt
+                        {
+                                PLAssignStmt *n = (PLAssignStmt *) $2;
+                                n->nnames = 1;
+                                pg_yyget_extra(yyscanner)->parsetree =
+                                        list_make1(makeRawStmt((Node *) n, 0));
+                        }
+                        | MODE_PLISQL_ASSIGN2 PLAssignStmt
+                        {
+                                PLAssignStmt *n = (PLAssignStmt *) $2;
+                                n->nnames = 2;
+                                pg_yyget_extra(yyscanner)->parsetree =
+                                        list_make1(makeRawStmt((Node *) n, 0));
+                        }
+                        | MODE_PLISQL_ASSIGN3 PLAssignStmt
+                        {
+                                PLAssignStmt *n = (PLAssignStmt *) $2;
+                                n->nnames = 3;
+                                pg_yyget_extra(yyscanner)->parsetree =
+                                        list_make1(makeRawStmt((Node *) n, 0));
+                        }
 		;
 
 /*
  * At top level, we wrap each stmt with a RawStmt node carrying start location
- * and length of the stmt's text.  Notice that the start loc/len are driven
- * entirely from semicolon locations (@2).  It would seem natural to use
- * @1 or @3 to get the true start location of a stmt, but that doesn't work
- * for statements that can start with empty nonterminals (opt_with_clause is
- * the main offender here); as noted in the comments for YYLLOC_DEFAULT,
- * we'd get -1 for the location in such cases.
- * We also take care to discard empty statements entirely.
+ * and length of the stmt's text.
+ * We also take care to discard empty statements entirely (which among other
+ * things dodges the problem of assigning them a location).
  */
 stmtmulti:	stmtmulti ';' toplevel_stmt
 				{
@@ -1030,14 +1075,14 @@ stmtmulti:	stmtmulti ';' toplevel_stmt
 						updateRawStmtEnd(llast_node(RawStmt, $1), @2);
 					}
 					if ($3 != NULL)
-						$$ = lappend($1, makeRawStmt($3, @2 + 1));
+						$$ = lappend($1, makeRawStmt($3, @3));
 					else
 						$$ = $1;
 				}
 			| toplevel_stmt
 				{
 					if ($1 != NULL)
-						$$ = list_make1(makeRawStmt($1, 0));
+						$$ = list_make1(makeRawStmt($1, @1));
 					else
 						$$ = NIL;
 				}
@@ -1671,8 +1716,6 @@ CreateSchemaStmt:
 OptSchemaEltList:
 			OptSchemaEltList schema_stmt
 				{
-					if (@$ < 0)			/* see comments for YYLLOC_DEFAULT */
-						@$ = @2;
 					$$ = lappend($1, $2);
 				}
 			| /* EMPTY */
@@ -1740,6 +1783,8 @@ set_rest:
 					n->kind = VAR_SET_MULTI;
 					n->name = "TRANSACTION";
 					n->args = $2;
+					n->jumble_args = true;
+					n->location = -1;
 					$$ = n;
 				}
 			| SESSION CHARACTERISTICS AS TRANSACTION transaction_mode_list
@@ -1749,6 +1794,8 @@ set_rest:
 					n->kind = VAR_SET_MULTI;
 					n->name = "SESSION CHARACTERISTICS";
 					n->args = $5;
+					n->jumble_args = true;
+					n->location = -1;
 					$$ = n;
 				}
 			| set_rest_more
@@ -1762,6 +1809,7 @@ generic_set:
 					n->kind = VAR_SET_VALUE;
 					n->name = $1;
 					n->args = $3;
+					n->location = @3;
 					$$ = n;
 				}
 			| var_name '=' var_list
@@ -1771,6 +1819,7 @@ generic_set:
 					n->kind = VAR_SET_VALUE;
 					n->name = $1;
 					n->args = $3;
+					n->location = @3;
 					$$ = n;
 				}
 			| var_name TO DEFAULT
@@ -1779,6 +1828,7 @@ generic_set:
 
 					n->kind = VAR_SET_DEFAULT;
 					n->name = $1;
+					n->location = -1;
 					$$ = n;
 				}
 			| var_name '=' DEFAULT
@@ -1787,6 +1837,7 @@ generic_set:
 
 					n->kind = VAR_SET_DEFAULT;
 					n->name = $1;
+					n->location = -1;
 					$$ = n;
 				}
 		;
@@ -1799,6 +1850,7 @@ set_rest_more:	/* Generic SET syntaxes: */
 
 					n->kind = VAR_SET_CURRENT;
 					n->name = $1;
+					n->location = -1;
 					$$ = n;
 				}
 			/* Special syntaxes mandated by SQL standard: */
@@ -1808,6 +1860,8 @@ set_rest_more:	/* Generic SET syntaxes: */
 
 					n->kind = VAR_SET_VALUE;
 					n->name = "timezone";
+					n->location = -1;
+					n->jumble_args = true;
 					if ($3 != NULL)
 						n->args = list_make1($3);
 					else
@@ -1829,6 +1883,7 @@ set_rest_more:	/* Generic SET syntaxes: */
 					n->kind = VAR_SET_VALUE;
 					n->name = "search_path";
 					n->args = list_make1(makeStringConst($2, @2));
+					n->location = @2;
 					$$ = n;
 				}
 			| NAMES opt_encoding
@@ -1837,6 +1892,7 @@ set_rest_more:	/* Generic SET syntaxes: */
 
 					n->kind = VAR_SET_VALUE;
 					n->name = "client_encoding";
+					n->location = @2;
 					if ($2 != NULL)
 						n->args = list_make1(makeStringConst($2, @2));
 					else
@@ -1850,6 +1906,7 @@ set_rest_more:	/* Generic SET syntaxes: */
 					n->kind = VAR_SET_VALUE;
 					n->name = "role";
 					n->args = list_make1(makeStringConst($2, @2));
+					n->location = @2;
 					$$ = n;
 				}
 			| SESSION AUTHORIZATION NonReservedWord_or_Sconst
@@ -1859,6 +1916,7 @@ set_rest_more:	/* Generic SET syntaxes: */
 					n->kind = VAR_SET_VALUE;
 					n->name = "session_authorization";
 					n->args = list_make1(makeStringConst($3, @3));
+					n->location = @3;
 					$$ = n;
 				}
 			| SESSION AUTHORIZATION DEFAULT
@@ -1867,6 +1925,7 @@ set_rest_more:	/* Generic SET syntaxes: */
 
 					n->kind = VAR_SET_DEFAULT;
 					n->name = "session_authorization";
+					n->location = -1;
 					$$ = n;
 				}
 			| XML_P OPTION document_or_content
@@ -1876,6 +1935,8 @@ set_rest_more:	/* Generic SET syntaxes: */
 					n->kind = VAR_SET_VALUE;
 					n->name = "xmloption";
 					n->args = list_make1(makeStringConst($3 == XMLOPTION_DOCUMENT ? "DOCUMENT" : "CONTENT", @3));
+					n->jumble_args = true;
+					n->location = -1;
 					$$ = n;
 				}
 			/* Special syntaxes invented by PostgreSQL: */
@@ -1886,6 +1947,7 @@ set_rest_more:	/* Generic SET syntaxes: */
 					n->kind = VAR_SET_MULTI;
 					n->name = "TRANSACTION SNAPSHOT";
 					n->args = list_make1(makeStringConst($3, @3));
+					n->location = @3;
 					$$ = n;
 				}
 		;
@@ -1995,6 +2057,7 @@ reset_rest:
 
 					n->kind = VAR_RESET;
 					n->name = "timezone";
+					n->location = -1;
 					$$ = n;
 				}
 			| TRANSACTION ISOLATION LEVEL
@@ -2003,6 +2066,7 @@ reset_rest:
 
 					n->kind = VAR_RESET;
 					n->name = "transaction_isolation";
+					n->location = -1;
 					$$ = n;
 				}
 			| SESSION AUTHORIZATION
@@ -2011,6 +2075,7 @@ reset_rest:
 
 					n->kind = VAR_RESET;
 					n->name = "session_authorization";
+					n->location = -1;
 					$$ = n;
 				}
 		;
@@ -2022,6 +2087,7 @@ generic_reset:
 
 					n->kind = VAR_RESET;
 					n->name = $1;
+					n->location = -1;
 					$$ = n;
 				}
 			| ALL
@@ -2029,6 +2095,7 @@ generic_reset:
 					VariableSetStmt *n = makeNode(VariableSetStmt);
 
 					n->kind = VAR_RESET_ALL;
+					n->location = -1;
 					$$ = n;
 				}
 		;
@@ -2319,6 +2386,15 @@ AlterTableStmt:
 					n->missing_ok = true;
 					$$ = (Node *) n;
 				}
+		|	ALTER VIEW qualified_name ora_alter_view_cmds
+				{
+					AlterTableStmt *n = makeNode(AlterTableStmt);
+					n->relation = $3;
+					n->cmds = $4;
+					n->objtype = OBJECT_VIEW;
+					n->missing_ok = false;
+					$$ = (Node *)n;
+				}
 		|	ALTER VIEW qualified_name alter_table_cmds
 				{
 					AlterTableStmt *n = makeNode(AlterTableStmt);
@@ -2411,6 +2487,21 @@ alter_table_cmds:
 			| MODIFY identity_clause				{ $$ = $2; }
 		;
 
+ora_alter_view_cmds:
+			ora_alter_view_cmd								{ $$ = list_make1($1); }
+			| ora_alter_view_cmds ora_alter_view_cmd		{ $$ = lappend($1, $2); }
+		;
+
+ora_alter_view_cmd:
+		COMPILE
+			{
+				AlterTableCmd *n = makeNode(AlterTableCmd);
+				n->subtype = AT_ForceViewCompile;
+				n->name = NULL;
+				$$ = (Node *)n;
+			}
+		;
+
 partition_cmd:
 			/* ALTER TABLE <name> ATTACH PARTITION <table_name> FOR VALUES */
 			ATTACH PARTITION qualified_name PartitionBoundSpec
@@ -2475,50 +2566,70 @@ alter_table_cmd:
 			/* ALTER TABLE <name> ADD <coldef> */
 			ADD_P columnDef
 				{
+					ColumnDef  *colDef;
 					AlterTableCmd *n = makeNode(AlterTableCmd);
 
 					n->subtype = AT_AddColumn;
 					n->def = $2;
 					n->missing_ok = false;
+					colDef = castNode(ColumnDef, $2);
+					if (strcmp(colDef->colname, "rowid") == 0)
+						elog(ERROR, "column name \"%s\" conflicts with a system column name", colDef->colname);
 					$$ = (Node *) n;
 				}
 			/* ALTER TABLE <name> ADD ( <coldef> ) */
 			| ADD_P '(' columnDef ')'
 			{
+				ColumnDef  *colDef;
 				AlterTableCmd *n = makeNode(AlterTableCmd);
 				n->subtype = AT_AddColumn;
 				n->def = $3;
 				n->missing_ok = false;
+				colDef = castNode(ColumnDef, $3);
+					if (strcmp(colDef->colname, "rowid") == 0)
+						elog(ERROR, "column name \"%s\" conflicts with a system column name", colDef->colname);
 				$$ = (Node *)n;
 				}
 			/* ALTER TABLE <name> ADD IF NOT EXISTS <coldef> */
 			| ADD_P IF_P NOT EXISTS columnDef
 				{
+					ColumnDef  *colDef;
 					AlterTableCmd *n = makeNode(AlterTableCmd);
 
 					n->subtype = AT_AddColumn;
 					n->def = $5;
 					n->missing_ok = true;
+					colDef = castNode(ColumnDef, $5);
+					if (strcmp(colDef->colname, "rowid") == 0)
+						elog(ERROR, "column name \"%s\" conflicts with a system column name", colDef->colname);
 					$$ = (Node *) n;
 				}
 			/* ALTER TABLE <name> ADD COLUMN <coldef> */
 			| ADD_P COLUMN columnDef
 				{
+					ColumnDef  *colDef;
 					AlterTableCmd *n = makeNode(AlterTableCmd);
 
 					n->subtype = AT_AddColumn;
 					n->def = $3;
 					n->missing_ok = false;
+					colDef = castNode(ColumnDef, $3);
+					if (strcmp(colDef->colname, "rowid") == 0)
+						elog(ERROR, "column name \"%s\" conflicts with a system column name", colDef->colname);
 					$$ = (Node *) n;
 				}
 			/* ALTER TABLE <name> ADD COLUMN IF NOT EXISTS <coldef> */
 			| ADD_P COLUMN IF_P NOT EXISTS columnDef
 				{
+					ColumnDef  *colDef;
 					AlterTableCmd *n = makeNode(AlterTableCmd);
 
 					n->subtype = AT_AddColumn;
 					n->def = $6;
 					n->missing_ok = true;
+					colDef = castNode(ColumnDef, $6);
+					if (strcmp(colDef->colname, "rowid") == 0)
+						elog(ERROR, "column name \"%s\" conflicts with a system column name", colDef->colname);
 					$$ = (Node *) n;
 				}
 			/* ALTER TABLE <name> ALTER [COLUMN] <colname> {SET DEFAULT <expr>|DROP DEFAULT} */
@@ -2531,7 +2642,7 @@ alter_table_cmd:
 					n->def = $4;
 					$$ = (Node *) n;
 				}
-						/* ALTER TABLE <name> ALTER [COLUMN] <colname> DROP INVISIBLE */
+			/* ALTER TABLE <name> ALTER [COLUMN] <colname> DROP INVISIBLE */
 			| ALTER opt_column ColId DROP INVISIBLE
 				{
 					AlterTableCmd *n = makeNode(AlterTableCmd);
@@ -2547,20 +2658,105 @@ alter_table_cmd:
 					n->name = $3;
 					$$ = (Node *)n;
 				}
-			| MODIFY ColId INVISIBLE
+			| MODIFY ColId Typename opt_collate_clause alter_using
 				{
 					AlterTableCmd *n = makeNode(AlterTableCmd);
-					n->subtype = AT_SetInvisible;
+					ColumnDef *def = makeNode(ColumnDef);
+
+					n->subtype = AT_AlterColumnType;
 					n->name = $2;
-					$$ = (Node *)n;
+					n->def = (Node *) def;
+					/* We only use these fields of the ColumnDef node */
+					def->typeName = $3;
+					def->collClause = (CollateClause *) $4;
+					def->raw_default = $5;
+					//def->location = @3;
+					$$ = (Node *) n;
 				}
-			| MODIFY ColId VISIBLE
+			| MODIFY '(' ColId Typename opt_collate_clause alter_using ')'
 				{
 					AlterTableCmd *n = makeNode(AlterTableCmd);
-					n->subtype = AT_DropInvisible;
-					n->name = $2;
-					$$ = (Node *)n;
+					ColumnDef *def = makeNode(ColumnDef);
+
+					n->subtype = AT_AlterColumnType;
+					n->name = $3;
+					n->def = (Node *) def;
+					/* We only use these fields of the ColumnDef node */
+					def->typeName = $4;
+					def->collClause = (CollateClause *) $5;
+					def->raw_default = $6;
+					//def->location = @3;
+					$$ = (Node *) n;
 				}
+			| MODIFY ColId DEFAULT a_expr
+				{
+					AlterTableCmd *n = makeNode(AlterTableCmd);
+			        
+					n->subtype = AT_ColumnDefault;
+					n->name = $2;
+					n->def = (Node *) $4;   /* expression for the DEFAULT */
+					$$ = (Node *) n;
+				}
+			| MODIFY '(' ColId DEFAULT a_expr ')'
+				{
+					AlterTableCmd *n = makeNode(AlterTableCmd);
+
+					n->subtype = AT_ColumnDefault;
+					n->name = $3;
+					n->def = (Node *) $5;   /* expression for the DEFAULT */
+					$$ = (Node *) n;
+				}
+			| MODIFY ColId NOT NULL_P
+				{
+					AlterTableCmd *n = makeNode(AlterTableCmd);
+
+					n->subtype = AT_SetNotNull;
+					n->name = $2;
+					n->def = NULL;
+					$$ = (Node *) n;
+			    }
+			| MODIFY '(' ColId NOT NULL_P ')'
+                {
+					AlterTableCmd *n = makeNode(AlterTableCmd);
+
+					n->subtype = AT_SetNotNull;
+					n->name = $3;
+					n->def = NULL;
+					$$ = (Node *) n;
+                }
+			| MODIFY ColId NULL_P
+                {
+					AlterTableCmd *n = makeNode(AlterTableCmd);
+
+					n->subtype = AT_DropNotNull;
+					n->name = $2;
+					n->def = NULL;
+					$$ = (Node *) n;
+                }
+            | MODIFY '(' ColId NULL_P ')'
+                {
+					AlterTableCmd *n = makeNode(AlterTableCmd);
+
+					n->subtype = AT_DropNotNull;
+					n->name = $3;
+					n->def = NULL;
+					$$ = (Node *) n;
+                }
+
+			//| MODIFY ColId INVISIBLE
+			//	{
+			//		AlterTableCmd *n = makeNode(AlterTableCmd);
+			//		n->subtype = AT_SetInvisible;
+			//		n->name = $2;
+			//		$$ = (Node *)n;
+			//	}
+			//| MODIFY ColId VISIBLE
+			//	{
+			//		AlterTableCmd *n = makeNode(AlterTableCmd);
+			//		n->subtype = AT_DropInvisible;
+			//		n->name = $2;
+			//		$$ = (Node *)n;
+			//	}
 			/* ALTER TABLE <name> ALTER [COLUMN] <colname> DROP NOT NULL */
 			| ALTER opt_column ColId DROP NOT NULL_P
 				{
@@ -2730,6 +2926,8 @@ alter_table_cmd:
 					n->name = $5;
 					n->behavior = $6;
 					n->missing_ok = true;
+					if (strcmp(n->name, "rowid") == 0)
+						elog(ERROR, "cannot drop system column \"%s\"", n->name);
 					$$ = (Node *) n;
 				}
 			/* ALTER TABLE <name> DROP [COLUMN] <colname> [RESTRICT|CASCADE] */
@@ -2741,6 +2939,8 @@ alter_table_cmd:
 					n->name = $3;
 					n->behavior = $4;
 					n->missing_ok = false;
+					if (strcmp(n->name, "rowid") == 0)
+						elog(ERROR, "cannot drop system column \"%s\"", n->name);
 					$$ = (Node *) n;
 				}
 			/*
@@ -2794,16 +2994,46 @@ alter_table_cmd:
 			| ALTER CONSTRAINT name ConstraintAttributeSpec
 				{
 					AlterTableCmd *n = makeNode(AlterTableCmd);
-					Constraint *c = makeNode(Constraint);
+					ATAlterConstraint *c = makeNode(ATAlterConstraint);
 
 					n->subtype = AT_AlterConstraint;
 					n->def = (Node *) c;
-					c->contype = CONSTR_FOREIGN; /* others not supported, yet */
 					c->conname = $3;
-					processCASbits($4, @4, "ALTER CONSTRAINT statement",
+					if ($4 & (CAS_NOT_ENFORCED | CAS_ENFORCED))
+                        c->alterEnforceability = true;
+					if ($4 & (CAS_DEFERRABLE | CAS_NOT_DEFERRABLE |
+							  CAS_INITIALLY_DEFERRED | CAS_INITIALLY_IMMEDIATE))
+						c->alterDeferrability = true;
+					if ($4 & CAS_NO_INHERIT)
+						c->alterInheritability = true;
+		           /* handle unsupported case with specific error message */
+					if ($4 & CAS_NOT_VALID)
+							ereport(ERROR,
+											errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+											errmsg("constraints cannot be altered to be NOT VALID"),
+											parser_errposition(@4));
+
+					processCASbits($4, @4, "FOREIGN KEY",
 									&c->deferrable,
 									&c->initdeferred,
-									NULL, NULL, yyscanner);
+									&c->is_enforced,
+									NULL,
+									&c->noinherit,
+									yyscanner);
+					$$ = (Node *) n;
+				}
+			/* ALTER TABLE <name> ALTER CONSTRAINT INHERIT */
+			| ALTER CONSTRAINT name INHERIT
+				{
+					AlterTableCmd *n = makeNode(AlterTableCmd);
+					ATAlterConstraint *c = makeNode(ATAlterConstraint);
+
+					n->subtype = AT_AlterConstraint;
+					n->def = (Node *) c;
+					c->conname = $3;
+					c->alterInheritability = true;
+					c->noinherit = false;
+
 					$$ = (Node *) n;
 				}
 			/* ALTER TABLE <name> VALIDATE CONSTRAINT ... */
@@ -2844,6 +3074,20 @@ alter_table_cmd:
 
 					n->subtype = AT_DropOids;
 					$$ = (Node *) n;
+				}
+			/* ALTER TABLE <name> SET WITH ROWID */
+			| SET WITH ROWID
+				{
+					AlterTableCmd *n = makeNode(AlterTableCmd);
+					n->subtype = AT_AddRowids;
+					$$ = (Node *)n;
+				}
+			/* ALTER TABLE <name> SET WITHOUT ROWID */
+			| SET WITHOUT ROWID
+				{
+					AlterTableCmd *n = makeNode(AlterTableCmd);
+					n->subtype = AT_DropRowids;
+					$$ = (Node *)n;
 				}
 			/* ALTER TABLE <name> CLUSTER ON <indexname> */
 			| CLUSTER ON name
@@ -4118,6 +4362,7 @@ ColConstraintElem:
 					n->contype = CONSTR_NOTNULL;
 					n->location = @1;
 					n->is_no_inherit = $3;
+					n->is_enforced = true;
 					n->skip_validation = false;
 					n->initially_valid = true;
 					$$ = (Node *) n;
@@ -4164,9 +4409,21 @@ ColConstraintElem:
 					n->is_no_inherit = $5;
 					n->raw_expr = $3;
 					n->cooked_expr = NULL;
+					n->is_enforced = true;
 					n->skip_validation = false;
 					n->initially_valid = true;
 					$$ = (Node *) n;
+				}
+			/* added for synchdb */
+			| DEFAULT ON NULL_P b_expr
+				{
+					Constraint *n = makeNode(Constraint);
+
+                    n->contype = CONSTR_DEFAULT;
+                    n->location = @1;
+                    n->raw_expr = $4;
+                    n->cooked_expr = NULL;
+                    $$ = (Node *) n;
 				}
 			| DEFAULT b_expr
 				{
@@ -4191,7 +4448,7 @@ ColConstraintElem:
 					n->location = @1;
 					$$ = (Node *) n;
 				}
-			| GENERATED generated_when AS '(' a_expr ')' STORED
+			| GENERATED generated_when AS '(' a_expr ')' opt_virtual_or_stored
 				{
 					Constraint *n = makeNode(Constraint);
 
@@ -4199,6 +4456,7 @@ ColConstraintElem:
 					n->generated_when = $2;
 					n->raw_expr = $5;
 					n->cooked_expr = NULL;
+					n->generated_kind = $7;
 					n->location = @1;
 
 					/*
@@ -4228,6 +4486,7 @@ ColConstraintElem:
 					n->fk_upd_action = ($5)->updateAction->action;
 					n->fk_del_action = ($5)->deleteAction->action;
 					n->fk_del_set_cols = ($5)->deleteAction->cols;
+					n->is_enforced = true;
 					n->skip_validation = false;
 					n->initially_valid = true;
 					$$ = (Node *) n;
@@ -4246,6 +4505,12 @@ generated_when:
 			/* ... GENERATED ALWAYS BY DEFAULT [ON NULL] */
 			| BY DEFAULT ON NULL_P	{ $$ = ATTRIBUTE_IDENTITY_DEFAULT_ON_NULL; }
 			|				{ $$ = ATTRIBUTE_IDENTITY_ALWAYS; }
+		;
+
+opt_virtual_or_stored:
+			STORED			{ $$ = ATTRIBUTE_GENERATED_STORED; }
+			| VIRTUAL		{ $$ = ATTRIBUTE_GENERATED_VIRTUAL; }
+			| /*EMPTY*/		{ $$ = ATTRIBUTE_GENERATED_VIRTUAL; }
 		;
 
 /*
@@ -4293,6 +4558,22 @@ ConstraintAttr:
 					Constraint *n = makeNode(Constraint);
 
 					n->contype = CONSTR_ATTR_IMMEDIATE;
+					n->location = @1;
+					$$ = (Node *) n;
+				}
+			| ENFORCED
+				{
+					Constraint *n = makeNode(Constraint);
+
+					n->contype = CONSTR_ATTR_ENFORCED;
+					n->location = @1;
+					$$ = (Node *) n;
+				}
+			| NOT ENFORCED
+				{
+					Constraint *n = makeNode(Constraint);
+
+					n->contype = CONSTR_ATTR_NOT_ENFORCED;
 					n->location = @1;
 					$$ = (Node *) n;
 				}
@@ -4358,7 +4639,7 @@ ConstraintElem:
 					n->raw_expr = $3;
 					n->cooked_expr = NULL;
 					processCASbits($5, @5, "CHECK",
-								   NULL, NULL, &n->skip_validation,
+								   NULL, NULL, &n->is_enforced, &n->skip_validation,
 								   &n->is_no_inherit, yyscanner);
 					n->initially_valid = !n->skip_validation;
 					$$ = (Node *) n;
@@ -4370,11 +4651,10 @@ ConstraintElem:
 					n->contype = CONSTR_NOTNULL;
 					n->location = @1;
 					n->keys = list_make1(makeString($3));
-					/* no NOT VALID support yet */
 					processCASbits($4, @4, "NOT NULL",
-								   NULL, NULL, NULL,
+								   NULL, NULL, NULL, &n->skip_validation,
 								   &n->is_no_inherit, yyscanner);
-					n->initially_valid = true;
+					n->initially_valid = !n->skip_validation;
 					$$ = (Node *) n;
 				}
 			| UNIQUE opt_unique_null_treatment '(' columnList ')' opt_c_include opt_definition OptConsTableSpace
@@ -4392,7 +4672,7 @@ ConstraintElem:
 					n->indexspace = $8;
 					processCASbits($9, @9, "UNIQUE",
 								   &n->deferrable, &n->initdeferred, NULL,
-								   NULL, yyscanner);
+								   NULL, NULL, yyscanner);
 					$$ = (Node *) n;
 				}
 			| UNIQUE ExistingIndex ConstraintAttributeSpec
@@ -4408,7 +4688,7 @@ ConstraintElem:
 					n->indexspace = NULL;
 					processCASbits($3, @3, "UNIQUE",
 								   &n->deferrable, &n->initdeferred, NULL,
-								   NULL, yyscanner);
+								   NULL, NULL, yyscanner);
 					$$ = (Node *) n;
 				}
 			| PRIMARY KEY '(' columnList ')' opt_c_include opt_definition OptConsTableSpace
@@ -4425,7 +4705,7 @@ ConstraintElem:
 					n->indexspace = $8;
 					processCASbits($9, @9, "PRIMARY KEY",
 								   &n->deferrable, &n->initdeferred, NULL,
-								   NULL, yyscanner);
+								   NULL, NULL, yyscanner);
 					$$ = (Node *) n;
 				}
 			| PRIMARY KEY ExistingIndex ConstraintAttributeSpec
@@ -4441,7 +4721,7 @@ ConstraintElem:
 					n->indexspace = NULL;
 					processCASbits($4, @4, "PRIMARY KEY",
 								   &n->deferrable, &n->initdeferred, NULL,
-								   NULL, yyscanner);
+								   NULL, NULL, yyscanner);
 					$$ = (Node *) n;
 				}
 			| EXCLUDE access_method_clause '(' ExclusionConstraintList ')'
@@ -4461,7 +4741,7 @@ ConstraintElem:
 					n->where_clause = $9;
 					processCASbits($10, @10, "EXCLUDE",
 								   &n->deferrable, &n->initdeferred, NULL,
-								   NULL, yyscanner);
+								   NULL, NULL, yyscanner);
 					$$ = (Node *) n;
 				}
 			| FOREIGN KEY '(' columnList ')' REFERENCES qualified_name
@@ -4480,7 +4760,7 @@ ConstraintElem:
 					n->fk_del_set_cols = ($10)->deleteAction->cols;
 					processCASbits($11, @11, "FOREIGN KEY",
 								   &n->deferrable, &n->initdeferred,
-								   &n->skip_validation, NULL,
+								   &n->is_enforced, &n->skip_validation, NULL,
 								   yyscanner);
 					n->initially_valid = !n->skip_validation;
 					$$ = (Node *) n;
@@ -4520,8 +4800,9 @@ DomainConstraintElem:
                     n->raw_expr = $3;
                     n->cooked_expr = NULL;
                     processCASbits($5, @5, "CHECK",
-                                   NULL, NULL, &n->skip_validation,
+								   NULL, NULL, NULL, &n->skip_validation,
                                    &n->is_no_inherit, yyscanner);
+					n->is_enforced = true;
                     n->initially_valid = !n->skip_validation;
                     $$ = (Node *) n;
                 }
@@ -4535,7 +4816,7 @@ DomainConstraintElem:
                     /* no NOT VALID support yet */
                     processCASbits($3, @3, "NOT NULL",
                                    NULL, NULL, NULL,
-                                   &n->is_no_inherit, yyscanner);
+								   NULL, NULL, yyscanner);
                     n->initially_valid = true;
                     $$ = (Node *) n;
                 }
@@ -4790,6 +5071,8 @@ table_access_method_clause:
 OptWith:
 			WITH reloptions				{ $$ = $2; }
 			| WITHOUT OIDS				{ $$ = NIL; }
+			| WITH ROWID				{ $$ = list_make1(makeDefElem("rowid", (Node *) makeInteger(true), @1)); }
+			| WITHOUT ROWID 			{ $$ = list_make1(makeDefElem("rowid", (Node *) makeInteger(false), @1)); }
 			| /*EMPTY*/					{ $$ = NIL; }
 		;
 
@@ -5159,13 +5442,9 @@ SeqOptElem: AS SimpleTypename
 				}
 			| INCREMENT opt_by NumericOnly
 				{
-					if (!$2 && ORA_PARSER == ORA_PARSER)
+					if (!$2 && compatible_db == ORA_PARSER)
 						elog(ERROR, "missing BY keyword");
 					$$ = makeDefElem("increment", (Node *) $3, @1);
-				}
-			| LOGGED
-				{
-					$$ = makeDefElem("logged", NULL, @1);
 				}
 			| MAXVALUE NumericOnly
 				{
@@ -5189,11 +5468,12 @@ SeqOptElem: AS SimpleTypename
 				}
 			| SEQUENCE NAME_P any_name
 				{
+					/* not documented, only used by pg_dump */
 					$$ = makeDefElem("sequence_name", (Node *) $3, @1);
 				}
 			| START opt_with NumericOnly
 				{
-					if (!$2 && ORA_PARSER == ORA_PARSER)
+					if (!$2 && compatible_db == ORA_PARSER)
 						elog(ERROR, "missing WITH keyword");
 					$$ = makeDefElem("start", (Node *) $3, @1);
 				}
@@ -5204,10 +5484,6 @@ SeqOptElem: AS SimpleTypename
 			| RESTART opt_with NumericOnly
 				{
 					$$ = makeDefElem("restart", (Node *) $3, @1);
-				}
-			| UNLOGGED
-				{
-					$$ = makeDefElem("unlogged", NULL, @1);
 				}
 			| ORDER { $$ = makeDefElem("order", NULL, @1); }
 			| NOORDER { $$ = makeDefElem("noorder", NULL, @1); }
@@ -6227,7 +6503,7 @@ CreateTrigStmt:
 					n->transitionRels = NIL;
 					processCASbits($11, @11, "TRIGGER",
 								   &n->deferrable, &n->initdeferred, NULL,
-								   NULL, yyscanner);
+								   NULL, NULL, yyscanner);
 					n->constrrel = $10;
 					$$ = (Node *) n;
 				}
@@ -6396,12 +6672,29 @@ ConstraintAttributeSpec:
 								 parser_errposition(@2)));
 					/* generic message for other conflicts */
 					if ((newspec & (CAS_NOT_DEFERRABLE | CAS_DEFERRABLE)) == (CAS_NOT_DEFERRABLE | CAS_DEFERRABLE) ||
-						(newspec & (CAS_INITIALLY_IMMEDIATE | CAS_INITIALLY_DEFERRED)) == (CAS_INITIALLY_IMMEDIATE | CAS_INITIALLY_DEFERRED))
+						(newspec & (CAS_INITIALLY_IMMEDIATE | CAS_INITIALLY_DEFERRED)) == (CAS_INITIALLY_IMMEDIATE | CAS_INITIALLY_DEFERRED) ||
+						(newspec & (CAS_NOT_ENFORCED | CAS_ENFORCED)) == (CAS_NOT_ENFORCED | CAS_ENFORCED))
 						ereport(ERROR,
 								(errcode(ERRCODE_SYNTAX_ERROR),
 								 errmsg("conflicting constraint properties"),
 								 parser_errposition(@2)));
 					$$ = newspec;
+				}
+		;
+
+/* added for synchdb as workaround - whatever token comes after ENABLE or DISABLE,
+ * we do nothing
+ */
+EnableOpts:
+			/* empty */			{ $$ = 0; }
+			| VALIDATE			{ $$ = 0; }
+    		| IDENT
+				{
+					if (pg_strcasecmp($1, "novalidate") == 0)
+						$$ = 0;
+					else
+						$$ = 0;
+					pfree($1);
 				}
 		;
 
@@ -6412,6 +6705,11 @@ ConstraintAttributeElem:
 			| INITIALLY DEFERRED			{ $$ = CAS_INITIALLY_DEFERRED; }
 			| NOT VALID						{ $$ = CAS_NOT_VALID; }
 			| NO INHERIT					{ $$ = CAS_NO_INHERIT; }
+			| NOT ENFORCED					{ $$ = CAS_NOT_ENFORCED; }
+			| ENFORCED						{ $$ = CAS_ENFORCED; }
+			/* added for synchdb - just a workaround, it does not really supprot enabled or disabled constraint */
+			| DISABLE_P EnableOpts          { $$ = 0; }
+			| ENABLE_P EnableOpts           { $$ = 0; }
 		;
 
 
@@ -8405,6 +8703,7 @@ defacl_privilege_target:
 			| TYPES_P		{ $$ = OBJECT_TYPE; }
 			| SCHEMAS		{ $$ = OBJECT_SCHEMA; }
 			| PACKAGES		{ $$ = OBJECT_PACKAGE; }
+			| LARGE_P OBJECTS_P     { $$ = OBJECT_LARGEOBJECT; }
 		;
 
 
@@ -8933,7 +9232,7 @@ implementation_package:
 			{
 				$$ = NIL;
 			}
-		/* reuse implementation_type temporary */
+		/* reuse implementation_type temporarily */
 		| implementation_package_type POLYMORPHIC implementation_type
 			{
 				$$ = $3;
@@ -9031,7 +9330,7 @@ opt_ora_func_args_with_defaults:
 	 * In order to avoid reduce/reduce conflict, we are compatible with Oracle
 	 * based on the original CREATE PROCEUDRE grammar rules of PG. The purpose
 	 * of adding this nonterminal is to try not to destroy the syntax of PG.
-	 * Although we can switch to the gram.y of native PG, try our best to Stick
+	 * Although we can switch to the gram.y of native PG, try our best to stick
 	 * to this principle.
 	 */
 	opt_procedure_args_with_defaults:
@@ -9214,10 +9513,16 @@ func_type:	Typename								{ $$ = $1; }
 					$$->pct_type = true;
 					$$->location = @1;
 				}
+			| type_function_name attrs '%' ROWTYPE
+				{
+					$$ = makeTypeNameFromNameList(lcons(makeString($1), $2));
+					$$->row_type = true;
+					$$->location = @1;
+				}
 			| type_function_name '%' ROWTYPE
 				{
 					$$ = makeTypeNameFromNameList(list_make1(makeString($1)));
-					$$->pct_type = false;
+					$$->row_type = true;
 					$$->location = @1;
 				}
 			| SETOF type_function_name attrs '%' TYPE_P
@@ -10061,6 +10366,14 @@ DoStmt: DO dostmt_opt_list
 					determineLanguage(n->args);
 					$$ = (Node *)n;
 				}
+			| DO dostmt_opt_list USING param_mode_list
+				{
+					DoStmt *n = makeNode(DoStmt);
+					n->args = $2;
+					n->paramsmode = $4;
+					determineLanguage(n->args);
+					$$ = (Node *)n;
+				}
 		;
 
 ora_anonymous_begin: BEGIN_P
@@ -10101,6 +10414,30 @@ dostmt_opt_item:
 					$$ = makeDefElem("language", (Node *) makeString($2), @1);
 				}
 		;
+
+param_mode_list:
+			param_mode_item 					{ $$ = list_make1($1); }
+			| param_mode_list ',' param_mode_item	{ $$ = lappend($1, $3); }
+		;
+
+param_mode_item: opt_param_name param_mode
+				{
+					DefElem *def = makeDefElem($1, $2, @1);
+					$$ = (Node *) def;
+				}
+		;
+
+opt_param_name:	ORAPARAM		{ $$ = $1; }
+				|/* EMPTY */	{ $$ = NULL; }
+		;
+
+param_mode:
+				IN_P                    { $$ = (Node *) makeString((char *) $1); }
+				| OUT_P                 { $$ = (Node *) makeString((char *) $1); }
+				| INOUT                 { $$ = (Node *) makeString((char *) $1); }
+				| IN_P OUT_P    		{ $$ = (Node *) makeString("inout"); }
+		;
+
 
 /*****************************************************************************
  *
@@ -12244,32 +12581,52 @@ opt_transaction_chain:
  *
  *****************************************************************************/
 
-ViewStmt: CREATE OptTemp VIEW qualified_name opt_column_list opt_reloptions
+ViewStmt: CREATE OptTemp OptViewForce VIEW qualified_name opt_column_list opt_reloptions
 				AS SelectStmt opt_check_option
 				{
 					ViewStmt   *n = makeNode(ViewStmt);
 
-					n->view = $4;
+					char	*stmt_iteral = NULL; 
+					n->view = $5;
 					n->view->relpersistence = $2;
-					n->aliases = $5;
-					n->query = $8;
+					n->aliases = $6;
+					n->query = $9;
 					n->replace = false;
-					n->options = $6;
-					n->withCheckOption = $9;
+					n->force = $3;
+					n->options = $7;
+					n->withCheckOption = $10;
+					/*
+					 * Save the source text of the force view definition in ViewStmt to avoid
+					 * incorrectly obtaining the view definition when using a multi-statement
+					 * parser tree.
+					 */
+					stmt_iteral = pnstrdup(pg_yyget_extra(yyscanner)->core_yy_extra.scanbuf + @1, yylloc - @1);
+					n->stmt_literal = psprintf("%s;", stmt_iteral);
+					pfree(stmt_iteral);
 					$$ = (Node *) n;
 				}
-		| CREATE OR REPLACE OptTemp VIEW qualified_name opt_column_list opt_reloptions
+		| CREATE OR REPLACE OptTemp OptViewForce VIEW qualified_name opt_column_list opt_reloptions
 				AS SelectStmt opt_check_option
 				{
 					ViewStmt   *n = makeNode(ViewStmt);
 
-					n->view = $6;
+					char	*stmt_iteral = NULL;
+					n->view = $7;
 					n->view->relpersistence = $4;
-					n->aliases = $7;
-					n->query = $10;
+					n->aliases = $8;
+					n->query = $11;
 					n->replace = true;
-					n->options = $8;
-					n->withCheckOption = $11;
+					n->force = $5;
+					n->options = $9;
+					n->withCheckOption = $12;
+					/*
+					 * Save the source text of the force view definition in ViewStmt to avoid
+					 * incorrectly obtaining the view definition when using a multi-statement
+					 * parser tree.
+					 */
+					stmt_iteral = pnstrdup(pg_yyget_extra(yyscanner)->core_yy_extra.scanbuf + @1, yylloc - @1);
+					n->stmt_literal = psprintf("%s;", stmt_iteral);
+					pfree(stmt_iteral);
 					$$ = (Node *) n;
 				}
 		| CREATE OptTemp RECURSIVE VIEW qualified_name '(' columnList ')' opt_reloptions
@@ -12282,6 +12639,8 @@ ViewStmt: CREATE OptTemp VIEW qualified_name opt_column_list opt_reloptions
 					n->aliases = $7;
 					n->query = makeRecursiveViewSelect(n->view->relname, n->aliases, $11);
 					n->replace = false;
+					n->force = false;
+					n->stmt_literal = NULL;
 					n->options = $9;
 					n->withCheckOption = $12;
 					if (n->withCheckOption != NO_CHECK_OPTION)
@@ -12301,6 +12660,8 @@ ViewStmt: CREATE OptTemp VIEW qualified_name opt_column_list opt_reloptions
 					n->aliases = $9;
 					n->query = makeRecursiveViewSelect(n->view->relname, n->aliases, $13);
 					n->replace = true;
+					n->force = false;
+					n->stmt_literal= NULL;
 					n->options = $11;
 					n->withCheckOption = $14;
 					if (n->withCheckOption != NO_CHECK_OPTION)
@@ -12317,6 +12678,12 @@ opt_check_option:
 		| WITH CASCADED CHECK OPTION	{ $$ = CASCADED_CHECK_OPTION; }
 		| WITH LOCAL CHECK OPTION		{ $$ = LOCAL_CHECK_OPTION; }
 		| /* EMPTY */					{ $$ = NO_CHECK_OPTION; }
+		;
+
+OptViewForce:
+		NO FORCE				{ $$ = false; }
+		| FORCE					{ $$ = true; }
+		| /* EMPTY */			{ $$ = false; }
 		;
 
 /*****************************************************************************
@@ -12971,7 +13338,7 @@ opt_name_list:
 		;
 
 vacuum_relation:
-			qualified_name opt_name_list
+			relation_expr opt_name_list
 				{
 					$$ = (Node *) makeVacuumRelation($1, InvalidOid, $2);
 				}
@@ -13194,7 +13561,7 @@ InsertStmt:
 				{
 					$5->relation = $4;
 					$5->onConflictClause = $6;
-					$5->returningList = $7;
+					$5->returningClause = $7;
 					$5->withClause = $1;
 					$$ = (Node *) $5;
 				}
@@ -13327,8 +13694,45 @@ opt_conf_expr:
 		;
 
 returning_clause:
-			RETURNING target_list		{ $$ = $2; }
-			| /* EMPTY */				{ $$ = NIL; }
+			RETURNING returning_with_clause target_list
+				{
+					ReturningClause *n = makeNode(ReturningClause);
+
+					n->options = $2;
+					n->exprs = $3;
+					$$ = n;
+				}
+			| /* EMPTY */
+				{
+					$$ = NULL;
+				}
+		;
+
+returning_with_clause:
+			WITH '(' returning_options ')'		{ $$ = $3; }
+			| /* EMPTY */						{ $$ = NIL; }
+		;
+
+returning_options:
+			returning_option							{ $$ = list_make1($1); }
+			| returning_options ',' returning_option	{ $$ = lappend($1, $3); }
+		;
+
+returning_option:
+			returning_option_kind AS ColId
+				{
+					ReturningOption *n = makeNode(ReturningOption);
+
+					n->option = $1;
+					n->value = $3;
+					n->location = @1;
+					$$ = (Node *) n;
+				}
+		;
+
+returning_option_kind:
+			OLD			{ $$ = RETURNING_OPTION_OLD; }
+			| NEW		{ $$ = RETURNING_OPTION_NEW; }
 		;
 
 
@@ -13347,7 +13751,7 @@ DeleteStmt: opt_with_clause DELETE_P FROM relation_expr_opt_alias
 					n->relation = $4;
 					n->usingClause = $5;
 					n->whereClause = $6;
-					n->returningList = $7;
+					n->returningClause = $7;
 					n->withClause = $1;
 					$$ = (Node *) n;
 				}
@@ -13421,7 +13825,7 @@ UpdateStmt: opt_with_clause UPDATE relation_expr_opt_alias
 					n->targetList = $5;
 					n->fromClause = $6;
 					n->whereClause = $7;
-					n->returningList = $8;
+					n->returningClause = $8;
 					n->withClause = $1;
 					$$ = (Node *) n;
 				}
@@ -13499,7 +13903,7 @@ MergeStmt:
 					m->sourceRelation = $6;
 					m->joinCondition = $8;
 					m->mergeWhenClauses = $9;
-					m->returningList = $11;
+					m->returningClause = $11;
 
 					$$ = (Node *)m;
 				}
@@ -13699,7 +14103,7 @@ SelectStmt: select_no_parens			%prec UMINUS
 		;
 
 select_with_parens:
-			'(' select_no_parens ')'				{ $$ = $2; }
+			'(' select_no_parens ')'                { $$ = $2; }
 			| '(' select_with_parens ')'			{ $$ = $2; }
 		;
 
@@ -13841,6 +14245,7 @@ simple_select:
 					$$ = (Node *) n;
 				}
 			| values_clause							{ $$ = $1; }
+			| values_clause_no_parens				{ $$ = $1; }
 			| TABLE relation_expr
 				{
 					/* same as SELECT * FROM relation_expr */
@@ -14429,6 +14834,7 @@ values_clause:
 					SelectStmt *n = makeNode(SelectStmt);
 
 					n->valuesLists = list_make1($3);
+					n->valuesIsrow = false;
 					$$ = (Node *) n;
 				}
 			| values_clause ',' '(' expr_list ')'
@@ -14436,6 +14842,17 @@ values_clause:
 					SelectStmt *n = (SelectStmt *) $1;
 
 					n->valuesLists = lappend(n->valuesLists, $4);
+					n->valuesIsrow = false;
+					$$ = (Node *) n;
+				}
+		;
+
+values_clause_no_parens:
+			VALUES columnref
+				{
+					SelectStmt *n = makeNode(SelectStmt);
+					n->valuesLists = list_make1(list_make1($2));
+					n->valuesIsrow = true;
 					$$ = (Node *) n;
 				}
 		;
@@ -15067,7 +15484,7 @@ xmltable_column_el:
 										 parser_errposition(defel->location)));
 							fc->colexpr = defel->arg;
 						}
-						else if (strcmp(defel->defname, "is_not_null") == 0)
+						else if (strcmp(defel->defname, "__pg__is_not_null") == 0)
 						{
 							if (nullability_seen)
 								ereport(ERROR,
@@ -15110,13 +15527,20 @@ xmltable_column_option_list:
 
 xmltable_column_option_el:
 			IDENT b_expr
-				{ $$ = makeDefElem($1, $2, @1); }
+				{
+					if (strcmp($1, "__pg__is_not_null") == 0)
+						ereport(ERROR,
+								(errcode(ERRCODE_SYNTAX_ERROR),
+								 errmsg("option name \"%s\" cannot be used in XMLTABLE", $1),
+								 parser_errposition(@1)));
+					$$ = makeDefElem($1, $2, @1);
+				}
 			| DEFAULT b_expr
 				{ $$ = makeDefElem("default", $2, @1); }
 			| NOT NULL_P
-				{ $$ = makeDefElem("is_not_null", (Node *) makeBoolean(true), @1); }
+				{ $$ = makeDefElem("__pg__is_not_null", (Node *) makeBoolean(true), @1); }
 			| NULL_P
-				{ $$ = makeDefElem("is_not_null", (Node *) makeBoolean(false), @1); }
+				{ $$ = makeDefElem("__pg__is_not_null", (Node *) makeBoolean(false), @1); }
 			| PATH b_expr
 				{ $$ = makeDefElem("path", $2, @1); }
 		;
@@ -15359,7 +15783,7 @@ SimpleTypename:
 //			| ConstDatetime							{ $$ = $1; }
 			| ConstInterval opt_interval_type
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 					{
 						List *typmods = $2;
 						A_Const *n;
@@ -15380,7 +15804,10 @@ SimpleTypename:
 						 */
 						if (n->val.ival.ival == (INTERVAL_MASK(YEAR) | INTERVAL_MASK(MONTH)))
 						{
-							$$ = OracleSystemTypeName("yminterval");
+							if (enable_canonical_mode)
+								$$ = OracleSystemTypeName("interval year to month");
+							else
+								$$ = OracleSystemTypeName("yminterval");
 							$$->typmods = $2;
 							$$->location = @1;
 						}
@@ -15389,7 +15816,10 @@ SimpleTypename:
 													 INTERVAL_MASK(MINUTE) |
 													 INTERVAL_MASK(SECOND)))
 						{
-							$$ = OracleSystemTypeName("dsinterval");
+							if (enable_canonical_mode)
+								$$ = OracleSystemTypeName("interval day to second");
+							else
+								$$ = OracleSystemTypeName("dsinterval");
 							$$->typmods = $2;
 							$$->location = @1;
 						}
@@ -15452,7 +15882,7 @@ ConstTypename:
 GenericType:
 			type_function_name opt_type_modifiers
 				{
-					if (ORA_PARSER == ORA_PARSER &&
+					if (ORA_PARSER == compatible_db &&
 						strcmp($1, "timestamptz") == 0)
 						$$ = makeTypeName("oratimestamptz");
 					else
@@ -15694,32 +16124,41 @@ ConstCharacter:  CharacterWithLength
 
 CharacterWithLength:  character '(' Iconst ')'
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 					{
-						if (strcmp($1, "bpchar"))
+						if (enable_canonical_mode)
 						{
-							if (NLS_LENGTH_BYTE == NLS_LENGTH_CHAR)
-								$1 = "oravarcharchar";
-							else
-								$1 = "oravarcharbyte";
+							$$ = OracleSystemTypeName($1);
+							$$->typmods = list_make1(makeIntConst($3, @3));
+							$$->location = @1;
 						}
 						else
 						{
-							if ($3 > CHAR_TYPE_LENGTH_MAX)
-								ereport(ERROR,
-									(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-									errmsg("specified length too long for its datatype"),
-									parser_errposition(@3)));
-
-							if (NLS_LENGTH_BYTE == NLS_LENGTH_CHAR)
-								$1 = "oracharchar";
+							if (strcmp($1, "bpchar"))
+							{
+								if (nls_length_semantics == NLS_LENGTH_CHAR)
+									$1 = "oravarcharchar";
+								else
+									$1 = "oravarcharbyte";
+							}
 							else
-								$1 = "oracharbyte";
-						}
+							{
+								if ($3 > CHAR_TYPE_LENGTH_MAX)
+									ereport(ERROR,
+										(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+										errmsg("specified length too long for its datatype"),
+										parser_errposition(@3)));
 
-						$$ = OracleSystemTypeName($1);
-						$$->typmods = list_make1(makeIntConst($3, @3));
-						$$->location = @1;
+								if (nls_length_semantics == NLS_LENGTH_CHAR)
+									$1 = "oracharchar";
+								else
+									$1 = "oracharbyte";
+							}
+
+							$$ = OracleSystemTypeName($1);
+							$$->typmods = list_make1(makeIntConst($3, @3));
+							$$->location = @1;
+						}
 					}
 					else
 					{
@@ -15732,31 +16171,41 @@ CharacterWithLength:  character '(' Iconst ')'
 
 CharacterWithoutLength:	 character
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 					{
-						if (!strcmp($1, "bpchar"))
+						/* changed for synchdb */
+						if (enable_canonical_mode)
 						{
-							if (NLS_LENGTH_BYTE == NLS_LENGTH_CHAR)
-								$1 = "oracharchar";
-							else
-								$1 = "oracharbyte";
-						}
-						else
-						{
-							if (NLS_LENGTH_BYTE == NLS_LENGTH_CHAR)
-								$1 = "oravarcharchar";
-							else
-								$1 = "oravarcharbyte";
-						}
-
-						$$ = OracleSystemTypeName($1);
-
-						if ((strcmp($1, "oracharchar") == 0) || (strcmp($1, "oracharbyte") == 0))
+							$$ = OracleSystemTypeName($1);
 							$$->typmods = list_make1(makeIntConst(1, -1));
+							$$->location = @1;
+						}
 						else
-							$$->typmods = list_make1(makeIntConst(4000, -1));
+						{
+							if (!strcmp($1, "bpchar"))
+							{
+								if (nls_length_semantics == NLS_LENGTH_CHAR)
+									$1 = "oracharchar";
+								else
+									$1 = "oracharbyte";
+							}
+							else
+							{
+								if (nls_length_semantics == NLS_LENGTH_CHAR)
+									$1 = "oravarcharchar";
+								else
+									$1 = "oravarcharbyte";
+							}	
+	
+							$$ = OracleSystemTypeName($1);
+	
+							if ((strcmp($1, "oracharchar") == 0) || (strcmp($1, "oracharbyte") == 0))
+								$$->typmods = list_make1(makeIntConst(1, -1));
+							else
+								$$->typmods = list_make1(makeIntConst(4000, -1));
 
-						$$->location = @1;
+							$$->location = @1;
+						}
 					}
 					else
 					{
@@ -15769,21 +16218,22 @@ CharacterWithoutLength:	 character
 				}
 		;
 
-character:	CHARACTER opt_varying
-										{ $$ = $2 ? "varchar": "bpchar"; }
-			| CHAR_P opt_varying
-										{ $$ = $2 ? "varchar": "bpchar"; }
-			| VARCHAR
-										{ $$ = "varchar"; }
-			| VARCHAR2
-										{ $$ = "varchar"; }
-			| NATIONAL CHARACTER opt_varying
-										{ $$ = $3 ? "varchar": "bpchar"; }
-			| NATIONAL CHAR_P opt_varying
-										{ $$ = $3 ? "varchar": "bpchar"; }
-			| NCHAR opt_varying
-										{ $$ = $2 ? "varchar": "bpchar"; }
-		;
+
+character:  CHARACTER opt_varying
+                                        { if (enable_canonical_mode){$$ = $2 ? "character varying": "character";} else {$$ = $2 ? "varchar": "bpchar";} }
+            | CHAR_P opt_varying
+                                        { if (enable_canonical_mode){$$ = $2 ? "char varying": "char";} else {$$ = $2 ? "varchar": "bpchar";} }
+            | VARCHAR
+                                        { $$ = "varchar"; }
+            | VARCHAR2
+                                        { if (enable_canonical_mode){$$ = "varchar2";} else {$$ = "varchar";} }
+            | NATIONAL CHARACTER opt_varying
+                                        { if (enable_canonical_mode){$$ = $3 ? "national character varying": "national character";} else {$$ = $3 ? "varchar": "bpchar";} }
+            | NATIONAL CHAR_P opt_varying
+                                        { if (enable_canonical_mode){$$ = $3 ? "national char varying": "national char";} else {$$ = $3 ? "varchar": "bpchar";} }
+            | NCHAR opt_varying
+                                        { if (enable_canonical_mode){$$ = $2 ? "nchar varying": "nchar";} else {$$ = $2 ? "varchar": "bpchar";} }
+        ;
 
 opt_varying:
 			VARYING									{ $$ = true; }
@@ -15792,22 +16242,26 @@ opt_varying:
 
 OracleCharacter: character '(' Iconst CHAR_P ')'
 					{
-						if (strcmp($1, "bpchar"))
-							$1 = "oravarcharchar";
-						else
-							$1 = "oracharchar";
-
+						if (!enable_canonical_mode)
+						{
+							if (strcmp($1, "bpchar"))
+								$1 = "oravarcharchar";
+							else
+								$1 = "oracharchar";
+						}
 						$$ = OracleSystemTypeName($1);
 						$$->typmods = list_make1(makeIntConst($3, @3));
 						$$->location = @1;
 					}
 				| character '(' Iconst BYTE_P ')'
 					{
-						if (strcmp($1, "bpchar"))
-							$1 = "oravarcharbyte";
-						else
-							$1 = "oracharbyte";
-
+						if (!enable_canonical_mode)
+						{
+							if (strcmp($1, "bpchar"))
+								$1 = "oravarcharbyte";
+							else
+								$1 = "oracharbyte";
+						}
 						$$ = OracleSystemTypeName($1);
 						$$->typmods = list_make1(makeIntConst($3, @3));
 						$$->location = @1;
@@ -15821,12 +16275,22 @@ OracleCharacter: character '(' Iconst CHAR_P ')'
 Datetime:
 			TIMESTAMP '(' Iconst ')' opt_timezone
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 					{
-						if ($5)
-							$$ = OracleSystemTypeName("oratimestamptz");
+						if (enable_canonical_mode)
+						{
+							if ($5)
+                                $$ = OracleSystemTypeName("timestamp with time zone");
+                            else
+                                $$ = OracleSystemTypeName("timestamp");
+						}
 						else
-							$$ = OracleSystemTypeName("oratimestamp");
+						{
+							if ($5)
+								$$ = OracleSystemTypeName("oratimestamptz");
+							else
+								$$ = OracleSystemTypeName("oratimestamp");
+						}
 						$$->typmods = list_make1(makeIntConst($3, @3));
 						$$->location = @1;
 					}
@@ -15842,12 +16306,22 @@ Datetime:
 				}
 			| TIMESTAMP opt_timezone
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 					{
-						if ($2)
-							$$ = OracleSystemTypeName("oratimestamptz");
+						if (enable_canonical_mode)
+						{
+							if ($2)
+                                $$ = OracleSystemTypeName("timestamp with time zone");
+                            else
+                                $$ = OracleSystemTypeName("timestamp");
+						}
 						else
-							$$ = OracleSystemTypeName("oratimestamp");
+						{
+							if ($2)
+								$$ = OracleSystemTypeName("oratimestamptz");
+							else
+								$$ = OracleSystemTypeName("oratimestamp");
+						}
 						$$->typmods = list_make1(makeIntConst(6, -1));
 						$$->location = @1;
 					}
@@ -15862,21 +16336,30 @@ Datetime:
 				}
 			| TIMESTAMP WITH_LA LOCAL TIME ZONE
 				{
-					$$ = OracleSystemTypeName("oratimestampltz");
+					if (enable_canonical_mode)
+						$$ = OracleSystemTypeName("timestamp with local time zone");
+					else
+						$$ = OracleSystemTypeName("oratimestampltz");
 					$$->typmods = list_make1(makeIntConst(6, -1));
 					$$->location = @1;
 				}
 			| TIMESTAMP '(' Iconst ')' WITH_LA LOCAL TIME ZONE
 				{
-					$$ = OracleSystemTypeName("oratimestampltz");
+					if (enable_canonical_mode)
+						$$ = OracleSystemTypeName("timestamp with local time zone");
+					else
+						$$ = OracleSystemTypeName("oratimestampltz");
 					$$->typmods = list_make1(makeIntConst($3, @3));
 					$$->location = @1;
 				}
 			| DATE_P
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 					{
-						$$ = OracleSystemTypeName("oradate");
+						if (enable_canonical_mode)
+							$$ = OracleSystemTypeName("date");
+						else
+							$$ = OracleSystemTypeName("oradate");
 						$$->location = @1;
 					}
 					else
@@ -15907,18 +16390,24 @@ Datetime:
 ConstDatetime:
 	TIMESTAMP
 		{
-			if (ORA_PARSER == ORA_PARSER)
+			if (ORA_PARSER == compatible_db)
 			{
-				$$ = OracleSystemTypeName("oratimestamp");
+				if (enable_canonical_mode)
+					$$ = OracleSystemTypeName("timestamp");
+				else
+					$$ = OracleSystemTypeName("oratimestamp");
 				$$->typmods = list_make1(makeIntConst(6, -1));
 				$$->location = @1;
 			}
 		}
 	| DATE_P
 		{
-			if (ORA_PARSER == ORA_PARSER)
+			if (ORA_PARSER == compatible_db)
 			{
-				$$ = OracleSystemTypeName("oradate");
+				if (enable_canonical_mode)
+					$$ = OracleSystemTypeName("date");
+				else
+					$$ = OracleSystemTypeName("oradate");
 				$$->location = @1;
 			}
 		}
@@ -15946,7 +16435,7 @@ opt_timezone:
 opt_interval:
 			YEAR_P
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 					{
 						$$ = list_make2(makeIntConst(INTERVAL_MASK(YEAR), @1),
 										makeIntConst(2, -1));
@@ -15958,7 +16447,7 @@ opt_interval:
 				}
 			| YEAR_P '(' Iconst ')'
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 					{
 						$$ = list_make2(makeIntConst(INTERVAL_MASK(YEAR), @1),
 										makeIntConst($3, @3));
@@ -15972,7 +16461,7 @@ opt_interval:
 				}
 			| MONTH_P
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 					{
 						$$ = list_make2(makeIntConst(INTERVAL_MASK(MONTH), @1),
 										makeIntConst(2, -1));
@@ -15984,7 +16473,7 @@ opt_interval:
 				}
 			| MONTH_P '(' Iconst ')'
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 					{
 						$$ = list_make2(makeIntConst(INTERVAL_MASK(MONTH), @1),
 										makeIntConst($3, @3));
@@ -15998,7 +16487,7 @@ opt_interval:
 				}
 			| DAY_P
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 					{
 						$$ = list_make2(makeIntConst(INTERVAL_MASK(DAY), @1),
 										makeIntConst(2, -1));
@@ -16010,7 +16499,7 @@ opt_interval:
 				}
 			| DAY_P '(' Iconst ')'
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 					{
 						$$ = list_make2(makeIntConst(INTERVAL_MASK(DAY), @1),
 										makeIntConst($3, @3));
@@ -16024,7 +16513,7 @@ opt_interval:
 				}
 			| HOUR_P
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 					{
 						$$ = list_make2(makeIntConst(INTERVAL_MASK(HOUR), @1),
 										makeIntConst(2, -1));
@@ -16036,7 +16525,7 @@ opt_interval:
 				}
 			| HOUR_P '(' Iconst ')'
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 					{
 						$$ = list_make2(makeIntConst(INTERVAL_MASK(HOUR), @1),
 										makeIntConst($3, @3));
@@ -16050,7 +16539,7 @@ opt_interval:
 				}
 			| MINUTE_P
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 					{
 						$$ = list_make2(makeIntConst(INTERVAL_MASK(MINUTE), @1),
 										makeIntConst(2, -1));
@@ -16062,7 +16551,7 @@ opt_interval:
 				}
 			| MINUTE_P '(' Iconst ')'
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 					{
 						$$ = list_make2(makeIntConst(INTERVAL_MASK(MINUTE), @1),
 										makeIntConst($3, @3));
@@ -16076,7 +16565,7 @@ opt_interval:
 				}
 			| SECOND_P
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 					{
 						$$ = list_make2(makeIntConst(INTERVAL_MASK(SECOND), @1),
 										makeIntConst(6, -1));
@@ -16093,7 +16582,7 @@ opt_interval:
 				}
 			| SECOND_P '(' Iconst ',' Iconst ')'
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 					{
 						$$ = list_make3(makeIntConst(INTERVAL_MASK(SECOND), @1),
 										makeIntConst($3, @3),
@@ -16108,7 +16597,7 @@ opt_interval:
 				}
 			| YEAR_P TO MONTH_P
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 					{
 						$$ = list_make2(makeIntConst(INTERVAL_MASK(YEAR) |
 													 INTERVAL_MASK(MONTH), @1),
@@ -16122,7 +16611,7 @@ opt_interval:
 				}
 			| YEAR_P '(' Iconst ')' TO MONTH_P
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 					{
 						$$ = list_make2(makeIntConst(INTERVAL_MASK(YEAR) | INTERVAL_MASK(MONTH), @1),
 										makeIntConst($3, @3));
@@ -16136,7 +16625,7 @@ opt_interval:
 				}
 			| DAY_P TO HOUR_P
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 					{
 						$$ = list_make2(makeIntConst(INTERVAL_MASK(DAY) |
 													 INTERVAL_MASK(HOUR), @1),
@@ -16150,7 +16639,7 @@ opt_interval:
 				}
 			| DAY_P '(' Iconst ')' TO HOUR_P
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 					{
 						$$ = list_make2(makeIntConst(INTERVAL_MASK(DAY) |
 													 INTERVAL_MASK(HOUR), @1),
@@ -16165,7 +16654,7 @@ opt_interval:
 				}
 			| DAY_P TO MINUTE_P
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 					{
 						$$ = list_make2(makeIntConst(INTERVAL_MASK(DAY) |
 													 INTERVAL_MASK(HOUR) |
@@ -16181,7 +16670,7 @@ opt_interval:
 				}
 			| DAY_P '(' Iconst ')' TO MINUTE_P
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 					{
 						$$ = list_make2(makeIntConst(INTERVAL_MASK(DAY) |
 													 INTERVAL_MASK(HOUR) |
@@ -16197,7 +16686,7 @@ opt_interval:
 				}
 			| DAY_P TO SECOND_P
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 					{
 						$$ = list_make3(makeIntConst(INTERVAL_MASK(DAY) |
 													INTERVAL_MASK(HOUR) |
@@ -16216,7 +16705,7 @@ opt_interval:
 				}
 			| DAY_P '(' Iconst ')' TO SECOND_P
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 					{
 						$$ = list_make3(makeIntConst(INTERVAL_MASK(DAY) |
 													INTERVAL_MASK(HOUR) |
@@ -16234,7 +16723,7 @@ opt_interval:
 				}
 			| DAY_P TO SECOND_P '(' Iconst ')'
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 					{
 						$$ = list_make3(makeIntConst(INTERVAL_MASK(DAY) |
 													INTERVAL_MASK(HOUR) |
@@ -16254,7 +16743,7 @@ opt_interval:
 				}
 			| DAY_P '(' Iconst ')' TO SECOND_P '(' Iconst ')'
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 					{
 						$$ = list_make3(makeIntConst(INTERVAL_MASK(DAY) |
 													INTERVAL_MASK(HOUR) |
@@ -16272,7 +16761,7 @@ opt_interval:
 				}
 			| HOUR_P TO MINUTE_P
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 					{
 						$$ = list_make2(makeIntConst(INTERVAL_MASK(HOUR) |
 													 INTERVAL_MASK(MINUTE), @1),
@@ -16286,7 +16775,7 @@ opt_interval:
 				}
 			| HOUR_P '(' Iconst ')' TO MINUTE_P
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 					{
 						$$ = list_make2(makeIntConst(INTERVAL_MASK(HOUR) |
 													 INTERVAL_MASK(MINUTE), @1),
@@ -16301,7 +16790,7 @@ opt_interval:
 				}
 			| HOUR_P TO SECOND_P
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 					{
 						$$ = list_make3(makeIntConst(INTERVAL_MASK(HOUR) |
 													INTERVAL_MASK(MINUTE) |
@@ -16318,7 +16807,7 @@ opt_interval:
 				}
 			| HOUR_P '(' Iconst ')' TO SECOND_P
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 				{
 						$$ = list_make3(makeIntConst(INTERVAL_MASK(HOUR) |
 													INTERVAL_MASK(MINUTE) |
@@ -16335,7 +16824,7 @@ opt_interval:
 				}
 			| HOUR_P TO SECOND_P '(' Iconst ')'
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 					{
 						$$ = list_make3(makeIntConst(INTERVAL_MASK(HOUR) |
 													INTERVAL_MASK(MINUTE) |
@@ -16353,7 +16842,7 @@ opt_interval:
 				}
 			| HOUR_P '(' Iconst ')' TO SECOND_P '(' Iconst ')'
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 					{
 						$$ = list_make3(makeIntConst(INTERVAL_MASK(HOUR) |
 													INTERVAL_MASK(MINUTE) |
@@ -16370,7 +16859,7 @@ opt_interval:
 				}
 			| MINUTE_P TO SECOND_P
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 					{
 						$$ = list_make3(makeIntConst(INTERVAL_MASK(MINUTE) |
 													INTERVAL_MASK(SECOND), @1),
@@ -16385,7 +16874,7 @@ opt_interval:
 				}
 			| MINUTE_P '(' Iconst ')' TO SECOND_P
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 					{
 						$$ = list_make3(makeIntConst(INTERVAL_MASK(MINUTE) |
 													INTERVAL_MASK(SECOND), @1),
@@ -16401,7 +16890,7 @@ opt_interval:
 				}
 			| MINUTE_P TO SECOND_P '(' Iconst ')'
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 					{
 						$$ = list_make3(makeIntConst(INTERVAL_MASK(MINUTE) |
 													INTERVAL_MASK(SECOND), @1),
@@ -16417,7 +16906,7 @@ opt_interval:
 				}
 			| MINUTE_P '(' Iconst ')' TO SECOND_P '(' Iconst ')'
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 					{
 						$$ = list_make3(makeIntConst(INTERVAL_MASK(MINUTE) |
 													INTERVAL_MASK(SECOND), @1),
@@ -16436,7 +16925,7 @@ opt_interval:
 opt_interval_type:
 			YEAR_P TO MONTH_P
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 					{
 						$$ = list_make2(makeIntConst(INTERVAL_MASK(YEAR) |
 													 INTERVAL_MASK(MONTH), @1),
@@ -16450,7 +16939,7 @@ opt_interval_type:
 				}
 			| YEAR_P '(' Iconst ')' TO MONTH_P
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 					{
 						$$ = list_make2(makeIntConst(INTERVAL_MASK(YEAR) | INTERVAL_MASK(MONTH), @1),
 										makeIntConst($3, @3));
@@ -16464,7 +16953,7 @@ opt_interval_type:
 				}
 			| DAY_P TO HOUR_P
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 					{
 						$$ = list_make2(makeIntConst(INTERVAL_MASK(DAY) |
 													 INTERVAL_MASK(HOUR), @1),
@@ -16478,7 +16967,7 @@ opt_interval_type:
 				}
 			| DAY_P '(' Iconst ')' TO HOUR_P
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 					{
 						$$ = list_make2(makeIntConst(INTERVAL_MASK(DAY) |
 													 INTERVAL_MASK(HOUR), @1),
@@ -16493,7 +16982,7 @@ opt_interval_type:
 				}
 			| DAY_P TO MINUTE_P
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 					{
 						$$ = list_make2(makeIntConst(INTERVAL_MASK(DAY) |
 													 INTERVAL_MASK(HOUR) |
@@ -16509,7 +16998,7 @@ opt_interval_type:
 				}
 			| DAY_P '(' Iconst ')' TO MINUTE_P
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 					{
 						$$ = list_make2(makeIntConst(INTERVAL_MASK(DAY) |
 													 INTERVAL_MASK(HOUR) |
@@ -16525,7 +17014,7 @@ opt_interval_type:
 				}
 			| DAY_P TO SECOND_P
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 					{
 						$$ = list_make3(makeIntConst(INTERVAL_MASK(DAY) |
 													INTERVAL_MASK(HOUR) |
@@ -16544,7 +17033,7 @@ opt_interval_type:
 				}
 			| DAY_P '(' Iconst ')' TO SECOND_P
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 					{
 						$$ = list_make3(makeIntConst(INTERVAL_MASK(DAY) |
 													INTERVAL_MASK(HOUR) |
@@ -16562,7 +17051,7 @@ opt_interval_type:
 				}
 			| DAY_P TO SECOND_P '(' Iconst ')'
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 					{
 						$$ = list_make3(makeIntConst(INTERVAL_MASK(DAY) |
 													INTERVAL_MASK(HOUR) |
@@ -16582,7 +17071,7 @@ opt_interval_type:
 				}
 			| DAY_P '(' Iconst ')' TO SECOND_P '(' Iconst ')'
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 					{
 						$$ = list_make3(makeIntConst(INTERVAL_MASK(DAY) |
 													INTERVAL_MASK(HOUR) |
@@ -16652,7 +17141,7 @@ a_expr:		c_expr									{ $$ = $1; }
 				}
 			| a_expr AT TIME ZONE a_expr			%prec AT
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (compatible_db == ORA_PARSER)
 						$$ = (Node *) makeFuncCall(OracleSystemFuncName("timezone"),
 												   list_make2($5, $1),
 												   COERCE_SQL_SYNTAX,
@@ -16970,49 +17459,50 @@ a_expr:		c_expr									{ $$ = $1; }
 												   (Node *) list_make2($5, $7),
 												   @2);
 				}
-			| a_expr IN_P in_expr
+			| a_expr IN_P select_with_parens
 				{
-					/* in_expr returns a SubLink or a list of a_exprs */
-					if (IsA($3, SubLink))
-					{
-						/* generate foo = ANY (subquery) */
-						SubLink	   *n = (SubLink *) $3;
+					/* generate foo = ANY (subquery) */
+					SubLink	   *n = makeNode(SubLink);
 
-						n->subLinkType = ANY_SUBLINK;
-						n->subLinkId = 0;
-						n->testexpr = $1;
-						n->operName = NIL;		/* show it's IN not = ANY */
-						n->location = @2;
-						$$ = (Node *) n;
-					}
-					else
-					{
-						/* generate scalar IN expression */
-						$$ = (Node *) makeSimpleA_Expr(AEXPR_IN, "=", $1, $3, @2);
-					}
+					n->subselect = $3;
+					n->subLinkType = ANY_SUBLINK;
+					n->subLinkId = 0;
+					n->testexpr = $1;
+					n->operName = NIL;		/* show it's IN not = ANY */
+					n->location = @2;
+					$$ = (Node *) n;
 				}
-			| a_expr NOT_LA IN_P in_expr						%prec NOT_LA
+			| a_expr IN_P '(' expr_list ')'
 				{
-					/* in_expr returns a SubLink or a list of a_exprs */
-					if (IsA($4, SubLink))
-					{
-						/* generate NOT (foo = ANY (subquery)) */
-						/* Make an = ANY node */
-						SubLink	   *n = (SubLink *) $4;
+					/* generate scalar IN expression */
+					A_Expr *n = makeSimpleA_Expr(AEXPR_IN, "=", $1, (Node *) $4, @2);
 
-						n->subLinkType = ANY_SUBLINK;
-						n->subLinkId = 0;
-						n->testexpr = $1;
-						n->operName = NIL;		/* show it's IN not = ANY */
-						n->location = @2;
-						/* Stick a NOT on top; must have same parse location */
-						$$ = makeNotExpr((Node *) n, @2);
-					}
-					else
-					{
-						/* generate scalar NOT IN expression */
-						$$ = (Node *) makeSimpleA_Expr(AEXPR_IN, "<>", $1, $4, @2);
-					}
+					n->rexpr_list_start = @3;
+					n->rexpr_list_end = @5;
+					$$ = (Node *) n;
+				}
+			| a_expr NOT_LA IN_P select_with_parens			%prec NOT_LA
+				{
+					/* generate NOT (foo = ANY (subquery)) */
+					SubLink	   *n = makeNode(SubLink);
+
+					n->subselect = $4;
+					n->subLinkType = ANY_SUBLINK;
+					n->subLinkId = 0;
+					n->testexpr = $1;
+					n->operName = NIL;		/* show it's IN not = ANY */
+					n->location = @2;
+					/* Stick a NOT on top; must have same parse location */
+					$$ = makeNotExpr((Node *) n, @2);
+				}
+			| a_expr NOT_LA IN_P '(' expr_list ')'
+				{
+					/* generate scalar NOT IN expression */
+					A_Expr *n = makeSimpleA_Expr(AEXPR_IN, "<>", $1, (Node *) $5, @2);
+
+					n->rexpr_list_start = @4;
+					n->rexpr_list_end = @6;
+					$$ = (Node *) n;
 				}
 			| a_expr subquery_Op sub_type select_with_parens	%prec Op
 				{
@@ -17249,6 +17739,22 @@ c_expr:		columnref								{ $$ = $1; }
 					{
 						A_Indirection *n = makeNode(A_Indirection);
 
+						n->arg = (Node *) p;
+						n->indirection = check_indirection($2, yyscanner);
+						$$ = (Node *) n;
+					}
+					else
+						$$ = (Node *) p;
+				}
+			| ORAPARAM opt_indirection
+				{
+					OraParamRef *p = makeNode(OraParamRef);
+					p->number = 0;
+					p->location = @1;					
+					p->name = $1;
+					if ($2)
+					{
+						A_Indirection *n = makeNode(A_Indirection);
 						n->arg = (Node *) p;
 						n->indirection = check_indirection($2, yyscanner);
 						$$ = (Node *) n;
@@ -17538,7 +18044,7 @@ func_expr_common_subexpr:
 				}
 			| SYSDATE
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 						$$ = (Node *) makeFuncCall(OracleSystemFuncName("sysdate"),
 												   NIL,
 												   COERCE_EXPLICIT_CALL,
@@ -17546,7 +18052,7 @@ func_expr_common_subexpr:
 				}
 			| SYSTIMESTAMP
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 						$$ = (Node *) makeFuncCall(OracleSystemFuncName("systimestamp"),
 												   NIL,
 												   COERCE_EXPLICIT_CALL,
@@ -17554,7 +18060,7 @@ func_expr_common_subexpr:
 				}
 			| CURRENT_DATE
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 						$$ = (Node *) makeFuncCall(OracleSystemFuncName("current_date"),
 												   NIL,
 												   COERCE_EXPLICIT_CALL,
@@ -17572,7 +18078,7 @@ func_expr_common_subexpr:
 				}
 			| CURRENT_TIMESTAMP
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 						$$ = (Node *) makeFuncCall(OracleSystemFuncName("current_timestamp"),
 												   NIL,
 												   COERCE_EXPLICIT_CALL,
@@ -17582,7 +18088,7 @@ func_expr_common_subexpr:
 				}
 			| CURRENT_TIMESTAMP '(' Iconst ')'
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 						$$ = (Node *) makeFuncCall(OracleSystemFuncName("current_timestamp"),
 												   list_make1(makeIntConst($3, @3)),
 												   COERCE_EXPLICIT_CALL,
@@ -17600,7 +18106,7 @@ func_expr_common_subexpr:
 				}
 			| LOCALTIMESTAMP
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 						$$ = (Node *) makeFuncCall(OracleSystemFuncName("localtimestamp"),
 												   NIL,
 												   COERCE_EXPLICIT_CALL,
@@ -17610,7 +18116,7 @@ func_expr_common_subexpr:
 				}
 			| LOCALTIMESTAMP '(' Iconst ')'
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 						$$ = (Node *) makeFuncCall(OracleSystemFuncName("localtimestamp"),
 												   list_make1(makeIntConst($3, @3)),
 												   COERCE_EXPLICIT_CALL,
@@ -17895,26 +18401,25 @@ func_expr_common_subexpr:
 			/* End - ReqID:SRS-SQL-XML */
 			| USERENV '(' Sconst ')'
 				{
-					if (strcmp(downcase_identifier($3, strlen($3), true, true), "client_info") == 0)
-						$$ = (Node *) makeFuncCall(OracleSystemFuncName("get_client_info"), NIL, COERCE_EXPLICIT_CALL, @1);
-					else if (strcmp(downcase_identifier($3, strlen($3), true, true), "entryid") == 0)
-						$$ = (Node *) makeFuncCall(OracleSystemFuncName("get_entryid"), NIL, COERCE_EXPLICIT_CALL, @1);
-					else if (strcmp(downcase_identifier($3, strlen($3), true, true), "terminal") == 0)
-						$$ = (Node *) makeFuncCall(OracleSystemFuncName("get_terminal"), NIL, COERCE_EXPLICIT_CALL, @1);
-					else if (strcmp(downcase_identifier($3, strlen($3), true, true), "isdba") == 0)
-						$$ = (Node *) makeFuncCall(OracleSystemFuncName("get_isdba"), NIL, COERCE_EXPLICIT_CALL, @1);
-					else if (strcmp(downcase_identifier($3, strlen($3), true, true), "lang") == 0)
-						$$ = (Node *) makeFuncCall(OracleSystemFuncName("get_lang"), NIL, COERCE_EXPLICIT_CALL, @1);
-					else if (strcmp(downcase_identifier($3, strlen($3), true, true), "language") == 0)
-						$$ = (Node *) makeFuncCall(OracleSystemFuncName("get_language"), NIL, COERCE_EXPLICIT_CALL, @1);
-					else if (strcmp(downcase_identifier($3, strlen($3), true, true), "sessionid") == 0)
-						$$ = (Node *) makeFuncCall(OracleSystemFuncName("get_sessionid"), NIL, COERCE_EXPLICIT_CALL, @1);
-					else if (strcmp(downcase_identifier($3, strlen($3), true, true), "sid") == 0)
-						$$ = (Node *) makeFuncCall(OracleSystemFuncName("get_sid"), NIL, COERCE_EXPLICIT_CALL, @1);
+					char *normalized_param = downcase_identifier($3, strlen($3), true, true);
+
+					#define CHECK_AND_CALL(param, func_name) \
+						if (strcmp(normalized_param, param) == 0) \
+							$$ = (Node *) makeFuncCall(OracleSystemFuncName(func_name), NIL, COERCE_EXPLICIT_CALL, @1);
+
+					CHECK_AND_CALL("client_info", "get_client_info")
+					else CHECK_AND_CALL("entryid", "get_entryid")
+					else CHECK_AND_CALL("terminal", "get_terminal")
+					else CHECK_AND_CALL("isdba", "get_isdba")
+					else CHECK_AND_CALL("lang", "get_lang")
+					else CHECK_AND_CALL("language", "get_language")
+					else CHECK_AND_CALL("sessionid", "get_sessionid")
+					else CHECK_AND_CALL("sid", "get_sid")
 					else
 						ereport(ERROR,
 								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-								 errmsg("invalid USERENV parameter.")));
+								 errmsg("invalid USERENV parameter: \"%s\".", $3)));
+					#undef CHECK_AND_CALL
 				}
 			| JSON_OBJECT '(' func_arg_list ')'
 				{
@@ -18583,15 +19088,15 @@ type_list:	Typename								{ $$ = list_make1($1); }
 
 array_expr: '[' expr_list ']'
 				{
-					$$ = makeAArrayExpr($2, @1);
+					$$ = makeAArrayExpr($2, @1, @3);
 				}
 			| '[' array_expr_list ']'
 				{
-					$$ = makeAArrayExpr($2, @1);
+					$$ = makeAArrayExpr($2, @1, @3);
 				}
 			| '[' ']'
 				{
-					$$ = makeAArrayExpr(NIL, @1);
+					$$ = makeAArrayExpr(NIL, @1, @2);
 				}
 		;
 
@@ -18711,17 +19216,6 @@ substr_list:
 trim_list:	a_expr FROM expr_list					{ $$ = lappend($3, $1); }
 			| FROM expr_list						{ $$ = $2; }
 			| expr_list								{ $$ = $1; }
-		;
-
-in_expr:	select_with_parens
-				{
-					SubLink	   *n = makeNode(SubLink);
-
-					n->subselect = $1;
-					/* other fields will be filled later */
-					$$ = (Node *) n;
-				}
-			| '(' expr_list ')'						{ $$ = (Node *) $2; }
 		;
 
 /*
@@ -18947,7 +19441,7 @@ indirection_el:
 					ai->uidx = $2;
 					$$ = (Node *) ai;
 				}
-			| '[' opt_slice_bound ':' opt_slice_bound ']'
+			| '[' opt_slice_bound DOT_DOT opt_slice_bound ']'
 				{
 					A_Indices *ai = makeNode(A_Indices);
 
@@ -19426,14 +19920,14 @@ AexprConst: Iconst
 				}
 			| ConstTypename Sconst
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 						$$ = makeStringConstCast($2, -2, $1);
 					else
 						$$ = makeStringConstCast($2, @2, $1);
 				}
 			| ConstInterval Sconst opt_interval
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 					{
 						TypeName *t;
 						List *typmods = $3;
@@ -19450,7 +19944,10 @@ AexprConst: Iconst
 							n->val.ival.ival == INTERVAL_MASK(MONTH) ||
 							n->val.ival.ival == (INTERVAL_MASK(YEAR) | INTERVAL_MASK(MONTH)))
 						{
-							t = OracleSystemTypeName("yminterval");
+							if (enable_canonical_mode)
+								t = OracleSystemTypeName("interval year to month");
+							else
+								t = OracleSystemTypeName("yminterval");
 							t->typmods = $3;
 							t->location = @1;
 
@@ -19458,7 +19955,10 @@ AexprConst: Iconst
 						}
 						else
 						{
-							t = OracleSystemTypeName("dsinterval");
+							if (enable_canonical_mode)
+								t = OracleSystemTypeName("interval day to second");
+							else
+								t = OracleSystemTypeName("dsinterval");
 							t->typmods = $3;
 							t->location = @1;
 
@@ -19475,7 +19975,7 @@ AexprConst: Iconst
 				}
 			| ConstInterval '(' Iconst ')' Sconst
 				{
-					if (ORA_PARSER == ORA_PARSER)
+					if (ORA_PARSER == compatible_db)
 					{
 						ereport(ERROR,
 								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -19677,8 +20177,15 @@ PLAssignStmt: plassign_target opt_indirection plassign_equals PLpgSQL_Expr
 				}
 		;
 
-plassign_target: ColId							{ $$ = $1; }
-			| PARAM								{ $$ = psprintf("$%d", $1); }
+plassign_target: ColId				{ $$ = $1; }
+			| PARAM			{ $$ = psprintf("$%d", $1); }
+			| ORAPARAM
+				{
+					if (get_bindByName())
+						$$ = psprintf("%s", $1);
+					else
+						$$ = psprintf("$%d", calculate_oraparamnumber($1));
+				}
 		;
 
 plassign_equals: COLON_EQUALS
@@ -19843,6 +20350,7 @@ unreserved_keyword:
 			| ENABLE_P
 			| ENCODING
 			| ENCRYPTED
+			| ENFORCED
 			| ENUM_P
 			| ERROR_P
 			| ESCAPE
@@ -19956,6 +20464,7 @@ unreserved_keyword:
 			| NOWAIT
 			| NULLS_P
 			| OBJECT_P
+			| OBJECTS_P
 			| OF
 			| OFF
 			| OIDS
@@ -20029,6 +20538,7 @@ unreserved_keyword:
 			| ROLLUP
 			| ROUTINE
 			| ROUTINES
+			| ROWID
 			| ROWS
 			| ROWTYPE
 			| RULE
@@ -20057,7 +20567,7 @@ unreserved_keyword:
 			| SKIP
 			| SNAPSHOT
 			| SOURCE
-			| SPECIFICATION 
+			| SPECIFICATION
 			| SQL_P
 			| SQL_MACRO
 			| STABLE
@@ -20111,6 +20621,7 @@ unreserved_keyword:
 			| VERSION_P
 			| VIEW
 			| VIEWS
+			| VIRTUAL
 			| VISIBLE
 			| VOLATILE
 			| WHITESPACE_P
@@ -20196,7 +20707,6 @@ col_name_keyword:
 			| TRIM
 			| UPDATEXML /* ReqID:SRS-SQL-XML */
 			| USERENV
-			| VALUES
 			| VARCHAR
 			| VARCHAR2
 			| XMLATTRIBUTES
@@ -20338,6 +20848,7 @@ reserved_keyword:
 			| UNIQUE
 			| USER
 			| USING
+			| VALUES
 			| VARIADIC
 			| WHEN
 			| WHERE
@@ -20493,6 +21004,7 @@ bare_label_keyword:
 			| ENCODING
 			| ENCRYPTED
 			| END_P
+			| ENFORCED
 			| ENUM_P
 			| ERROR_P
 			| ESCAPE
@@ -20654,6 +21166,7 @@ bare_label_keyword:
 			| NVL
 			| NVL2
 			| OBJECT_P
+			| OBJECTS_P
 			| OF
 			| OFF
 			| OIDS
@@ -20739,6 +21252,7 @@ bare_label_keyword:
 			| ROUTINE
 			| ROUTINES
 			| ROW
+			| ROWID
 			| ROWS
 			| ROWTYPE
 			| RULE
@@ -20772,7 +21286,7 @@ bare_label_keyword:
 			| SNAPSHOT
 			| SOME
 			| SOURCE
-			| SPECIFICATION 
+			| SPECIFICATION
 			| SQL_P
 			| SQL_MACRO
 			| STABLE
@@ -20849,6 +21363,7 @@ bare_label_keyword:
 			| VERSION_P
 			| VIEW
 			| VIEWS
+			| VIRTUAL
 			| VISIBLE
 			| VOLATILE
 			| WHEN
@@ -20917,10 +21432,10 @@ makeColumnRef(char *colname, List *indirection,
 			  int location, ora_core_yyscan_t yyscanner)
 {
 	/*
-	 * Generate a ColumnRef node, with an A_Indirection node added if there
-	 * is any subscripting in the specified indirection list.  However,
-	 * any field selection at the start of the indirection list must be
-	 * transposed into the "fields" part of the ColumnRef node.
+	 * Generate a ColumnRef node, with an A_Indirection node added if there is
+	 * any subscripting in the specified indirection list.  However, any field
+	 * selection at the start of the indirection list must be transposed into
+	 * the "fields" part of the ColumnRef node.
 	 */
 	ColumnRef  *c = makeNode(ColumnRef);
 	int			nfields = 0;
@@ -21176,7 +21691,10 @@ extractArgTypes(List *parameters)
 	{
 		FunctionParameter *p = (FunctionParameter *) lfirst(i);
 
-		if (p->mode != FUNC_PARAM_OUT && p->mode != FUNC_PARAM_TABLE)
+		/* set second parameter Oid mask for OUT mode */
+		if (p->mode == FUNC_PARAM_OUT)
+			SetModeOut(p->argType->typeOid);
+		if (p->mode != FUNC_PARAM_TABLE)
 			result = lappend(result, p->argType);
 	}
 	return result;
@@ -21341,7 +21859,9 @@ SystemFuncName(char *name)
 List *
 OracleSystemFuncName(char *name)
 {
-	return list_make2(makeString("sys"), makeString(name));
+	/* changed for synchdb */
+	//return list_make2(makeString("sys"), makeString(name));
+	return list_make1(makeString(name));
 }
 
 /* SystemTypeName()
@@ -21364,8 +21884,10 @@ SystemTypeName(char *name)
 TypeName *
 OracleSystemTypeName(char *name)
 {
-	return makeTypeNameFromNameList(list_make2(makeString("sys"),
-											   makeString(name)));
+	/* changed for synchdb */
+	return makeTypeNameFromNameList(list_make1(makeString(name)));
+	//return makeTypeNameFromNameList(list_make2(makeString("sys"),
+	//										   makeString(name)));
 }
 
 /* doNegate()
@@ -21460,12 +21982,14 @@ makeNotExpr(Node *expr, int location)
 }
 
 static Node *
-makeAArrayExpr(List *elements, int location)
+makeAArrayExpr(List *elements, int location, int location_end)
 {
 	A_ArrayExpr *n = makeNode(A_ArrayExpr);
 
 	n->elements = elements;
 	n->location = location;
+	n->list_start = location;
+	n->list_end = location_end;
 	return (Node *) n;
 }
 
@@ -21673,8 +22197,8 @@ SplitColQualList(List *qualList,
  */
 static void
 processCASbits(int cas_bits, int location, const char *constrType,
-			   bool *deferrable, bool *initdeferred, bool *not_valid,
-			   bool *no_inherit, ora_core_yyscan_t yyscanner)
+			   bool *deferrable, bool *initdeferred, bool *is_enforced,
+			   bool *not_valid, bool *no_inherit, ora_core_yyscan_t yyscanner)
 {
 	/* defaults */
 	if (deferrable)
@@ -21683,6 +22207,8 @@ processCASbits(int cas_bits, int location, const char *constrType,
 		*initdeferred = false;
 	if (not_valid)
 		*not_valid = false;
+	if (is_enforced)
+		*is_enforced = true;
 
 	if (cas_bits & (CAS_DEFERRABLE | CAS_INITIALLY_DEFERRED))
 	{
@@ -21732,6 +22258,41 @@ processCASbits(int cas_bits, int location, const char *constrType,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 /* translator: %s is CHECK, UNIQUE, or similar */
 					 errmsg("%s constraints cannot be marked NO INHERIT",
+							constrType),
+					 parser_errposition(location)));
+	}
+
+	if (cas_bits & CAS_NOT_ENFORCED)
+	{
+		if (is_enforced)
+			*is_enforced = false;
+		else
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 /* translator: %s is CHECK, UNIQUE, or similar */
+					 errmsg("%s constraints cannot be marked NOT ENFORCED",
+							constrType),
+					 parser_errposition(location)));
+
+		/*
+		 * NB: The validated status is irrelevant when the constraint is set to
+		 * NOT ENFORCED, but for consistency, it should be set accordingly.
+		 * This ensures that if the constraint is later changed to ENFORCED, it
+		 * will automatically be in the correct NOT VALIDATED state.
+		 */
+		if (not_valid)
+			*not_valid = true;
+	}
+
+	if (cas_bits & CAS_ENFORCED)
+	{
+		if (is_enforced)
+			*is_enforced = true;
+		else
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 /* translator: %s is CHECK, UNIQUE, or similar */
+					 errmsg("%s constraints cannot be marked ENFORCED",
 							constrType),
 					 parser_errposition(location)));
 	}

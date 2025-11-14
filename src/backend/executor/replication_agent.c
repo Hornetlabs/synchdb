@@ -831,7 +831,8 @@ ra_executePGDDL(PG_DDL * pgddl, ConnectorType type)
  * or calls a custom handler function.
  */
 int
-ra_executePGDML(PG_DML * pgdml, ConnectorType type, SynchdbStatistics * myBatchStats)
+ra_executePGDML(PG_DML * pgdml, ConnectorType type, SynchdbStatistics * myBatchStats,
+		bool isInSnapshot)
 {
 	int ret = -1;
 	if (!pgdml)
@@ -849,7 +850,7 @@ ra_executePGDML(PG_DML * pgdml, ConnectorType type, SynchdbStatistics * myBatchS
 			else
 				ret = synchdb_handle_insert(pgdml->columnValuesAfter, pgdml->tableoid, type, pgdml->natts);
 
-			increment_connector_statistics(myBatchStats, STATS_READ, 1);
+			increment_connector_statistics(myBatchStats, STATS_ROWS, 1);
 			break;
 		}
 		case 'c':  // Create operation
@@ -859,7 +860,8 @@ ra_executePGDML(PG_DML * pgdml, ConnectorType type, SynchdbStatistics * myBatchS
 			else
 				ret = synchdb_handle_insert(pgdml->columnValuesAfter, pgdml->tableoid, type, pgdml->natts);
 
-			increment_connector_statistics(myBatchStats, STATS_CREATE, 1);
+			if (!isInSnapshot)
+				increment_connector_statistics(myBatchStats, STATS_CREATE, 1);
 			break;
 		}
 		case 'u':  // Update operation
@@ -871,7 +873,8 @@ ra_executePGDML(PG_DML * pgdml, ConnectorType type, SynchdbStatistics * myBatchS
 											 pgdml->columnValuesAfter,
 											 pgdml->tableoid,
 											 type, pgdml->natts);
-			increment_connector_statistics(myBatchStats, STATS_UPDATE, 1);
+			if (!isInSnapshot)
+				increment_connector_statistics(myBatchStats, STATS_UPDATE, 1);
 			break;
 		}
 		case 'd':  // Delete operation
@@ -881,7 +884,8 @@ ra_executePGDML(PG_DML * pgdml, ConnectorType type, SynchdbStatistics * myBatchS
 			else
 				ret = synchdb_handle_delete(pgdml->columnValuesBefore, pgdml->tableoid, type, pgdml->natts);
 
-			increment_connector_statistics(myBatchStats, STATS_DELETE, 1);
+			if (!isInSnapshot)
+				increment_connector_statistics(myBatchStats, STATS_DELETE, 1);
 			break;
 		}
 		default:
@@ -1003,8 +1007,8 @@ ra_getConninfoByName(const char * name, ConnectionInfo * conninfo, char ** conne
 			"jmx_auth=%s jmx_auth_passwdfile=%s jmx_auth_accessfile=%s jmx_ssl=%s "
 			"jmx_ssl_keystore=%s jmx_ssl_keystore_pass=%s jmx_ssl_truststore=%s "
 			"jmx_ssl_truststore_pass=%s jmx_exporter=%s jmx_exporter_port=%d "
-			"jmx_exporter_conf=%s)"
-			"olr(olr_host=%s olr_port=%d olr_source=%s)"
+			"jmx_exporter_conf=%s) "
+			"olr(olr_host=%s olr_port=%d olr_source=%s) "
 			"ispn(ispn_cache_type='%s' ispn_memory_type='%s' ispn_memory_size=%u)",
 			conninfo->name, conninfo->hostname, conninfo->port,
 			conninfo->user, conninfo->pwd, conninfo->srcdb,
@@ -1377,4 +1381,368 @@ destroyPGDML(PG_DML * dmlinfo)
 			list_free_deep(dmlinfo->columnValuesAfter);
 		pfree(dmlinfo);
 	}
+}
+
+orascn
+ra_run_orafdw_initial_snapshot_spi(ConnectionInfo * conninfo, int flag,
+		const char * snapshot_tables, orascn scn_req, bool fdw_use_subtx,
+		bool write_schema_hist, const char * snapshotMode)
+{
+	int ret = -1, i = 0;
+	bool isnull = false;
+	Datum d;
+	char *s = NULL;
+	orascn scn_res = 0;
+	bool skiptx = false;
+	char dstdb[SYNCHDB_CONNINFO_DB_NAME_SIZE] = {0};
+	char scn_buf[64] = {0};
+
+	const char *sql = (flag & CONNFLAG_SCHEMA_SYNC_MODE) ||
+			!strcasecmp(snapshotMode, "no_data")?
+			"SELECT synchdb_do_schema_sync("
+			"  $1::name,$2::text,$3::name,$4::name,$5::name,"
+			"  $6::text,$7::name,$8::bool,$9::text,$10::numeric,"
+			"  $11::text,$12::bool,$13::bool)" :
+			"SELECT synchdb_do_initial_snapshot("
+			"  $1::name,$2::text,$3::name,$4::name,$5::name,"
+			"  $6::text,$7::name,$8::bool,$9::text,$10::numeric,"
+			"  $11::text,$12::bool,$13::bool)";
+	Oid   argtypes[13] = {
+		NAMEOID, TEXTOID, NAMEOID, NAMEOID, NAMEOID,
+		TEXTOID, NAMEOID, BOOLOID, TEXTOID, NUMERICOID,
+		TEXTOID, BOOLOID, BOOLOID
+	};
+	Datum values[13];
+	char  nulls[13] = {' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' '};
+
+	/* compute scn */
+	if (scn_req > 0)
+		snprintf(scn_buf, sizeof(scn_buf), "%llu", scn_req);
+	else
+		snprintf(scn_buf, sizeof(scn_buf), "%s", "0");
+
+	/*
+	 * if we are already in transaction or transaction block, we can skip
+	 * the transaction and snapshot acquisition code below
+	 */
+	if (IsTransactionOrTransactionBlock())
+		skiptx = true;
+
+	/* we only work with lower case objects */
+	for (i = 0; i < strlen(conninfo->srcdb); i++)
+		dstdb[i] = (char) pg_tolower((unsigned char) conninfo->srcdb[i]);
+
+	PG_TRY();
+	{
+		if (!skiptx)
+		{
+			/* Start a transaction and set up a snapshot */
+			StartTransactionCommand();
+			PushActiveSnapshot(GetTransactionSnapshot());
+		}
+
+		/* Build Datum values for name/text/bool/numeric */
+		values[0]  = DirectFunctionCall1(namein,   CStringGetDatum(conninfo->name));
+		values[1]  = CStringGetTextDatum(SYNCHDB_SECRET);
+		values[2]  = DirectFunctionCall1(namein,   CStringGetDatum("ora_obj"));
+		values[3]  = DirectFunctionCall1(namein,   CStringGetDatum("ora_stage"));
+		values[4]  = DirectFunctionCall1(namein,   CStringGetDatum(dstdb));
+		values[5]  = CStringGetTextDatum(conninfo->srcdb);
+		values[6]  = DirectFunctionCall1(namein,   CStringGetDatum(conninfo->user));
+		values[7]  = BoolGetDatum(true);
+		values[8]  = CStringGetTextDatum("replace");
+		values[9]  = DirectFunctionCall3(numeric_in,
+										 CStringGetDatum(scn_buf),
+										 ObjectIdGetDatum(InvalidOid),
+										 Int32GetDatum(-1));
+		if (snapshot_tables)
+			values[10] = CStringGetTextDatum(snapshot_tables);
+		else
+			nulls[10] = 'n';
+
+		values[11] = BoolGetDatum(fdw_use_subtx);
+		values[12] = BoolGetDatum(write_schema_hist);
+
+		if (SPI_connect() != SPI_OK_CONNECT)
+			elog(ERROR, "SPI_connect failed");
+
+		ret = SPI_execute_with_args(sql, 13, argtypes, values, nulls, false, 1);
+		if (ret != SPI_OK_SELECT || SPI_processed != 1 || SPI_tuptable == NULL)
+		{
+			SPI_finish();
+			elog(ERROR, "snapshot call failed with ret = %d", ret);
+		}
+
+		d = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1, &isnull);
+		if (isnull)
+		{
+			SPI_finish();
+			elog(ERROR, "snapshot function returned NULL");
+		}
+
+		s = DatumGetCString(DirectFunctionCall1(numeric_out, d));
+		errno = 0;
+		scn_res = strtoull(s, NULL, 10);
+		if (errno != 0)
+		{
+			SPI_finish();
+			elog(ERROR, "failed to parse SCN '%s' as unsigned long long", s);
+		}
+
+		SPI_finish();
+
+		if (!skiptx)
+		{
+			/* Commit the transaction */
+			PopActiveSnapshot();
+			CommitTransactionCommand();
+		}
+	}
+	PG_CATCH();
+	{
+		MemoryContext oldctx = MemoryContextSwitchTo(TopMemoryContext);
+		ErrorData  *errdata = CopyErrorData();
+
+		if (errdata)
+			set_shm_connector_errmsg(myConnectorId, errdata->message);
+
+		FreeErrorData(errdata);
+		MemoryContextSwitchTo(oldctx);
+		SPI_finish();
+		scn_res = 0;
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	elog(WARNING, "scn to resume cdc %llu", scn_res);
+	return scn_res;
+}
+
+/*
+ * ra_get_fdw_snapshot_err_table_list
+ *
+ * This function queries synchdb_fdw_snapshot_errors tables and build a list of tables that
+ * have failed in previous FDW based initial snapshot.
+ */
+int
+ra_get_fdw_snapshot_err_table_list(const char *name, char **out, int *numout, orascn *scn_out)
+{
+	int ret = -1;
+	StringInfoData strinfo;
+	char *agg_tbls = NULL;
+	char *scn_txt  = NULL;
+	bool skiptx = false;
+
+	if (out)
+		*out = NULL;
+	if (numout)
+		*numout = 0;
+	if (scn_out)
+		*scn_out = 0;  /* default if no rows / errors */
+
+	initStringInfo(&strinfo);
+	appendStringInfo(&strinfo,
+			"SELECT string_agg(tbl, ',' ORDER BY tbl) AS failed_tables, "
+			"max(scn) AS scn_val "
+			"FROM synchdb_fdw_snapshot_errors_%s "
+			"WHERE connector_name = '%s'",
+			name, name);
+
+	if (IsTransactionOrTransactionBlock())
+		skiptx = true;
+
+	if (!skiptx)
+	{
+		StartTransactionCommand();
+		PushActiveSnapshot(GetTransactionSnapshot());
+	}
+
+	PG_TRY();
+	{
+		if (SPI_connect() != SPI_OK_CONNECT)
+		{
+			elog(WARNING, "SPI_connect failed");
+			goto cleanup_tx;
+		}
+
+		ret = SPI_execute(strinfo.data, true, 0);
+		if (ret != SPI_OK_SELECT || SPI_tuptable == NULL)
+		{
+			SPI_finish();
+			goto cleanup_tx;
+		}
+
+		if (SPI_processed == 1)
+		{
+			MemoryContext oldctx = MemoryContextSwitchTo(TopMemoryContext);
+
+			/* col 1: failed_tables (text via string_agg) */
+			agg_tbls = SPI_getvalue(SPI_tuptable->vals[0],
+						SPI_tuptable->tupdesc, 1);
+			if (agg_tbls != NULL && out)
+			{
+				*out = pstrdup(agg_tbls);
+				if (numout) *numout = 1; /* you treat it as a single CSV string */
+			}
+
+			/* col 2: scn_val (numeric -> text) */
+			scn_txt = SPI_getvalue(SPI_tuptable->vals[0],
+					   SPI_tuptable->tupdesc, 2);
+			if (scn_txt && scn_out)
+			{
+				/* parse as unsigned long long (orascn) */
+				errno = 0;
+				*scn_out = (orascn) strtoull(scn_txt, NULL, 10);
+				if (errno != 0)
+					*scn_out = 0; /* fall back if parse failed */
+			}
+			MemoryContextSwitchTo(oldctx);
+		}
+
+		SPI_finish();
+		ret = 0;
+	}
+	PG_CATCH();
+	{
+		SPI_finish();
+		FlushErrorState();
+
+		if (!skiptx)
+		{
+			PopActiveSnapshot();
+			CommitTransactionCommand();
+		}
+		pfree(strinfo.data);
+		return -1;
+	}
+	PG_END_TRY();
+
+cleanup_tx:
+	if (!skiptx)
+	{
+		PopActiveSnapshot();
+		CommitTransactionCommand();
+	}
+
+	pfree(strinfo.data);
+	return ret;
+}
+
+int
+dump_schema_history_to_file(const char * connector_name, const char *out_path)
+{
+	StringInfoData sql;
+	FILE *fp = NULL;
+	const long fetchSize = 10000;
+	Portal portal;
+	int ret = -1, i = 0;
+	SPIPlanPtr plan;
+	TupleDesc tupdesc;
+	SPITupleTable * tuptable;
+	bool skiptx = false;
+
+	initStringInfo(&sql);
+	appendStringInfo(&sql, "SELECT line FROM schema_history_%s", connector_name);
+
+	if (IsTransactionOrTransactionBlock())
+		skiptx = true;
+
+	if (!skiptx)
+	{
+		StartTransactionCommand();
+		PushActiveSnapshot(GetTransactionSnapshot());
+	}
+
+	/* Open output file (truncate) */
+	fp = AllocateFile(out_path, "w");
+	if (!fp)
+		return -1;
+
+	PG_TRY();
+	{
+		if (SPI_connect() != SPI_OK_CONNECT)
+		{
+			elog(WARNING, "SPI_connect failed");
+			goto cleanup_tx;
+		}
+
+		plan = SPI_prepare(sql.data, 0, NULL);
+		if (plan == NULL)
+		{
+			elog(WARNING, "SPI_prepare failed");
+			SPI_finish();
+			goto cleanup_tx;
+		}
+
+		portal = SPI_cursor_open(NULL, plan, NULL, NULL, true);
+		if (portal == NULL)
+		{
+			elog(WARNING, "SPI_cursor_open failed");
+			SPI_finish();
+			goto cleanup_tx;
+		}
+
+		for (;;)
+		{
+			SPI_cursor_fetch(portal, true, fetchSize);
+
+			if (SPI_processed == 0)
+			{
+				if (SPI_tuptable)
+					SPI_freetuptable(SPI_tuptable);
+				break;
+			}
+
+			tupdesc = SPI_tuptable->tupdesc;
+			tuptable = SPI_tuptable;
+
+			for (i = 0; i < SPI_processed; i++)
+			{
+				HeapTuple tup = tuptable->vals[i];
+				char *line = SPI_getvalue(tup, tupdesc, 1);
+				if (!line)
+					continue;
+
+				fputs(line, fp);
+				fputc('\n', fp);
+			}
+			SPI_freetuptable(SPI_tuptable);
+		}
+
+		SPI_cursor_close(portal);
+		SPI_finish();
+		ret = 0;
+	}
+	PG_CATCH();
+	{
+		SPI_finish();
+		FlushErrorState();
+
+		if (FreeFile(fp) != 0)
+			ereport(WARNING,
+					(errmsg("error closing file: %s", out_path)));
+
+		if (!skiptx)
+		{
+			PopActiveSnapshot();
+			CommitTransactionCommand();
+		}
+		pfree(sql.data);
+		return -1;
+	}
+	PG_END_TRY();
+
+cleanup_tx:
+	if (FreeFile(fp) != 0)
+		ereport(WARNING,
+				(errmsg("error closing file: %s", out_path)));
+
+	if (!skiptx)
+	{
+		PopActiveSnapshot();
+		CommitTransactionCommand();
+	}
+
+	pfree(sql.data);
+	return ret;
 }

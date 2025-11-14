@@ -152,7 +152,7 @@ dbcheck-tpcc:
 	@command -v docker >/dev/null 2>&1 || { echo >&2 "❌ docker not found in PATH."; exit 1; }
 	@command -v docker-compose >/dev/null 2>&1 || command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1 || { echo >&2 "❌ docker-compose not found in PATH"; exit 1; }
 	@echo "Running hammerdb based tpcc tests against dbvendor=$(DB)"
-	PYTHONPATH=./src/test/pytests/synchdbtests/ pytest -v -s --dbvendor=$(DB) --tpccmode=serial --capture=tee-sys ./src/test/pytests/hammerdb/
+	PYTHONPATH=./src/test/pytests/synchdbtests/ pytest -x -v -s --dbvendor=$(DB) --tpccmode=serial --capture=tee-sys ./src/test/pytests/hammerdb/
 	rm -r .pytest_cache ./src/test/pytests/hammerdb/__pycache__
 
 mysqlcheck:
@@ -176,4 +176,6 @@ sqlservercheck-benchmark:
 oraclecheck-benchmark:
 	$(MAKE) dbcheck-tpcc DB=oracle
 
+olrcheck-benchmark:
+	$(MAKE) dbcheck-tpcc DB=olr
 
