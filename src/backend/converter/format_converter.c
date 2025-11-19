@@ -66,9 +66,15 @@ static HTAB * sqlserverDatatypeHash = NULL;
 DatatypeHashEntry mysql_defaultTypeMappings[] =
 {
 	{{"int", true}, "serial", 0},
+	{{"int unsigned", true}, "serial", 0},
 	{{"bigint", true}, "bigserial", 0},
+	{{"bigint unsigned", true}, "bigserial", 0},
 	{{"smallint", true}, "smallserial", 0},
+	{{"smallint unsigned", true}, "smallserial", 0},
 	{{"mediumint", true}, "serial", 0},
+	{{"mediumint unsigned", true}, "serial", 0},
+	{{"tinyint", true}, "smallserial", 0},
+	{{"tinyint unsigned", true}, "smallserial", 0},
 	{{"enum", false}, "text", 0},
 	{{"set", false}, "text", 0},
 	{{"bigint", false}, "bigint", 0},
