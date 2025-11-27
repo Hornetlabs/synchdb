@@ -23,6 +23,9 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <dlfcn.h>
+#include "tcop/utility.h"
+#include "nodes/parsenodes.h"
+#include "utils/elog.h"
 
 /* synchdb includes */
 #include "converter/format_converter.h"
@@ -200,6 +203,7 @@ static int olr_set_offset_from_raw(char * offsetdata);
 static bool dbz_read_snapshot_state(ConnectorType type, const char * offset);
 static int populate_debezium_metadata(const char * name, ConnectorType connectorType,
 		orascn scn, const char * dstdb, const char * srcdb);
+static bool has_running_connectors_for_db(const char *dbname, char *active_name, int active_len);
 /*
  * count_active_connectors
  *
@@ -220,6 +224,49 @@ count_active_connectors(void)
 	}
 	return i;
 }
+
+/*
+ * has_running_connectors_for_db
+ *
+ * Check if the current database still has running connectors before allowing
+ * DROP EXTENSION to proceed, to prevent orphaned workers.
+ */
+static bool
+has_running_connectors_for_db(const char *dbname, char *active_name, int active_len)
+{
+	int i;
+	bool found = false;
+
+	if (active_name && active_len > 0)
+		active_name[0] = '\0';
+
+	if (!sdb_state || !dbname)
+		return false;
+
+	LWLockAcquire(&sdb_state->lock, LW_SHARED);
+	for (i = 0; i < synchdb_max_connector_workers; i++)
+	{
+		ActiveConnectors *entry = &sdb_state->connectors[i];
+
+		if (entry->pid == InvalidPid)
+			continue;
+		if (entry->state == STATE_UNDEF || entry->state == STATE_STOPPED)
+			continue;
+		if (entry->conninfo.dstdb[0] == '\0')
+			continue;
+		if (pg_strcasecmp(entry->conninfo.dstdb, dbname) != 0)
+			continue;
+
+		found = true;
+		if (active_name && active_len > 0)
+			strlcpy(active_name, entry->conninfo.name, active_len);
+		break;
+	}
+	LWLockRelease(&sdb_state->lock);
+
+	return found;
+}
+
 /*
  * set_extra_dbz_parameters - configures extra paramters for Debezium runner
  *
@@ -828,7 +875,7 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 		offset += 4;
 
 		elog(DEBUG1, "batch id %d contains %d change events", batchinfo->batchId, batchsize);
-		
+
 		StartTransactionCommand();
 		PushActiveSnapshot(GetTransactionSnapshot());
 
@@ -3447,6 +3494,70 @@ olr_set_offset_from_raw(char * offsetdata)
 }
 #endif
 
+static ProcessUtility_hook_type prev_ProcessUtility = NULL;
+
+static void
+synchdb_ProcessUtility(PlannedStmt *pstmt,
+                       const char *queryString,
+                       bool readOnlyTree,
+                       ProcessUtilityContext context,
+                       ParamListInfo params,
+                       QueryEnvironment *queryEnv,
+                       DestReceiver *dest,
+                       QueryCompletion *qc)
+{
+    Node *parsetree = pstmt->utilityStmt;
+    if (nodeTag(parsetree) == T_DropStmt)
+    {
+        DropStmt *drop = (DropStmt *) parsetree;
+        if (drop->removeType == OBJECT_EXTENSION)
+        {
+            ListCell *lc;
+            foreach(lc, drop->objects)
+            {
+                Node *object = (Node *) lfirst(lc);
+                /* Handle both string names and list of names */
+                char *name = NULL;
+                if (IsA(object, String))
+                    name = strVal(object);
+                else if (IsA(object, List))
+                {
+                    /* Extract name from list */
+                    List *names = (List *) object;
+                    if (list_length(names) == 1)
+                        name = strVal(linitial(names));
+                }
+                if (name && strcmp(name, "synchdb") == 0)
+                {
+                    char running_name[SYNCHDB_CONNINFO_NAME_SIZE] = {0};
+                    const char *dbname = get_database_name(MyDatabaseId);
+
+                    if (!sdb_state)
+                        synchdb_init_shmem();
+
+                    if (has_running_connectors_for_db(dbname, running_name, sizeof(running_name)))
+                    {
+                        if (running_name[0] != '\0')
+                            ereport(ERROR,
+                                    (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                                     errmsg("cannot drop extension \"synchdb\" because connectors are still running in database \"%s\"", dbname),
+                                     errdetail("Example: connector \"%s\" is still active.", running_name),
+                                     errhint("Stop every connector with synchdb_stop_engine_bgw() before running DROP EXTENSION.")));
+                        else
+                            ereport(ERROR,
+                                    (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                                     errmsg("cannot drop extension \"synchdb\" while connectors are running"),
+                                     errhint("Use synchdb_stop_engine_bgw() to stop them first.")));
+                    }
+                }
+            }
+        }
+    }
+    if (prev_ProcessUtility)
+        prev_ProcessUtility(pstmt, queryString, readOnlyTree, context, params, queryEnv, dest, qc);
+    else
+        standard_ProcessUtility(pstmt, queryString, readOnlyTree, context, params, queryEnv, dest, qc);
+}
 
 /*
  * increment_connector_statistics - increment statistics
@@ -4119,6 +4230,9 @@ _PG_init(void)
 	{
 		synchdb_start_leader_worker();
 	}
+
+ 	prev_ProcessUtility = ProcessUtility_hook;
+    ProcessUtility_hook = synchdb_ProcessUtility;
 }
 
 /*
