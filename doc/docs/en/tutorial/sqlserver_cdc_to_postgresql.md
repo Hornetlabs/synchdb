@@ -1,4 +1,4 @@
-# SQL Server CDC to PostgreSQL
+# SQL Server -> PostgreSQL
 
 ## Prepare SQL Server Database for SynchDB
 
@@ -17,12 +17,12 @@ GO
 
 ## Create a SQL Server Connector
 
-Create a connector that targets all the tables under `testDB` database in SQL Server.
+Create a connector that targets all the tables under `testDB` database and `dbo` schema in SQL Server.
 ```sql
 SELECT 
   synchdb_add_conninfo(
     'sqlserverconn', '127.0.0.1', 1433, 
-    'sa', 'Password!', 'testDB', 'postgres', 
+    'sa', 'Password!', 'testDB', 'dbo', 
     'null', 'null', 'sqlserver');
 ```
 
@@ -51,18 +51,12 @@ postgres=# select * from synchdb_state_view where name='sqlserverconn';
 
 A new schema called `testdb` will be created and all tables streamed by the connector will be replicated under that schema.
 ```sql
-postgres=# set search_path=public,testdb;
+postgres=# set search_path=testdb;
 SET
 postgres=# \d
                   List of relations
  Schema |          Name           |   Type   | Owner
 --------+-------------------------+----------+--------
- public | synchdb_att_view        | view     | ubuntu
- public | synchdb_attribute       | table    | ubuntu
- public | synchdb_conninfo        | table    | ubuntu
- public | synchdb_objmap          | table    | ubuntu
- public | synchdb_state_view      | view     | ubuntu
- public | synchdb_stats_view      | view     | ubuntu
  testdb | customers               | table    | ubuntu
  testdb | customers_id_seq        | sequence | ubuntu
  testdb | orders                  | table    | ubuntu
@@ -70,7 +64,6 @@ postgres=# \d
  testdb | products                | table    | ubuntu
  testdb | products_id_seq         | sequence | ubuntu
  testdb | products_on_hand        | table    | ubuntu
-(13 rows)
 
 ```
 
@@ -83,7 +76,6 @@ postgres=# select * from synchdb_state_view where name='sqlserverconn';
 ----------------------------------------------------------------------
  sqlserverconn | sqlserver      | 526290 | change data capture | polling | no error | {"event_serial_no":1,"commit
 _lsn":"0000002b:000004d8:0004","change_lsn":"0000002b:000004d8:0003"}
-(1 row
 
 ```
 

@@ -1,4 +1,4 @@
-# Oracle CDC 到 PostgreSQL
+# Oracle -> PostgreSQL
 
 ## 为 SynchDB 准备 Oracle 数据库
 
@@ -16,12 +16,12 @@ ALTER TABLE products ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS;
 
 ## 创建 Oracle 连接器
 
-创建一个连接器，指向 Oracle 中 `FREE` 数据库下的所有表。
+创建一个连接器，指向 Oracle 中 `FREE` 数据库和 `DBZUSER` schema 下的所有表。
 ```sql
 SELECT
 synchdb_add_conninfo(
 'oracleconn','127.0.0.1',1521,
-'c##dbzuser','dbz','FREE','postgres',
+'DBZUSER','dbz','FREE','DBZUSER',
 'null','null','oracle');
 ```
 
@@ -49,20 +49,13 @@ postgres=# select * from synchdb_state_view where name='oracleconn';
 
 将创建一个名为“inventory”的新模式，并且连接器流式传输的所有表都将在该模式下复制。
 ```sql
-postgres=# set search_path=public,free;
+postgres=# set search_path=free;
 SET
 postgres=# \d
               List of relations
  Schema |        Name        | Type  | Owner
 --------+--------------------+-------+--------
  free   | orders             | table | ubuntu
- public | synchdb_att_view   | view  | ubuntu
- public | synchdb_attribute  | table | ubuntu
- public | synchdb_conninfo   | table | ubuntu
- public | synchdb_objmap     | table | ubuntu
- public | synchdb_state_view | view  | ubuntu
- public | synchdb_stats_view | view  | ubuntu
-(7 rows)
 
 ```
 初始快照完成后，如果至少接收并处理了一个后续更改，则连接器阶段应从“初始快照”更改为“更改数据捕获”。
@@ -74,8 +67,6 @@ postgres=# select * from synchdb_state_view where name='oracleconn';
 -------------------------------------------------------
  oracleconn | oracle         | 528414 | change data capture | polling | no error | {"commit_scn":"3118146:1:02001
 f00c0020000","snapshot_scn":"3081987","scn":"3118125"}
-(1 row)
-
 
 ```
 这意味着连接器现在正在流式传输指定表的新更改。以“initial”模式重启连接器将从上次成功点开始继续复制，并且不会重新运行初始快照。

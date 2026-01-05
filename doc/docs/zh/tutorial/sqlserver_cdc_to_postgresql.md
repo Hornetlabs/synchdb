@@ -1,4 +1,4 @@
-# SQL Server CDC 到 PostgreSQL
+# SQL Server -> PostgreSQL
 
 ## 为 SynchDB 准备 SQL Server 数据库
 

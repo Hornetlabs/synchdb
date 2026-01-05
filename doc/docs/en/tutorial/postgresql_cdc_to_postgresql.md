@@ -1,28 +1,18 @@
-# Oracle -> PostgreSQL
+# Postgres -> Postgres
 
-## Prepare Oracle Database for SynchDB
+## Prepare PostgreSQL Database for SynchDB
 
-Before SynchDB can be used to replicate from Oracle, Oracle needs to be configured according to the procedure outlined [here](../../getting-started/remote_database_setups/)
+Before SynchDB can be used to replicate from PotgreSQK, PostgreSQL server needs to be configured according to the procedure outlined [here](../../getting-started/remote_database_setups/)
 
-Please ensure that supplemental log data is enabled for all columns for each desired table to be replicated by SynchDB. This is needed for SynchDB to correctly handle UPDATE and DELETE oeprations.
+## Create a PostgreSQL Connector
 
-For example, the following enables supplemental log data for all columns for `customer` and `products` table. Please add more tables as needed.
-
-```sql
-ALTER TABLE customer ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS;
-ALTER TABLE products ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS;
-... etc
-```
-
-## Create a Oracle Connector
-
-Create a connector that targets all the tables under `FREE` database and `DBZUSER` schema in Oracle.
+Create a connector that targets all the tables under database `postgres` and schema `public`.
 ```sql
 SELECT 
   synchdb_add_conninfo(
-    'oracleconn', '127.0.0.1', 1521, 
-    'DBZUSER', 'dbz', 'FREE', 'DBZUSER', 
-    'null', 'null', 'oracle');
+    'pgconn', '127.0.0.1', 5432, 
+    'myuser', 'mypass', 'postgres', 'public', 
+    'null', 'null', 'postgres');
 ```
 
 ## Initial Snapshot + CDC
@@ -30,43 +20,43 @@ SELECT
 Start the connector using `initial` mode will perform the initial snapshot of all designated tables (all in this case). After this is completed, the change data capture (CDC) process will begin to stream for new changes.
 
 ```sql
-SELECT synchdb_start_engine_bgw('oracleconn', 'initial');
+SELECT synchdb_start_engine_bgw('pgconn', 'initial');
 
 or 
 
-SELECT synchdb_start_engine_bgw('oracleconn');
+SELECT synchdb_start_engine_bgw('pgconn');
 ```
 
 The stage of this connector should be in `initial snapshot` the first time it runs:
 ```sql
 postgres=# select * from synchdb_state_view where name='oracleconn';
-    name    | connector_type |  pid   |      stage       |  state  |   err    |       last_dbz_offset
-------------+----------------+--------+------------------+---------+----------+-----------------------------
- oracleconn | oracle         | 528146 | initial snapshot | polling | no error | offset file not flushed yet
+  name  | connector_type |  pid   |      stage       |  state  |   err    |       last_dbz_offset
+--------+----------------+--------+------------------+---------+----------+-----------------------------
+ pgconn | postgres       | 528746 | initial snapshot | polling | no error | offset file not flushed yet
 
 ```
 
-A new schema called `inventory` will be created and all tables streamed by the connector will be replicated under that schema.
+A new schema called `postgres` will be created and all tables streamed by the connector will be replicated under that schema.
 ```sql
-postgres=# set search_path=free;
+postgres=# set search_path=postgres;
 SET
 postgres=# \d
               List of relations
- Schema |        Name        | Type  | Owner
---------+--------------------+-------+--------
- free   | orders             | table | ubuntu
+  Schema  |        Name        | Type  | Owner
+----------+--------------------+-------+--------
+ postgres | orders             | table | ubuntu
 
 ```
 
 After the initial snapshot is completed, and at least one subsequent changes is received and processed, the connector stage shall change from `initial snapshot` to `Change Data Capture`.
 ```sql
 postgres=# select * from synchdb_state_view where name='oracleconn';
-    name    | connector_type |  pid   |        stage        |  state  |   err    |
+  name  | connector_type |  pid   |        stage        |  state  |   err    |
     last_dbz_offset
-------------+----------------+--------+---------------------+---------+----------+-------------------------------
+--------+----------------+--------+---------------------+---------+----------+-------------------------------
 -------------------------------------------------------
- oracleconn | oracle         | 528414 | change data capture | polling | no error | {"commit_scn":"3118146:1:02001
-f00c0020000","snapshot_scn":"3081987","scn":"3118125"}
+ pgconn | postgres       | 528746 | change data capture | polling | no error | {"lsn_proc":37051152,"messageType":"INSERT","lsn_commit":36989040,"lsn":3705
+1152,"txId":1007,"ts_usec":1767208115470483}
 
 ```
 
@@ -77,7 +67,7 @@ This means that the connector is now streaming for new changes of the designated
 Start the connector using `initial_only` mode will perform the initial snapshot of all designated tables (all in this case) only and will not perform CDC after.
 
 ```sql
-SELECT synchdb_start_engine_bgw('oracleconn', 'initial_only');
+SELECT synchdb_start_engine_bgw('pgconn', 'initial_only');
 
 ```
 
@@ -88,7 +78,7 @@ The connector would still appear to be `polling` from the connector but no chang
 Start the connector using `no_data` mode will perform the schema capture only, build the corresponding tables in PostgreSQL and it does not replicate existing table data (skip initial snapshot). After the schema capture is completed, the connector goes into CDC mode and will start capture subsequent changes to the tables.
 
 ```sql
-SELECT synchdb_start_engine_bgw('oracleconn', 'no_data');
+SELECT synchdb_start_engine_bgw('pgconn', 'no_data');
 
 ```
 
@@ -99,7 +89,7 @@ Restarting the connector in `no_data` mode will not rebuild the schema again, an
 Start the connector using `never` will skip schema capture and initial snapshot entirely and will go to CDC mode to capture subsequent changes. Please note that the connector expects all the capture tables have been created in PostgreSQL prior to starting in `never` mode. If the tables do not exist, the connector will encounter an error when it tries to apply a CDC change to a non-existent table.
 
 ```sql
-SELECT synchdb_start_engine_bgw('oracleconn', 'never');
+SELECT synchdb_start_engine_bgw('pgconn', 'never');
 
 ```
 
@@ -110,7 +100,7 @@ Restarting the connector in `never` mode will resume CDC since the last successf
 Start the connector using `always` mode will always capture the schemas of capture tables, always redo the initial snapshot and then go to CDC. This is similar to a reset button because everything will be rebuilt using this mode. Use it with caution especially when you have large number of tables being captured, which could take a long time to finish. After the rebuild, CDC resumes as normal.
 
 ```sql
-SELECT synchdb_start_engine_bgw('oracleconn', 'always');
+SELECT synchdb_start_engine_bgw('pgconn', 'always');
 
 ```
 
@@ -120,7 +110,7 @@ This example makes the connector only redo the initial snapshot of `inventory.cu
 ```sql
 UPDATE synchdb_conninfo 
 SET data = jsonb_set(data, '{snapshottable}', '"free.customers"') 
-WHERE name = 'oracleconn';
+WHERE name = 'pgconn';
 ```
 
 After the initial snapshot, CDC will begin. Restarting a connector in `always` mode will repeat the same process described above.

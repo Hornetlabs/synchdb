@@ -1,4 +1,4 @@
-# MySQL CDC 到 PostgreSQL
+# MySQL -> PostgreSQL
 
 ## 为 SynchDB 准备 MySQL 数据库
 
@@ -33,15 +33,14 @@ postgres=# select * from synchdb_state_view;
 et
 ------------+----------------+--------+------------------+---------+----------+-----------------------------------
 -------------------------
- mysqlconn2 | mysql          | 522195 | initial snapshot | polling | no error | {"ts_sec":1750375008,"file":"mysql
+ mysqlconn  | mysql          | 522195 | initial snapshot | polling | no error | {"ts_sec":1750375008,"file":"mysql
 -bin.000003","pos":1500}
-(1 row)
 
 ```
 
 A new schema called `inventory` will be created and all tables streamed by the connector will be replicated under that schema.
 ```sql
-postgres=# set search_path=public,inventory;
+postgres=# set search_path=inventory;
 SET
 postgres=# \d
                     List of relations
@@ -58,13 +57,6 @@ postgres=# \d
  inventory | products                | table    | ubuntu
  inventory | products_id_seq         | sequence | ubuntu
  inventory | products_on_hand        | table    | ubuntu
- public    | synchdb_att_view        | view     | ubuntu
- public    | synchdb_attribute       | table    | ubuntu
- public    | synchdb_conninfo        | table    | ubuntu
- public    | synchdb_objmap          | table    | ubuntu
- public    | synchdb_state_view      | view     | ubuntu
- public    | synchdb_stats_view      | view     | ubuntu
-(17 rows)
 
 ```
 
@@ -75,9 +67,8 @@ postgres=# select * from synchdb_state_view;
 ffset
 ------------+----------------+--------+---------------------+---------+----------+--------------------------------
 ----------------------------
- mysqlconn2 | mysql          | 522195 | change data capture | polling | no error | {"ts_sec":1750375008,"file":"my
+ mysqlconn  | mysql          | 522195 | change data capture | polling | no error | {"ts_sec":1750375008,"file":"my
 sql-bin.000003","pos":1500}
-(1 row)
 
 ```
 
@@ -98,8 +89,7 @@ SELECT synchdb_start_engine_bgw('mysqlconn', 'initial_only');
 postgres=# select * from synchdb_state_view;
     name    | connector_type |  pid   |      stage       |  state  |   err    |       last_dbz_offset
 ------------+----------------+--------+------------------+---------+----------+-----------------------------
- mysqlconn2 | mysql          | 522330 | initial snapshot | polling | no error | offset file not flushed yet
-(1 row)
+ mysqlconn  | mysql          | 522330 | initial snapshot | polling | no error | offset file not flushed yet
 
 ```
 
