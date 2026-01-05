@@ -9,3 +9,9 @@ SynchDB 在一个事务内处理一批变更（也叫一个 batch）。这意味
 ![img](../../images/synchdb-batch-new.jpg)
 
 如果一批更改在 PostgreSQL 上部分成功，则会导致事务回滚，并且 SynchDB 不会通知 Debezium 运行器批处理已完成。当连接器重新启动时，同一批将再次恢复处理。
+
+## **Openlog Replicator Connector 批量处理**
+
+由於 Openlog Replicator Connector 不依賴 Debezium 來協調變更事件的批次處理，其批次完全取決於 OLR 用戶端的原始讀取緩衝區大小（由 GUC `synchdb.olr_read_buffer_size` 配置）。客戶端會嘗試從套接字讀取盡可能多的數據，這些數據可能包含多個變更事件。讀取緩衝區中出現的多個「完整」變更事件將被視為相同批次，並在同一個 PostgreSQL 事務中執行。如果讀取緩衝區包含不完整的變更事件，則該事件不會被計入目前批次。預計下次讀取時，該不完整變更事件的剩餘資料將會到達，並成為下一批變更事件的一部分。
+
+因此，增加 `synchdb.olr_read_buffer_size` 的值會增加批次大小。

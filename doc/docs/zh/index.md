@@ -46,6 +46,18 @@ SynchDB 的核心集成了 Debezium 嵌入式引擎，这是一个基于 Java �
 - Java Runtime Environment（JRE）17 或更高版本
 - libprotobuf-c v1.5.2（如果需要 Openlog Replicator 支持）
 
+## **所需的第三方库和插件**
+
+- Java 執行時期環境 (JRE) 17 或更高版本
+- pgcrypto 擴充 - 用於加密和解密憑證
+
+## **可選的第三方庫和插件**
+
+- libprotobuf-c v1.5.2（已測試版本）（Openlog Replicator 支援可選）
+- oracle_fdw 擴充功能 v2.8.0（已測試版本）（如果您選擇使用基於 fdw 的初始快照來建立 OLR 或 Oracle 連接器，則需要此擴充）
+- mysql_fdw 擴充功能 v2.9.3（已測試版本）（如果您選擇使用基於 fdw 的初始快照來建立 MySQL 連接器，則需要此擴充功能）
+- postgres_fdw 擴充功能 -（如果您需要為 PostgreSQL 連接器建立初始快照，則需要此擴充功能）
+
 ## **版本历史**
 
 - [SynchDB v1.3](https://github.com/Hornetlabs/synchdb/releases/tag/v1.3)
