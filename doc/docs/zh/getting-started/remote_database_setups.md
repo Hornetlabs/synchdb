@@ -400,3 +400,33 @@ local replication <youruser> trust
 host replication <youruser> 127.0.0.1/32 trust
 host replication <youruser> ::1/128 trust
 ```
+
+### 安裝 DDL 觸發器和自訂 LSN 視圖
+
+若要將使用者表 DDL 邏輯複製到 SynchDB，您必須在來源 PostgreSQL 資料庫中安裝 DDL 觸發器。此外，您還需要建立自訂視圖，該視圖會傳回來源資料庫中的目前 LSN，以便 SynchDB 可以在快照過程中透過 FDW 檢索它。
+
+SynchDB 原始碼庫包含一個用於設定的 SQL 腳本和一個用於清理的腳本。請確保在來源 PostgreSQL 資料庫中運行它們：
+
+通过 psql 會話安裝 DDL 觸發器函數：
+
+```
+
+psql -U <user> -d <database> < postgres-connector-src-ddl-setup.sql
+
+```
+
+通过 psql 會話清理 DDL 觸發器函數：
+
+```
+
+psql -U <user> -d <database> < postgres-connector-src-ddl-teardown.sql
+
+```
+
+如果您不需要 DDL 複製，則無需在來源資料庫安裝此 DDL 觸發器函數。但是，如果您想要對來源資料庫（目前表格 + 資料）進行目前快照，則需要目前 LSN 視圖。您無需載入上述 SQL 腳本，即可將其新增至來源資料庫。請確保此視圖是在 `public` 模式下建立的。
+
+```sql
+
+CREATE VIEW synchdb_wal_lsn AS SELECT pg_current_wal_lsn()::pg_lsn AS wal_lsn;
+
+```

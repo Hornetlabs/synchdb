@@ -193,9 +193,9 @@ nav:
    - MySQL -> PostgreSQL: tutorial/mysql_cdc_to_postgresql.md
    - SQL Server -> PostgreSQL: tutorial/sqlserver_cdc_to_postgresql.md
    - Oracle -> PostgreSQL: tutorial/oracle_cdc_to_postgresql.md
-   - Selective Table Replication: tutorial/selective_table_sync.md
+   # - Selective Table Replication: tutorial/selective_table_sync.md
    # - Data Transformation: tutorial/data_transformation.md
-   - Table Snapshot and Re-snapshot: tutorial/table_snapshot_resnapshot.md
+   # - Table Snapshot and Re-snapshot: tutorial/table_snapshot_resnapshot.md
    # - Schema Only Synchronization: tutorial/schema_only_sync.md
    # - Multi Source Replication: tutorial/multi_source_replication.md
    - Object Mapping Workflow: tutorial/object_mapping_workflow.md

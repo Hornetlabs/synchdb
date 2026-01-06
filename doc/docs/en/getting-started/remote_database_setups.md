@@ -390,3 +390,29 @@ local   replication     <youruser>                          trust
 host    replication     <youruser>  127.0.0.1/32            trust   
 host    replication     <youruser>  ::1/128                 trust 
 ```
+
+### Install DDL Trigger and Custom LSN View
+To allow logical replication of user table DDLs to SynchDB, you must install a DDL trigger at source PostgreSQL database. Also, you need to create a custom view that returns the current LSN at the source database so that SycnhDB can retrieve it via FDW during snapshot process. 
+
+SynchDB source repo contains a SQL script to set up and a script to tear down. Make sure to run them at the source PostgreSQL database:
+
+Install DDL trigger function and current LSN view via a psql session:
+
+```
+psql -U <user> -d <database> < postgres-connector-src-ddl-setup.sql
+
+``` 
+
+Tear down DDL trigger function via a psql session:
+
+```
+psql -U <user> -d <database> < postgres-connector-src-ddl-teardown.sql
+
+``` 
+
+If you do not need DDL replication, then you do not need to install this DDL trigger function at the source. The current LSN view, however, is needed if you would like to take a current snapshot of the source database (current table + data). You can add it to the source database like this without loading the SQL script above. Please ensure this VIEW is created under `public` schema.
+
+```sql
+CREATE VIEW synchdb_wal_lsn AS SELECT pg_current_wal_lsn()::pg_lsn AS wal_lsn;
+```
+

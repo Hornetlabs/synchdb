@@ -15,7 +15,14 @@ SELECT
     'null', 'null', 'postgres');
 ```
 
-## Initial Snapshot + CDC
+## Initial Snapshot
+"Initial snapshot" (or table snapshot) in SynchDB means to copy table schema plus initial data for all designated tables. This is similar to the term "table sync" in PostgreSQL logical replication. When a connector is started using the default `initial` mode, it will automatically perform the initial snapshot before going to Change Data Capture (CDC) stage. This can be omitted entirely with mode `never` or partially omitted with mode `no_data`. See [here](../../user-guide/start_stop_connector/) for all snapshot options.
+
+Once the initial snapshot is completed, the connector will not do it again upon subsequent restarts and will just resume with CDC since the last incomplete offset. This behavior is controled by the metadata files managed by Debezium engine. See [here](../../architecture/metadata_files/) for more about metadata files.
+
+## Different Connector Launch Modes
+
+### Initial Snapshot + CDC
 
 Start the connector using `initial` mode will perform the initial snapshot of all designated tables (all in this case). After this is completed, the change data capture (CDC) process will begin to stream for new changes.
 
@@ -62,7 +69,7 @@ postgres=# select * from synchdb_state_view where name='oracleconn';
 
 This means that the connector is now streaming for new changes of the designated tables. Restarting the connector in `initial` mode will proceed replication since the last successful point and initial snapshot will not be re-run.
 
-## Initial Snapshot Only and no CDC
+### Initial Snapshot Only and no CDC
 
 Start the connector using `initial_only` mode will perform the initial snapshot of all designated tables (all in this case) only and will not perform CDC after.
 
@@ -73,7 +80,7 @@ SELECT synchdb_start_engine_bgw('pgconn', 'initial_only');
 
 The connector would still appear to be `polling` from the connector but no change will be captured because Debzium internally has stopped the CDC. You have the option to shut it down. Restarting the connector in `initial_only` mode will not rebuild the tables as they have already been built.
 
-## Capture Table Schema Only + CDC
+### Capture Table Schema Only + CDC
 
 Start the connector using `no_data` mode will perform the schema capture only, build the corresponding tables in PostgreSQL and it does not replicate existing table data (skip initial snapshot). After the schema capture is completed, the connector goes into CDC mode and will start capture subsequent changes to the tables.
 
@@ -84,18 +91,7 @@ SELECT synchdb_start_engine_bgw('pgconn', 'no_data');
 
 Restarting the connector in `no_data` mode will not rebuild the schema again, and it will resume CDC since the last successful point.
 
-## CDC only
-
-Start the connector using `never` will skip schema capture and initial snapshot entirely and will go to CDC mode to capture subsequent changes. Please note that the connector expects all the capture tables have been created in PostgreSQL prior to starting in `never` mode. If the tables do not exist, the connector will encounter an error when it tries to apply a CDC change to a non-existent table.
-
-```sql
-SELECT synchdb_start_engine_bgw('pgconn', 'never');
-
-```
-
-Restarting the connector in `never` mode will resume CDC since the last successful point.
-
-## Always do Initial Snapahot + CDC
+### Always do Initial Snapahot + CDC
 
 Start the connector using `always` mode will always capture the schemas of capture tables, always redo the initial snapshot and then go to CDC. This is similar to a reset button because everything will be rebuilt using this mode. Use it with caution especially when you have large number of tables being captured, which could take a long time to finish. After the rebuild, CDC resumes as normal.
 
@@ -114,3 +110,15 @@ WHERE name = 'pgconn';
 ```
 
 After the initial snapshot, CDC will begin. Restarting a connector in `always` mode will repeat the same process described above.
+
+## Possible Snapshot Modes for Postgres Connector
+
+* initial (default)
+* initial_only
+* no_data
+* always
+* schemasync
+
+## Preview Source and Destination Table Relationships with schemasync mode
+
+Before attempting to do an initial snapshot of current table and data, which may be huge, it is possible to "preview" all the tables and data type mappings between source and destination tables before the actual data migration. This gives you an opportunity to modify a data type mapping, or an object name before actual migration happens. This can be done with the special "schemasync" initial snapshot mode. Refer to [object mapping workflow](../../tutorial/object_mapping_workflow/) for a detailed example.

@@ -14,8 +14,8 @@ SELECT synchdb_add_conninfo(
     'mysqluser',
     'mysqlpwd',
     'inventory',
-    'postgres',
-    '',
+    'null',
+    'null',
     'mysql');
 
 SELECT synchdb_start_engine_bgw('mysqlconn', 'schemasync');
