@@ -252,16 +252,23 @@ CREATE OR REPLACE FUNCTION synchdb_set_snapstats(name, bigint, bigint, bigint, b
 AS '$libdir/synchdb'
 LANGUAGE C IMMUTABLE STRICT;
 
-CREATE OR REPLACE FUNCTION read_snapshot_table_list(file_uri text)
+CREATE OR REPLACE FUNCTION read_snapshot_table_list(
+    file_uri    text,
+    p_conn_type  text,
+    p_desired_db text
+)
 RETURNS text
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    file_path text;
+    file_path    text;
     file_content text;
-    json_data jsonb;
-    table_list text;
+    json_data    jsonb;
+    table_list   text;
+    v_is_mysql   boolean;
 BEGIN
+    v_is_mysql := (lower(coalesce(p_conn_type, '')) = 'mysql');
+
     -- strip the leading "file:" prefix
     IF position('file:' IN file_uri) = 1 THEN
         file_path := substr(file_uri, 6);
@@ -275,10 +282,25 @@ BEGIN
     -- parse it as JSONB
     json_data := file_content::jsonb;
 
-    -- concatenate the array elements into a comma-separated list
-    SELECT string_agg(value::text, ',')
-    INTO table_list
-    FROM jsonb_array_elements_text(json_data->'snapshot_table_list');
+    -- Build comma-separated list, normalizing entries:
+    --   mysql: db.table
+    --   non-mysql: schema.table => db.schema.table
+    SELECT string_agg(norm, ',')
+      INTO table_list
+    FROM (
+      SELECT
+        CASE
+          WHEN v_is_mysql THEN x
+          ELSE
+            CASE
+              WHEN array_length(regexp_split_to_array(trim(x), '\.'), 1) = 2
+              THEN format('%s.%s', p_desired_db, trim(x))  -- prepend db.
+              ELSE trim(x)  -- keep 3-part (or anything else) as-is
+            END
+        END AS norm
+      FROM jsonb_array_elements_text(json_data->'snapshot_table_list') AS t(x)
+      WHERE trim(x) <> ''
+    ) s;
 
     RETURN table_list;
 END;
@@ -2381,7 +2403,7 @@ BEGIN
   ----------------------------------------------------------------------
   SELECT (data->>'connector')::name,
          data->>'srcdb',
-         data->'snapshottable'
+		 COALESCE( NULLIF(data->'snapshottable', 'null'::jsonb), data->'table')
     INTO v_conn_type, v_srcdb, v_snapcfg
   FROM synchdb_conninfo
   WHERE name = p_connector_name;
@@ -2437,7 +2459,7 @@ BEGIN
       IF v_type = 'string' THEN
         v_snaptext := trim(both '"' from v_snapcfg::text);
         IF position('file:' IN v_snaptext) = 1 THEN
-          v_snaptext := read_snapshot_table_list(v_snaptext);
+          v_snaptext := read_snapshot_table_list(v_snaptext, v_conn_type::text, p_desired_db::text);
         END IF;
       ELSIF v_type = 'array' THEN
         SELECT string_agg(x, ',')
@@ -2447,6 +2469,31 @@ BEGIN
         RAISE EXCEPTION 'synchdb_conninfo[%.data->snapshottable] must be string or array, got %',
                         p_connector_name, v_type;
       END IF;
+
+	  -- normalize
+      IF lower(v_conn_type::text) <> 'mysql' THEN
+        SELECT string_agg(
+                 CASE
+                   WHEN array_length(parts,1) = 2 THEN format('%s.%s.%s',
+                                                             p_desired_db::text,
+                                                             parts[1],
+                                                             parts[2])
+                   WHEN array_length(parts,1) = 3 THEN trim(x)  -- keep as-is if someone still provides 3 parts
+                   ELSE NULL
+                 END,
+                 ','
+               )
+          INTO v_snaptext
+        FROM (
+           SELECT trim(x) AS x,
+                 regexp_split_to_array(trim(x), '\.') AS parts
+             FROM regexp_split_to_table(v_snaptext, '\s*,\s*') AS t(x)
+           WHERE trim(x) <> ''
+        ) s
+        WHERE array_length(parts,1) IN (2,3);
+      END IF;
+	 
+	  RAISE NOTICE 'Normalized snapshottable list: %', v_snaptext;
 
       -- Parse CSV into tmp_snap_list allowing "db.tbl" or "db.schema.tbl"
       INSERT INTO tmp_snap_list(db, schem, tbl)
