@@ -1,6 +1,6 @@
 # Oracle -> PostgreSQL
 
-## 为 SynchDB 准备 Oracle 数据库
+## **为 SynchDB 准备 Oracle 数据库**
 
 在使用 SynchDB 从 Oracle 复制之前，需要按照[此处](../../getting-started/remote_database_setups/) 概述的步骤配置 Oracle。
 
@@ -14,7 +14,7 @@ ALTER TABLE products ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS;
 ... etc
 ```
 
-## 创建 Oracle 连接器
+## **创建 Oracle 连接器**
 
 创建一个连接器，指向 Oracle 中 `FREE` 数据库和 `DBZUSER` schema 下的所有表。
 ```sql
@@ -25,15 +25,15 @@ synchdb_add_conninfo(
 'null','null','oracle');
 ```
 
-## 初始快照
+## **初始快照**
 
-SynchDB 中的「初始快照」（或表快照）是指複製所有指定表的表結構和初始資料。這類似於 PostgreSQL 邏輯複製中的「表同步」。當使用預設的 `initial` 模式啟動連接器時，它會在進入變更資料擷取 (CDC) 階段之前自動執行初始快照。可以使用 `never` 模式完全省略此步驟，或使用 `no_data` 模式部分省略此步驟。有關所有快照選項，請參閱[此處](../../user-guide/start_stop_connector/)。
+SynchDB 中的「初始快照」（或表快照）是指複製所有指定表的表結構和初始資料。這類似於 PostgreSQL 邏輯複製中的「表同步」。當使用預設的 `initial` 模式啟動連接器時，它會在進入變更資料擷取 (CDC) 階段之前自動執行初始快照。可以使用 `no_data` 模式部分省略此步驟。有關所有快照選項，請參閱[此處](../../user-guide/start_stop_connector/)。
 
 初始快照完成後，連接器在後續重新啟動時不會再次執行此操作，而是直接從上次未完成的偏移量處恢復 CDC。此行為由 Debezium 引擎管理的元資料檔案控制。有關元資料檔案的更多信息，請參閱[此處](../../architecture/metadata_files/)。
 
-## 不同的連接器啟動模式
+## **不同的連接器啟動模式**
 
-### 初始快照 + CDC
+### **初始快照 + CDC**
 
 使用 `initial` 模式启动连接器将对所有指定表（在本例中为全部）执行初始快照。完成后，变更数据捕获 (CDC) 进程将开始流式传输新的变更。
 
@@ -79,7 +79,7 @@ f00c0020000","snapshot_scn":"3081987","scn":"3118125"}
 ```
 这意味着连接器现在正在流式传输指定表的新更改。以“initial”模式重启连接器将从上次成功点开始继续复制，并且不会重新运行初始快照。
 
-### 仅初始快照，无CDC
+### **仅初始快照，无CDC**
 
 使用“initial_only”模式启动连接器将仅对所有指定表（在本例中为所有表）执行初始快照，之后将不再执行CDC。
 
@@ -90,7 +90,7 @@ SELECT synchdb_start_engine_bgw('oracleconn', 'initial_only');
 
 连接器仍然会显示正在“轮询”，但由于Debzium内部已停止CDC，因此不会捕获任何更改。您可以选择关闭它。以“initial_only”模式重启连接器不会重建表，因为它们已经构建好了。
 
-### 仅捕获表模式 + CDC
+### **仅捕获表模式 + CDC**
 
 使用 `no_data` 模式启动连接器将仅执行模式捕获，在 PostgreSQL 中构建相应的表，并且不会复制现有表数据（跳过初始快照）。模式捕获完成后，连接器将进入 CDC 模式，并开始捕获对表的后续更改。
 
@@ -101,7 +101,7 @@ SELECT synchdb_start_engine_bgw('oracleconn', 'no_data');
 
 在 `no_data` 模式下重新启动连接器将不会再次重建模式，并且它将从上次成功点恢复 CDC。
 
-### 始终执行初始快照 + CDC
+### **始终执行初始快照 + CDC**
 
 使用 `always` 模式启动连接器将始终捕获捕获表的模式，始终重做初始快照，然后转到 CDC。这类似于重置按钮，因为使用此模式将重建所有内容。请谨慎使用此模式，尤其是在捕获大量表时，这可能需要很长时间才能完成。重建后，CDC 将恢复正常。
 
@@ -112,7 +112,7 @@ SELECT synchdb_start_engine_bgw('oracleconn', 'always');
 
 初始快照完成后，持续数据捕获 (CDC) 将开始。在 `always` 模式下重新启动连接器将重复上述过程。
 
-## Oracle 連接器的可用快照模式
+## **Oracle 連接器的可用快照模式**
 
 * initial (default)
 * initial_only
@@ -120,7 +120,7 @@ SELECT synchdb_start_engine_bgw('oracleconn', 'always');
 * always
 * schemasync
 
-## 使用 schemasync 模式預覽來源表和目標表關係
+## **使用 schemasync 模式預覽來源表和目標表關係**
 
 在嘗試對當前表和資料（可能非常龐大）進行初始快照之前，可以在實際資料遷移之前「預覽」來源表和目標表之間的所有表和資料類型對應。這樣，您就有機會在實際遷移之前修改資料類型對應或物件名稱。這可以透過特殊的「schemasync」初始快照模式來實現。有關詳細範例，請參閱[对象映射工作流程](../../tutorial/object_mapping_workflow/)。
 
