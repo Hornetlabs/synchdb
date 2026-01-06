@@ -317,3 +317,116 @@ BEGIN
     END LOOP;
 END;
 ```
+
+## **設定 SynchDB 的 Postgres 連接器**
+
+需要配置 PostgreSQL 伺服器，使其用作 SynchDB 的資料庫來源。
+
+### GUC 設定
+
+```
+
+wal_level = logical
+max_wal_senders = << 可能需要根據您的需求進行調整 - 預設值為 10 >>
+max_replication_slots = << 可能需要根據您的需求進行調整 - 預設值為 10 >>
+wal_writer_delay = << 如果 `synchronous_commit` 的值不是 “on”，建議設定為 10ms。預設值為 200ms >>
+
+```
+
+### 權限設定
+
+建立一個具有複製權限的新使用者：
+
+```sql
+
+CREATE ROLE <name> REPLICATION LOGIN;
+
+```
+
+SynchDB 從為 PostgreSQL 來源表建立的發布中取得來源表的變更事件流。發布包含從一個或多個表產生的經過篩選的變更事件集。每個發布中的數據都根據發布規範進行過濾。規格可以由 PostgreSQL 資料庫管理員或 Debezium 連接器建立。為了允許 SynchDB Postgres 連接器建立發布並指定要複製到其中的數據，連接器必須以資料庫中的特定權限運行。
+
+有幾種方法可以確定如何建立發布。通常，最好在設定連接器之前，為要捕獲的表手動建立發布。但是，您可以設定環境，使 SynchDB 自動建立發布並指定要新增到其中的資料。
+
+SynchDB 使用包含清單屬性（當使用 `synchdb_add_conninfo` 建立連接器時）來指定如何將資料插入到發布中。
+
+要使 SynchDB 建立 PostgreSQL 發布，它必須以具有以下權限的使用者身分執行：
+
+* 資料庫中的複製權限，用於將表格新增至發布。
+* 資料庫的 CREATE 權限，用於新增發布。
+* 需要對錶擁有 SELECT 權限才能複製初始表資料。表所有者自動擁有對錶的 SELECT 權限。
+
+若要將表格新增至發布中，使用者必須是該表格的擁有者。但由於來源表已存在，因此需要一種機制與原始所有者共享所有權。若要啟用共享所有權，您可以建立 PostgreSQL 複製群組，然後將現有表格擁有者和複製使用者新增至該群組。
+
+步驟：
+
+* 建立複製組。
+
+```
+
+CREATE ROLE <replication_group>;
+
+```
+
+* 將表格的原始擁有者新增至該群組。
+
+```
+
+GRANT REPLICATION_GROUP TO <original_owner>;
+
+```
+
+* 將 Debezium 複製使用者新增至該群組。
+
+```
+
+GRANT REPLICATION_GROUP TO <replication_user>;
+
+```
+
+* 將表格的所有權轉移給 <replication_group>。
+
+```
+
+ALTER TABLE <table_name> OWNER TO REPLICATION_GROUP;
+
+```
+
+### pg_hba 設定
+
+要使 Debezium 能夠複製 PostgreSQL 數據，您必須配置資料庫以允許與執行 PostgreSQL 連接器的主機進行複製。若要指定允許與資料庫複製的用戶端，請在 PostgreSQL 基於主機的驗證檔案 `pg_hba.conf` 新增條目。有關 pg_hba.conf 文件的更多信息，請參閱 [PostgreSQL 文件](https://www.postgresql.org/docs/current/static/datatype-net-types.html)。
+
+```
+local replication <youruser> trust
+host replication <youruser> 127.0.0.1/32 trust
+host replication <youruser> ::1/128 trust
+```
+
+### 安裝 DDL 觸發器和自訂 LSN 視圖
+
+若要將使用者表 DDL 邏輯複製到 SynchDB，您必須在來源 PostgreSQL 資料庫中安裝 DDL 觸發器。此外，您還需要建立自訂視圖，該視圖會傳回來源資料庫中的目前 LSN，以便 SynchDB 可以在快照過程中透過 FDW 檢索它。
+
+SynchDB 原始碼庫包含一個用於設定的 SQL 腳本和一個用於清理的腳本。請確保在來源 PostgreSQL 資料庫中運行它們：
+
+通过 psql 會話安裝 DDL 觸發器函數：
+
+```
+
+psql -U <user> -d <database> < postgres-connector-src-ddl-setup.sql
+
+```
+
+通过 psql 會話清理 DDL 觸發器函數：
+
+```
+
+psql -U <user> -d <database> < postgres-connector-src-ddl-teardown.sql
+
+```
+
+如果您不需要 DDL 複製，則無需在來源資料庫安裝此 DDL 觸發器函數。但是，如果您想要對來源資料庫（目前表格 + 資料）進行目前快照，則需要目前 LSN 視圖。您無需載入上述 SQL 腳本，即可將其新增至來源資料庫。請確保此視圖是在 `public` 模式下建立的。
+
+```sql
+
+CREATE VIEW synchdb_wal_lsn AS SELECT pg_current_wal_lsn()::pg_lsn AS wal_lsn;
+
+```

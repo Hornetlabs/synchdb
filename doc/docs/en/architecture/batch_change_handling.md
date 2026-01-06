@@ -8,4 +8,9 @@ SynchDB processes a batch within one transaction. This means the change events i
 
 ![img](../../images/synchdb-batch-new.jpg)
 
-If a batch of changes are partially successful on PostgreSQL, it would cause the transaction to rollback and SynchDB will not notify Debezium runner about batch completion. When the connector is restarted, the same batch will resume processing again. 
+If a batch of changes are partially successful on PostgreSQL, it would cause the transaction to rollback and SynchDB will not notify Debezium runner about batch completion. When the connector is restarted, the same batch will resume processing again.
+
+## **Batch Handling for Openlog Replicator Connector**
+Since Openlog Replicator Connector does not rely on Debezium to orchestrate batches of change events, its batch processing is determined purely on the OLR client's raw read buffer size (configured by GUC `synchdb.olr_read_buffer_size`). The client tries to read as much data as possible from the socket, which could compose of multiple change events. However many "complete" change events appear in the read buffer are considered in the same batch and will be executed in the same PostgreSQL transaction. If the read buffer contains incomplete change event, it will not be considered in the current batch. It is expected that in the next read, the remaining data of this incomplete change event will arrive and will be part of the next batch of change events.
+
+So, increasing the value of `synchdb.olr_read_buffer_size` increases the batch size.

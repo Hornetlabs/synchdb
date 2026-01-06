@@ -41,11 +41,17 @@ This architecture allows PostgreSQL to leverage the rich ecosystem of Debezium c
 - Oracle: 12c, 19c, 21c, 23ai
 - Openlog Replicator: 1.3.0 ~ 1.8.5
 
-## **Required Third Party Libraries**
+## **Required Third Party Libraries and extensions**
 
 - Java Runtime Environment（JRE) 17 or above
-- libprotobuf-c v1.5.2 (optional for Openlog Replicator support)
-- oracle_fdw v2.8.0 (needed if you choose to use fdw based initial snapshot for OLR connector)
+- pgcrypto extension - for encrypt and decrypt credentials
+
+## **Optional Third Party Libraries and extensions**
+
+- libprotobuf-c v1.5.2 (tested version) (optional for Openlog Replicator support)
+- oracle_fdw extension v2.8.0 (tested version) (needed if you choose to use fdw based initial snapshot for OLR or Oracle connector)
+- mysql_fdw extensions v2.9.3 (tested version) (needed if you choose to use fdw based initial snapshot for MySQL connector)
+- postgres_fdw extension - (needed if you need initial snapshot for PostgreSQL connector)
 
 ## **Version History**
 

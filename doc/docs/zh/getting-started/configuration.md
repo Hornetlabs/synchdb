@@ -33,6 +33,8 @@ SynchDB 在 postgresql.conf 中支持以下 GUC 变量。这些是适用于 Sync
 | synchdb.olr_read_timeout_m | integer | 5000 |（僅影響 OLR 連接器）從套接字讀取時的讀取逾時時間（以毫秒為單位）|
 | synchdb.olr_snapshot_engine | enum | "debezium" | （僅影響 OLR 連接器）指定底層引擎完成初始快照程序。可以是“debezium”或“fdw”。如果選擇“fdw”，則需要確保在 |
 | synchdb.cdc_start_delay_ms | integer | 0 | 初始快照完成後、CDC 流開始前等待的延遲時間。 |
+| synchdb.fdw_migrate_with_subtx | boolean | true | 在 FDW 的快照期間，是否使用子交易遷移表的選項 |
+| synchdb.letter_casing_strategy | enum | "lowercase" | synchdb 應如何處理來自不同数据库源的物件字母大小寫差異。可選值為："lower"（規範化為小寫）、"upper"（規範化為大寫）或 "asis"（保留接收到的任何字母大小寫）。
 
 ## **技术说明**
 
@@ -61,6 +63,9 @@ synchdb.max_connector_workers=false                                     # 最多
 synchdb.error_handling_strategy='retry'                                 # 连接器应在发生错误时重试
 synchdb.dbz_log_leve='error'                                            # Debezium Runner 应仅记录错误消息
 synchdb.log_change_on_error=true                                        # 发生错误时记录 JSON 更改事件
+synchdb.cdc_start_delay_ms=30000                                        # 快照完成後等待 30 秒，CDC 開始前等待
+synchdb.olr_snapshot_engine="fdw"                                       # 使用基於 FDW 的快照引擎完成快照過程
+synchdb.letter_casing_strategy="asis"                                   # 保留原始檔案中所有物件字母的大小寫。
 ```
 
 ## **使用建议**

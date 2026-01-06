@@ -131,9 +131,9 @@ plugins:
             State View: 状态视图
             Start/Stop a Connector: 启动/停止连接器
             Object Mapping Workflow: 对象映射工作流程
-            MySQL CDC to PostgreSQL: MySQL CDC 到 PostgreSQL
-            SQL Server CDC to PostgreSQL: SQL Server CDC 到 PostgreSQL
-            Oracle CDC to PostgreSQL: Oracle CDC 到 PostgreSQL
+            MySQL -> PostgreSQL: MySQL CDC -> PostgreSQL
+            SQL Server -> PostgreSQL: SQL Server CDC -> PostgreSQL
+            Oracle -> PostgreSQL: Oracle CDC -> PostgreSQL
             Table Snapshot and Re-snapshot: 表快照和重新快照
             JMX Monitor Settings: JMX 监视器设置
             JVM Memory Usage: JVM 内存使用情况
@@ -190,12 +190,12 @@ nav:
    - JMX Monitor Settings: monitoring/jmx_monitor.md
    - JMX Exporter Settings: monitoring/jmx_exporter.md
  - Tutorial:
-   - MySQL CDC to PostgreSQL: tutorial/mysql_cdc_to_postgresql.md
-   - SQL Server CDC to PostgreSQL: tutorial/sqlserver_cdc_to_postgresql.md
-   - Oracle CDC to PostgreSQL: tutorial/oracle_cdc_to_postgresql.md
-   - Selective Table Replication: tutorial/selective_table_sync.md
+   - MySQL -> PostgreSQL: tutorial/mysql_cdc_to_postgresql.md
+   - SQL Server -> PostgreSQL: tutorial/sqlserver_cdc_to_postgresql.md
+   - Oracle -> PostgreSQL: tutorial/oracle_cdc_to_postgresql.md
+   # - Selective Table Replication: tutorial/selective_table_sync.md
    # - Data Transformation: tutorial/data_transformation.md
-   - Table Snapshot and Re-snapshot: tutorial/table_snapshot_resnapshot.md
+   # - Table Snapshot and Re-snapshot: tutorial/table_snapshot_resnapshot.md
    # - Schema Only Synchronization: tutorial/schema_only_sync.md
    # - Multi Source Replication: tutorial/multi_source_replication.md
    - Object Mapping Workflow: tutorial/object_mapping_workflow.md

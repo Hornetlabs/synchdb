@@ -31,8 +31,10 @@ SynchDB supports the following GUC variables in postgresql.conf. These are commo
 | synchdb.dbz_logminer_stream_mode | enum | "uncommitted" | The streaming mode for Debezium based Oracle connector. The default is uncommitted, which means all the changes streamed from Oracle via Debezium is uncommitted. This indicates Debezium has to do some work to ensure the integrity of transactions and all associated changes. Setting to "committed" shifts this work on Oralce side |
 | synchdb.olr_connect_timeout_ms | integer | 5000 | (affects OLR connector only) the connect timeout in milliseconds when connecting to openlog replicator service |
 | synchdb.olr_read_timeout_m | integer | 5000 | (affects OLR connector only) the read timeout in milliseconds when reading from a socket |
-| synchdb.olr_snapshot_engine | enum | "debezium" | (affects OLR connector only) the underlining engine to complete the initial snapshot process. Could be "debezium" or "fdw". If "fdw" is selected, you need to ensure "oracle_fdw" is installed prior |
+| synchdb.olr_snapshot_engine | enum | "debezium" | the underlining engine to complete the initial snapshot process. Could be "debezium" or "fdw". If "fdw" is selected, you need to ensure the corresponding FDW is installed prior. For example, for Oracle connector, ensure "oracle_fdw" is preinstalled. |
 | synchdb.cdc_start_delay_ms | integer | 0 | a delay waited after initial snapshot completes and before CDC streaming begins. |
+| synchdb.fdw_migrate_with_subtx | boolean | true | option to use sub transactions to migrate a table during FDW based snapshot |
+| synchdb.letter_casing_strategy | enum | "lowercase" | how should synchdb deal with potentially different object letter casings from different database source. Possible values are: "lower" for normalizing the lower case, "upper" to normalize to upper case, or "asis" to preserve whatever letter casing it receives |
 
 
 ## **Technical Notes**
@@ -63,6 +65,9 @@ synchdb.max_connector_workers=10                                        # 10 con
 synchdb.error_handling_strategy='retry'                                 # connector should retry on error
 synchdb.dbz_log_leve='error'                                            # Debezium Runner should log error messages only
 synchdb.log_change_on_error=true                                        # log JSON change event on error
+synchdb.cdc_start_delay_ms=30000                                        # wait 30s after snapshot completes and before CDC begins
+synchdb.olr_snapshot_engine="fdw"                                       # use FDW based snapshot engine to complete the snapshot process
+synchdb.letter_casing_strategy="asis"                                   # preserve all object letter casings as they appear in the sources
 ```
 
 ## **Usage Recommendations**

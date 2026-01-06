@@ -2,9 +2,45 @@
 
 ## **概述**
 
-所有連接器都支援基於 Debezium 的初始快照，該快照可將遠端表格模式移轉到 PostgreSQL，無論是否包含初始資料（取決於所使用的快照模式）。這種方法在大多數情況下都有效，但當需要遷移大量資料表時，可能會出現效能問題，並且會透過 JNI 呼叫引入額外的開銷。如果來源資料庫（例如 Oracle）支援 "FLASHBACK" 查詢，則可以使用外部資料包裝器 (FDW) 實作相同的初始快照。 "FLASHBACK"查詢可以確保快照遷移到某個 "偏移"（Oracle 中的 SCN），從而確保到某個時間點的讀取一致性，然後從該時間點開始 CDC 串流傳輸。
+所有連接器都支援基於 Debezium 的初始快照（Postgres 連接器除外），該快照會將遠端表模式遷移到 PostgreSQL，並可選擇是否包含初始資料（取決於所使用的快照模式）。雖然這種方法在大多數情況下都能正常運作，但當需要遷移大量資料表且 JNI 呼叫引入額外開銷時，可能會出現效能問題。只要我們能夠保證資料一致性並確定一個允許 CDC 恢復的“截止點”，就可以使用外部資料包裝器 (FDW) 實現相同的初始快照。
 
-目前，我們僅支援使用 oracle_fdw 作為原生 Openlog Replicator (OLR) 連接器的 Debezium 快照的替代方案。未來，如果可行的話，我們可能會添加對其他連接器的支援。若要使用基於 FDW 的快照，只需將 GUC 參數 `synchdb.olr_snapshot_engin` 設定為 "fdw" 。請參閱[此處](user-guide/configure_snapshot_engine/) 以取得建置和安裝 oracle_fdw 的快速指南。
+以下連接器支援基於 FDW 的快照：
+
+* MySQL 連接器
+* Postgres 連接器
+* Oracle 和 Openlog Replicator 連接器
+
+## **SynchDB 如何保證資料一致性並取得截止點**
+
+### **MySQL 連接器**
+
+* 以 repeatable read 隔離等級啟動事务。
+* 暫時對所有目標表上锁。
+* 讀取 `binlog_log_file`、`binlog_pos` 和 `server_id`。這些參數將作為快照的「截止點」。
+* 釋放表鎖。
+* 在同一個 repeatable read 事务中，使用正確的類型轉換遷移所有目標表的模式和資料。
+* 完成後，CDC 可以從截止點恢復，處理快照期間發生的資料變更。
+
+警告：**需要 BACKUP_ADMIN 權限才能取得「截止點」參數**
+
+### **Postgres 連接器**
+
+* 以 repeatable read 隔離等級啟動事务。
+* 暫時對所有目標表上锁。
+* 讀取目前 LSN，它作為快照的「截止」點。
+* 釋放表鎖。
+* 在同一個 repeatable read 事务中，使用正確的類型轉換遷移所有目標表的架構和資料。
+* 完成後，CDC 可以從截止點恢復，處理快照期間發生的資料變更。
+
+### **Oracle 和 Openlog Replicator 連接器**
+
+* 在快照開始之前，讀取目前 SCN 值，它作為快照的「截止點」。
+* 在外部表架構遷移期間，每個目標外部表都會關聯一個額外的屬性 “AS OF SCN xxx”，這將導致所有外部讀取操作都使用 Oracle 的 FLASHBACK 查詢。
+* FLASHBACK 查詢傳回指定 SCN 下的表結果，因此可以自動保證一致性。無需額外上锁。
+* 使用 FLASHBACK 查詢遷移所有目標表的架構和數據，並進行正確的類型轉換。
+* 完成後，CDC 可以從截止點恢復運行，並處理快照期間發生的資料變更。
+
+警告：**取得「截止點」參數需要 FLASHBACK 權限**
 
 ## **基於 FDW 的快照如何運作**
 
@@ -30,9 +66,23 @@
 
 SynchDB 無需考慮每個物件即可完成初始快照；它僅考慮 "表"、 "列" 和 "鍵" 物件來建立 PostgreSQL 中的表。
 
-### **3. 建立外部表以取得目前 SCN**
+### **3. 建立外部表以取得目前截止点**
 
-此外部表（查詢時）將連接到 Oracle 並取得目前 SCN 值。此值將作為初始快照的 "截止" 點。此點之後的新變更將不包含在快照中。
+
+將建立外部表，以便從不同的來源資料庫讀取截止值：
+
+**MySQL 連接器**
+
+* 從 performance_schema.log_status 表讀取 `binlog_file` 和 `binlog_pos` 表
+* 從 performance_schema.global_variables 表讀取 `server_id` 表
+
+**Postgres 連接器**
+
+* 從名為 public.synchdb_wal_lsn 的自訂檢視讀取目前 `LSN` 值。此視圖必須預先建立。
+
+**Oracle 和 Openlog Replicator 連接器**
+
+* 從 current_scn 表中讀取目前 `SCN` 值
 
 ### **4.建立所需外部表格清單**
 
@@ -41,9 +91,9 @@ SynchDB 無需考慮每個物件即可完成初始快照；它僅考慮 "表"、
 * 步驟 2 中建立的 Oracle 物件視圖
 * SynchDB 在 `synchdb_conninfo` 中的 `data->'snapshottable'` 參數 -> 這是 SynchDB 執行快照所需的資料表的篩選器。如果設定為 `null`，則所有表都將被視為快照。
 * 額外的資料類型映射，如 `synchdb_objmap` 中所述
-* 步驟 3 中獲得的截止 SCN
+* 步驟 3 中獲得的截止 SCN（僅限 Oracle 和 Openlog Replicator 連接器）
 
-此步驟結束時，暫存模式將包含具有 `AS OF SCN xxx` 屬性的外部表，其資料類型根據 SynchDB 的資料類型對應規則進行對應。這些外部表將僅傳回 SCN 集之前的數據，並且仍然需要 oracle_fdw 連接到 Oracle。
+在此步驟結束時，暫存模式將包含外部表，其資料類型將根據 SynchDB 的資料類型對應規則進行對應。對於 Oracle 和 Openlog Replicator 連接器，外部表將具有 `AS OF SCN xxx` 屬性，導致每次外部讀取僅傳回指定 SCN 之前的資料。對於其他連接器類型，外部讀取將傳回可重複事務開始時的所有資料。
 
 ### **5.物化模式**
 
@@ -76,6 +126,5 @@ SynchDB 無需考慮每個物件即可完成初始快照；它僅考慮 "表"、
 * 刪除步驟 1 中建立的伺服器和使用者映射
 * 刪除步驟 2 中建立的 Oracle 物件視圖
 * 刪除步驟 4 中建立的暫存模式
-* 刪除步驟 3 中建立的外部表以傳回目前 SCN
 
 步驟 5 中建立的目標模式中的表格是初始快照的最終結果。

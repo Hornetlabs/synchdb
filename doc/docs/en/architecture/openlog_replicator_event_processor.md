@@ -1,6 +1,6 @@
 # Openlog Replicator Event Processor
 
-## **Debezium Event Processor Component Diagram**
+## **Openlog Replicator Event Processor Component Diagram**
 
 ![img](../../images/olr-processor.jpg)
 

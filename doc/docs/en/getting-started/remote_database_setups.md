@@ -317,3 +317,102 @@ BEGIN
     END LOOP;
 END;
 ```
+
+## **Set up Postgres Connector for SynchDB**
+
+PostgreSQL server needs to be configured to be used as a database source to SynchDB
+
+### GUC Settings
+
+```
+wal_level = logical
+max_wal_senders = << may need to be adjusted based on your requirement - default is 10 >>
+max_replication_slots = << may need to be adjusted based on your requirement - default is 10 >>
+wal_writer_delay = << recommend to set to 10ms if `synchronous_commit` has a value other than "on". Default is 200ms >>
+
+```
+
+### Permission Settings
+
+Create a new user with replication privileges:
+
+```sql
+CREATE ROLE <name> REPLICATION LOGIN;
+
+```
+
+SynchDB streams change events for PostgreSQL source tables from publications that are created for the tables. Publications contain a filtered set of change events that are generated from one or more tables. The data in each publication is filtered based on the publication specification. The specification can be created by the PostgreSQL database administrator or by the Debezium connector. To permit the SynchDB Postgres connector to create publications and specify the data to replicate to them, the connector must operate with specific privileges in the database.
+
+There are several options for determining how publications are created. In general, it is best to manually create publications for the tables that you want to capture, before you set up the connector. However, you can configure your environment in a way that permits SynchDB to create publications automatically, and to specify the data that is added to them.
+
+SynchDB uses include list properties (when a connector is created with `synchdb_add_conninfo`) to specify how data is inserted in the publication. 
+
+For SynchDB to create a PostgreSQL publication, it must run as a user that has the following privileges:
+
+* Replication privileges in the database to add the table to a publication.
+* CREATE privileges on the database to add publications.
+* SELECT privileges on the tables to copy the initial table data. Table owners automatically have SELECT permission for the table.
+
+To add tables to a publication, the user must be an owner of the table. But because the source table already exists, you need a mechanism to share ownership with the original owner. To enable shared ownership, you create a PostgreSQL replication group, and then add the existing table owner and the replication user to the group.
+
+Procedure:
+
+* Create a replication group.
+
+```
+CREATE ROLE <replication_group>;
+```
+
+* Add the original owner of the table to the group.
+
+```
+GRANT REPLICATION_GROUP TO <original_owner>;
+```
+
+* Add the Debezium replication user to the group.
+
+```
+GRANT REPLICATION_GROUP TO <replication_user>;
+```
+
+* Transfer ownership of the table to <replication_group>.
+
+```
+ALTER TABLE <table_name> OWNER TO REPLICATION_GROUP;
+```
+
+### pg_hba Settings
+
+To enable Debezium to replicate PostgreSQL data, you must configure the database to permit replication with the host that runs the PostgreSQL connector. To specify the clients that are permitted to replicate with the database, add entries to the PostgreSQL host-based authentication file, `pg_hba.conf`. For more information about the pg_hba.conf file, see the [PostgreSQL documentation](https://www.postgresql.org/docs/current/static/datatype-net-types.html).
+
+```
+local   replication     <youruser>                          trust   
+host    replication     <youruser>  127.0.0.1/32            trust   
+host    replication     <youruser>  ::1/128                 trust 
+```
+
+### Install DDL Trigger and Custom LSN View
+To allow logical replication of user table DDLs to SynchDB, you must install a DDL trigger at source PostgreSQL database. Also, you need to create a custom view that returns the current LSN at the source database so that SycnhDB can retrieve it via FDW during snapshot process. 
+
+SynchDB source repo contains a SQL script to set up and a script to tear down. Make sure to run them at the source PostgreSQL database:
+
+Install DDL trigger function and current LSN view via a psql session:
+
+```
+psql -U <user> -d <database> < postgres-connector-src-ddl-setup.sql
+
+``` 
+
+Tear down DDL trigger function via a psql session:
+
+```
+psql -U <user> -d <database> < postgres-connector-src-ddl-teardown.sql
+
+``` 
+
+If you do not need DDL replication, then you do not need to install this DDL trigger function at the source. The current LSN view, however, is needed if you would like to take a current snapshot of the source database (current table + data). You can add it to the source database like this without loading the SQL script above. Please ensure this VIEW is created under `public` schema.
+
+```sql
+CREATE VIEW synchdb_wal_lsn AS SELECT pg_current_wal_lsn()::pg_lsn AS wal_lsn;
+```
+

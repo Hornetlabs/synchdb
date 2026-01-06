@@ -1,6 +1,6 @@
 # Openlog Replicator 事件处理器
 
-## **Debezium 事件处理器组件图**
+## **Openlog Replicator 事件处理器组件图**
 
 ![img](../../images/olr-processor.jpg)
 
