@@ -1,3 +1,6 @@
+CREATE VIEW synchdb_wal_lsn AS
+SELECT pg_current_wal_lsn()::pg_lsn AS wal_lsn;
+
 CREATE OR REPLACE FUNCTION synchdb_ddl_log()
 RETURNS event_trigger
 LANGUAGE plpgsql
