@@ -2,7 +2,7 @@
 
 ## **Create a Connector**
 
-A connector represents a connection to a particular source database, replicate one set of tables and apply to PostgreSQL. If you have multiple source databases that need replication, multiple connectors are required (one for each). It is also possible to create multiple connectors that connect to the same source database but replicate different sets of tables.
+A connector represents a connection to a particular source database, replicate one set of tables and apply to PostgreSQL. If you have multiple source databases that need replication, multiple connectors are required (one for each). It is also possible to create multiple connectors that connect to the same source database but replicate different or same sets of tables.
 
 Creating a connector can be done with utility SQL function `synchdb_add_conninfo()`.
 
@@ -15,13 +15,13 @@ synchdb_add_conninfo takes these arguments:
 | port                  | the port number to connect to the heterogeneous database. |
 | username              | user name to use to authenticate with heterogeneous database.|
 | password              | password to authenticate the username |
-| source database       | this is the name of source database in heterogeneous database that we want to replicate changes from.|
-| destination database  | (deprecated) always defaults to the same database as where synchDB is installed |
-| table                 | (optional) - expressed in the form of `[database].[table]` or `[database].[schema].[table]` that must exists in heterogeneous database so the engine will only replicate the specified tables. If left empty, all tables are replicated. Alternatively, a table list file can be specified with `file:` prefix  |
-| snapshot table        | (optional) - expressed in the form of `[database].[table]` or `[database].[schema].[table]` that must exists in the `table` setting above, so the engine will only rebuild the snapshot of these tables if snapshot mode is set to `always`. If left empty or null, all tables specified in `table` setting above will be rebuilt when snapshot mode is set to `always`. Alternatively, a snapshot table list file can be specified with `file:` prefix|
+| source database       | this is the name of source database that we want to replicate changes from.|
+| source schema  | this is the name of source schema under source database that we want to replicate changes from  |
+| table                 | (optional) - expressed in the form of `[database].[table]` or `[schema].[table]` that must exists in source database / schema so the engine will only replicate the specified tables. If left empty, all tables are replicated. Alternatively, a table list file can be specified with `file:` prefix  |
+| snapshot table        | (optional) - expressed in the form of `[database].[table]` or `[schema].[table]` that must exists in the `table` setting above, so the engine will only rebuild the snapshot of these tables if snapshot mode is set to `always`. If left empty or null, all tables specified in `table` setting above will be rebuilt when snapshot mode is set to `always`. Alternatively, a snapshot table list file can be specified with `file:` prefix|
 | connector             | the connector type (See below) |
 
-<<**Note**>> If connector type is `olr`, SynchDB will still use Debezium to perform an initial snapshot with tables and snapshot tables as specified in `table` and `snapshot table` parameters. After this is done, SynchDB will connect to Openlog Replicator for replication without filtering desired tables specified in `table` parameter. The table filtering is instead done on the Openlog Replicator's configuration. So, please ensure that both Openlog Replicator and SynchDB connector's `table` filtering parameters are configured consistently to avoid potential descrepancies
+<<**NOTE**>> `source database`, `source schema`, `username`, `password`, `table` and `snapshot table` are case sensitive, and you must specify the names exactly as appeared in your source database, so keep in mind the letter casing of these names.  
 
 ## **Connector Types**
 
@@ -30,7 +30,8 @@ SynchDb supports these connector types:
 * mysql         -> MySQL database
 * sqlserver     -> Microsoft SQL Server database
 * oracle        -> Oracle database
-* olr           -> Native Openlog Replicator (BETA)
+* olr           -> Native Openlog Replicator
+* postgres      -> PostgreSQL database
 
 ## **Check Created Connectors**
 
@@ -44,20 +45,18 @@ postgres=# select * from synchdb_conninfo;
 -[ RECORD 1 ]-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 name     | sqlserverconn
 isactive | t
-data     | {"pwd": "\\xc30d0407030245ca4a983b6304c079d23a0191c6dabc1683e4f66fc538db65b9ab2788257762438961f8201e6bcefafa60460fbf441e55d844e7f27b31745f04e7251c0123a159540676c4", "port": 1433, "user": "sa", "dstdb": "postgres", "srcdb": "testDB", "table": "null", "hostname": "192.168.1.86", "connector": "sqlserver"}
+data     | {"pwd": "\\xc30d0407030245ca4a983b6304c079d23a0191c6dabc1683e4f66fc538db65b9ab2788257762438961f8201e6bcefafa60460fbf441e55d844e7f27b31745f04e7251c0123a159540676c4", "port": 1433, "user": "sa", "srcschema": "dbo", "srcdb": "testDB", "table": null, "snapshottable": null, "hostname": "192.168.1.86", "connector": "sqlserver"}
 -[ RECORD 2 ]-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 name     | mysqlconn
 isactive | t
-data     | {"pwd": "\\xc30d04070302986aff858065e96b62d23901b418a1f0bfdf874ea9143ec096cd648a1588090ee840de58fb6ba5a04c6430d8fe7f7d466b70a930597d48b8d31e736e77032cb34c86354e", "port": 3306, "user": "mysqluser", "dstdb": "postgres", "srcdb": "inventory", "table": "null", "hostname": "192.168.1.86", "connector": "mysql"}
+data     | {"pwd": "\\xc30d04070302986aff858065e96b62d23901b418a1f0bfdf874ea9143ec096cd648a1588090ee840de58fb6ba5a04c6430d8fe7f7d466b70a930597d48b8d31e736e77032cb34c86354e", "port": 3306, "user": "mysqluser", "srcschema": null, "srcdb": "inventory", "table": null, "snapshottable": null, "hostname": "192.168.1.86", "connector": "mysql"}
 -[ RECORD 3 ]-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 name     | oracleconn
 isactive | t
-data     | {"pwd": "\\xc30d04070302e3baf1293d0d553066d234014f6fc52e6eea425884b1f65f1955bf504b85062dfe538ca2e22bfd6db9916662406fc45a3a530b7bf43ce4cfaa2b049a1c9af8", "port": 1528, "user": "c##dbzuser", "dstdb": "postgres", "srcdb": "FREE", "table": "null", "hostname": "192.168.1.86", "connector": "oracle"}
+data     | {"pwd": "\\xc30d04070302e3baf1293d0d553066d234014f6fc52e6eea425884b1f65f1955bf504b85062dfe538ca2e22bfd6db9916662406fc45a3a530b7bf43ce4cfaa2b049a1c9af8", "port": 1528, "user": "DBZUSER", "srcschema": "DBZUSER", "srcdb": "FREE", "table": null, "snapshottable": null, "hostname": "192.168.1.86", "connector": "oracle"}
 
 
 ```
-
-<<<**IMPORTANT**>>> Native Openlog Replicator connector currently does not support specifying whitelist tables via `table` and `snapshot tables` parameters so the sections below do not apply to Native Openlog Replicator connector.
 
 ## **Use a Table List File to Specify Tables**
 
@@ -67,15 +66,15 @@ If there is a large number of tables to replicate, it is possible to use a table
 {
     "table_list":
     [
-        "mydb.myschema.mytable1",
-        "mydb.myschema.mytable2",
+        "myschema.mytable1",
+        "myschema.mytable2",
         ...
         ...
     ],
     "snapshot_table_list":
     [
-        "mydb.myschema.mytable1",
-        "mydb.myschema.mytable2",
+        "myschema.mytable1",
+        "myschema.mytable2",
         ...
         ...
     ]
@@ -94,41 +93,41 @@ We can normally leave `snapshot table list` parameter to either empty or as `nul
 
 ## **Example: Create a Connector for each Supported Source Database to Replicate All Tables**
 
-1. Create a MySQL connector called `mysqlconn` to replicate all tables under `inventory` in MySQL to destination database `postgres` in PostgreSQL:
+1. Create a MySQL connector called `mysqlconn` to replicate all tables under `inventory` in MySQL. Source schema can be put as 'null' because MySQL does not support it.
 ```sql
 SELECT synchdb_add_conninfo(
     'mysqlconn', '127.0.0.1', 3306, 'mysqluser', 
-    'mysqlpwd', 'inventory', 'postgres', 
+    'mysqlpwd', 'inventory', 'null', 
     'null', 'null', 'mysql');
 ```
 
-2. Create a SQLServer connector called `sqlserverconn` to replicate all tables under `testDB` to destination database 'postgres' in PostgreSQL:
+2. Create a SQLServer connector called `sqlserverconn` to replicate all tables under `testDB` database and `dbo` schema.
 ```sql
 SELECT 
   synchdb_add_conninfo(
     'sqlserverconn', '127.0.0.1', 1433, 
-    'sa', 'Password!', 'testDB', 'postgres', 
+    'sa', 'Password!', 'testDB', 'dbo', 
     'null', 'null', 'sqlserver');
 ```
 
-3. Create a Oracle connector called `oracleconn` to replicate all tables under `FREE` to destination database 'postgres' in PostgreSQL:
+3. Create a Oracle connector called `oracleconn` to replicate all tables under `FREE` database and `DBZUSER` schema:
 ```sql
 SELECT 
   synchdb_add_conninfo(
     'oracleconn', '127.0.0.1', 1521, 
-    'c##dbzuser', 'dbz', 'FREE', 'postgres', 
+    'DBZUSER', 'dbz', 'FREE', 'DBZUSER', 
     'null', 'null', 'oracle');
 ```
 
 ## **Example: Create a Connector to Replicate Specified Tables**
 
-Note that the tables must be specified in fully-qualified names such as `[database].[table]` or `[database].[schema].[table]` and exist in the source database.
+Note that the tables must be specified in fully-qualified names such as `[database].[table]` or `[schema].[table]` and exist in the source database.
 
 Create a MySQL connector called `mysqlconn` to replicate `orders` and `customers` tables under `inventory` in MySQL to destination database `postgres` in PostgreSQL:
 ```sql
 SELECT synchdb_add_conninfo(
     'mysqlconn', '127.0.0.1', 3306, 'mysqluser', 
-    'mysqlpwd', 'inventory', 'postgres', 
+    'mysqlpwd', 'inventory', 'null', 
     'inventory.orders,inventory.customers', 'null', 'mysql');
 
 ```
@@ -139,7 +138,7 @@ Create a MySQL connector called `mysqlconn` to replicate the tables specified in
 ```sql
 SELECT synchdb_add_conninfo(
     'mysqlconn', '127.0.0.1', 3306, 'mysqluser', 
-    'mysqlpwd', 'inventory', 'postgres', 
+    'mysqlpwd', 'inventory', 'null', 
     'file:/path/to/mytablefile.json', 'file:/path/to/mytablefile.json', 'mysql');
 
 ```

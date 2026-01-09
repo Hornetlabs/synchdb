@@ -272,9 +272,22 @@ ALTER TABLE products ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS;
 ... etc
 ```
 
-## **Additional Oracle Setups for Openlog Replicator Support**
+## **Set up Native Openlog Replicator Connector for SynchDB**
 
-Openlog Replicator requires additional permissions to stream Oracle changes:
+### **Requirements**
+
+- **Openlog Replicator Version**: `1.3.0` ~ `1.8.5` (verified compatibility for Debezium 2.7.x)
+- Oracle instance with redo logs accessible to OLR
+- Additional permissions must be granted for OLR (see below)
+- Openlog Replicator must be configured and running
+- An existing Oracle connector in SynchDB (created using `synchdb_add_conninfo()`)
+- <<<**IMPORTANT**>>> **SynchDB must be compiled and built with flag (WITH_OLR=1) to support native openlog replicator connector.**
+
+Refer to this [external guide](https://highgo.atlassian.net/wiki/external/OTUzY2Q2OWFkNzUzNGVkM2EyZGIyMDE1YzVhMDdkNWE) for details on deploying Openlog Replicator via Docker.
+
+### **Additional Oracle Permissions**
+
+In addition to the settings required for Oracle connector, Openlog Replicator requires additional permissions as below:
 
 ```sql
 
@@ -317,6 +330,127 @@ BEGIN
     END LOOP;
 END;
 ```
+
+## **Openlog Replicator Configuration Example**
+
+SynchDB's OLR support is built against the configuration example below. 
+
+**Version 1.3.0**
+```json
+{
+  "version": "1.3.0",
+  "source": [
+    {
+      "alias": "SOURCE",
+      "name": "ORACLE",
+      "reader": {
+        "type": "online",
+        "user": "DBZUSER",
+        "password": "dbz",
+        "server": "//ora19c:1521/FREE"
+      },
+      "format": {
+        "type": "json",
+        "column": 2,
+        "db": 3,
+        "interval-dts": 9,
+        "interval-ytm": 4,
+        "message": 2,
+        "rid": 1,
+        "schema": 7,
+        "timestamp-all": 1,
+        "scn-all": 1
+      },
+      "memory": {
+        "min-mb": 64,
+        "max-mb": 1024
+      },
+      "filter": {
+        "table": [
+          {"owner": "DBZUSER", "table": ".*"}
+        ]
+      },
+      "flags": 32
+    }
+  ],
+  "target": [
+    {
+      "alias": "SYNCHDB",
+      "source": "SOURCE",
+      "writer": {
+        "type": "network",
+        "uri": "0.0.0.0:7070"
+      }
+    }
+  ]
+}
+
+```
+
+**Version 1.8.5**
+```json
+{
+  "version": "1.8.5",
+  "source": [
+    {
+      "alias": "SOURCE",
+      "name": "ORACLE",
+      "reader": {
+        "type": "online",
+        "user": "DBZUSER",
+        "password": "dbz",
+        "server": "//ora19c:1521/FREE"
+      },
+      "format": {
+        "type": "json",
+        "column": 2,
+        "db": 3,
+        "interval-dts": 9,
+        "interval-ytm": 4,
+        "message": 2,
+        "rid": 1,
+        "schema": 7,
+        "timestamp-all": 1,
+        "scn-type": 1
+      },
+      "memory": {
+        "min-mb": 64,
+        "max-mb": 1024,
+        "swap-path": "/opt/OpenLogReplicator/olrswap"
+      },
+      "filter": {
+        "table": [
+          {"owner": "DBZUSER", "table": ".*"}
+        ]
+      },
+      "flags": 32
+    }
+  ],
+  "target": [
+    {
+      "alias": "DEBEZIUM",
+      "source": "SOURCE",
+      "writer": {
+        "type": "network",
+        "uri": "0.0.0.0:7070"
+      }
+    }
+  ]
+}
+
+```
+
+Please note the following:
+
+- "source"."name": "ORACLE" -> this should match the `olr_source` value when defining OLR parameters via `synchdb_add_olr_conninfo()` (See below)
+- "source"."reader"."user" -> this should match the `username` value when creating a connector via `synchdb_add_conninfo()`
+- "source"."reader"."password" -> this should match the `password` value when creating a connector via `synchdb_add_conninfo()`
+- "source"."reader"."server" -> this should contain the values of `hostname`, `port` and `source database` values when creating a connector via `synchdb_add_conninfo()`
+- "source"."filter"."table":[] -> this filters the change events that Openlog Replicator captures. <<<**IMPORTANT**>>>: This is currently the only way to filter change events from Oracle as OLR implementations in SynchDB does not do any filtering at this moment. (The `table` and `snapshot table` values are ignored when creating a connector via `synchdb_add_conninfo()`) 
+- "format":{} -> the specific paylod format ingested by Debezium based or native Openlog Replicator connector. Use these values as specified.
+- "memory"."swap-path" -> this tells OLR where to write swap files in low memory scenario.
+- "target".[0]."writer"."type": -> this must specify `network` as both Debezium and native Openlog Replicator connector communicate with Openlog Replicator via network
+- "target".[0]."writer"."uri": -> this is the bind host and port Openlog Replicator listens on that SynchDB should be able to access via `olr_host` and `olr_port` when defining OLR parameters via `synchdb_add_olr_conninfo()`. 
 
 ## **Set up Postgres Connector for SynchDB**
 

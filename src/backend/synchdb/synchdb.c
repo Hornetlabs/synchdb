@@ -2395,6 +2395,10 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 					}
 					case TYPE_SQLSERVER:
 					{
+						/* SQLSERVER does not support FDW based snapshot yet. */
+						if (connInfo->snapengine == ENGINE_FDW)
+							connInfo->snapengine = ENGINE_DEBEZIUM;
+
 						/* Debezium based snapshot, schema and CDC processing logics here */
 						myBatchInfo.batchId = SYNCHDB_INVALID_BATCH_ID;
 						myBatchInfo.batchSize = 0;

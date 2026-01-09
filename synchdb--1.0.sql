@@ -2776,7 +2776,7 @@ BEGIN
 			  %L::name,
 			  %L::name,
 			  %s::oid,
-			  c.position::smallint,
+  			  row_number() OVER (ORDER BY c.position)::smallint,
 			  %L::name,
 			  c.column_name::name,
 			  lower(c.type_name)::name
@@ -3304,7 +3304,8 @@ CREATE OR REPLACE FUNCTION synchdb_apply_column_mappings(
     p_src_schema      name,             -- e.g. 'psql_stage'
     p_connector_name  name,             -- connector name to filter objmap
     p_desired_db      name,             -- e.g. 'free' or 'wrongdb'
-    p_desired_schema  name DEFAULT NULL -- optional: e.g. 'dbzuser'; NULL = don't enforce
+    p_desired_schema  name DEFAULT NULL, -- optional: e.g. 'dbzuser'; NULL = don't enforce
+	p_case_strategy   text DEFAULT 'asis'
 ) RETURNS void
 LANGUAGE plpgsql
 AS $$
@@ -3355,6 +3356,17 @@ BEGIN
       s_db := parts[1]; s_table := parts[2]; s_col := parts[3];
     ELSE
       CONTINUE;
+    END IF;
+
+	IF p_case_strategy = 'lower' THEN
+      s_col := lower(s_col);
+	  s_table := lower(s_table);
+    ELSIF p_case_strategy = 'upper' THEN
+      s_col := upper(s_col);
+	  s_table := upper(s_table);
+    ELSE
+      -- 'asis' → leave untouched
+      NULL;
     END IF;
 
     IF p_desired_db IS NOT NULL AND s_db IS DISTINCT FROM p_desired_db THEN
@@ -3421,6 +3433,17 @@ BEGIN
       dt_db := dt_parts[1]; dt_table := dt_parts[2]; dt_col := dt_parts[3];
     ELSE
       CONTINUE;
+    END IF;
+
+    IF p_case_strategy = 'lower' THEN
+      s_col := lower(s_col);
+      s_table := lower(s_table);
+    ELSIF p_case_strategy = 'upper' THEN
+      s_col := upper(s_col);
+      s_table := upper(s_table);
+    ELSE
+      -- 'asis' → leave untouched
+      NULL;
     END IF;
 
     IF p_desired_db IS NOT NULL AND dt_db IS DISTINCT FROM p_desired_db THEN
@@ -3502,15 +3525,16 @@ BEGIN
 END;
 $$;
 
-COMMENT ON FUNCTION synchdb_apply_column_mappings(name, name, name, name) IS
+COMMENT ON FUNCTION synchdb_apply_column_mappings(name, name, name, name, text) IS
    'transform column name mappings based on synchdb_objmap';
 
 CREATE OR REPLACE FUNCTION synchdb_migrate_data_with_transforms(
-    p_src_schema        name,                 -- e.g. 'ora_stage'
+    p_src_schema        name,                 -- e.g. 'ora_stage' (foreign tables)
     p_connector_name    name,                 -- connector for stats + objmap filter
-    p_dst_schema        name,                 -- e.g. 'psql_stage'
+    p_dst_schema        name,                 -- e.g. 'psql_stage' (real tables)
     p_desired_db        name,                 -- e.g. 'free'
     p_offset            text,                 -- offset value (lsn, scn, binlog pos..etc)
+    p_case_strategy     text,                 -- 'lower' | 'upper' | 'as_is' (or others treated as as_is)
     p_desired_schema    name DEFAULT NULL,    -- e.g. 'dbzuser'
     p_do_truncate       boolean DEFAULT false,
     p_rows_per_tick     integer DEFAULT 0,    -- 0/NULL = no batching; >0 = stats every N rows
@@ -3544,7 +3568,6 @@ DECLARE
   v_err_count       bigint;     -- summary count at end
 
   v_any_batch_failed boolean;   -- tracks data failures in batching mode
-
 BEGIN
   -- sanitize connector name to identifier suffix
   v_err_tbl_ident :=
@@ -3564,11 +3587,18 @@ BEGIN
 
   ----------------------------------------------------------------------
   -- Iterate all source FTs that have a same-named real table in dst
-  -- Case-insensitive match, but keep actual relnames for SQL.
+  -- NOTE: we still join by relname equality; under your flow both sides
+  -- are already created with the same normalized names.
   ----------------------------------------------------------------------
   FOR r IN
     SELECT
-      c.relname        AS tbl_canon,    -- canonical name for matching
+      -- canonical table name for mapping/transform matching
+      CASE
+        WHEN p_case_strategy = 'lower' THEN lower(c.relname)
+        WHEN p_case_strategy = 'upper' THEN upper(c.relname)
+        ELSE c.relname
+      END              AS tbl_canon,
+
       c.relname        AS src_tbl_name, -- actual FT name in p_src_schema
       c2.relname       AS dst_tbl_name  -- actual table name in p_dst_schema
     FROM   pg_foreign_table ft
@@ -3581,64 +3611,132 @@ BEGIN
       AND  c2.relkind = 'r'
   LOOP
     ------------------------------------------------------------------
-    -- Error-table identity:
+    -- Error-table identity (display only)
     ------------------------------------------------------------------
     IF p_desired_schema IS NULL OR btrim(p_desired_schema::text) = '' THEN
-      v_tbl_display :=
-          p_desired_db::text || '.' || r.src_tbl_name;
+      v_tbl_display := p_desired_db::text || '.' || r.src_tbl_name;
     ELSE
-      v_tbl_display :=
-          p_desired_db::text || '.'
-        || p_desired_schema::text || '.'
-        || r.src_tbl_name;
+      v_tbl_display := p_desired_db::text || '.'
+                    || p_desired_schema::text || '.'
+                    || r.src_tbl_name;
     END IF;
 
     v_any_batch_failed := false;
 
     BEGIN
       ------------------------------------------------------------------
-      -- Build column/expr lists, using canonical names for matching and
-      -- actual identifiers for SQL and transforms.
+      -- Build column/expr lists.
+      -- FIX: Canonicalize all objmap matching based on p_case_strategy,
+      -- while still using actual identifiers for SQL.
       ------------------------------------------------------------------
-      RAISE NOTICE 'Migrating table: v_tbl_display = %', v_tbl_display;
+      RAISE NOTICE 'Migrating table: %', v_tbl_display;
 
       WITH dst_cols AS (
         SELECT
           c.ordinal_position,
-          c.column_name AS dst_col_canon,
-          c.column_name        AS dst_col_ident
+          -- canonical for matching
+          CASE
+            WHEN p_case_strategy = 'lower' THEN lower(c.column_name)
+            WHEN p_case_strategy = 'upper' THEN upper(c.column_name)
+            ELSE c.column_name
+          END AS dst_col_canon,
+          -- actual identifier for SQL
+          c.column_name AS dst_col_ident
         FROM information_schema.columns c
         WHERE c.table_schema = p_dst_schema
           AND c.table_name   = r.dst_tbl_name
       ),
+
       colmap AS (
-        -- A) schema-qualified rules: p_src_schema.table.column -> <dst column>
+        ----------------------------------------------------------------
+        -- COLUMN rename rules:
+        -- A) schema-qualified: <src_schema>.<table>.<col>  -> <dst col>
+        -- B) db-prefixed:      db[.schema].table.col       -> <dst col>
+        -- FIX: canonicalize tbl/src_col/dst_col on output.
+        ----------------------------------------------------------------
+
+        -- A) schema-qualified
         SELECT
-          split_part(m.srcobj,'.',2) AS tbl,
-          split_part(m.srcobj,'.',3) AS src_col,
-          (regexp_split_to_array(m.dstobj, '\.'))[
-            array_length(regexp_split_to_array(m.dstobj, '\.'),1)
-          ] AS dst_col
+          CASE
+            WHEN p_case_strategy='lower' THEN lower(split_part(m.srcobj,'.',2))
+            WHEN p_case_strategy='upper' THEN upper(split_part(m.srcobj,'.',2))
+            ELSE split_part(m.srcobj,'.',2)
+          END AS tbl,
+
+          CASE
+            WHEN p_case_strategy='lower' THEN lower(split_part(m.srcobj,'.',3))
+            WHEN p_case_strategy='upper' THEN upper(split_part(m.srcobj,'.',3))
+            ELSE split_part(m.srcobj,'.',3)
+          END AS src_col,
+
+          CASE
+            WHEN p_case_strategy='lower' THEN lower(
+              (regexp_split_to_array(m.dstobj, '\.'))[
+                array_length(regexp_split_to_array(m.dstobj, '\.'),1)
+              ]
+            )
+            WHEN p_case_strategy='upper' THEN upper(
+              (regexp_split_to_array(m.dstobj, '\.'))[
+                array_length(regexp_split_to_array(m.dstobj, '\.'),1)
+              ]
+            )
+            ELSE
+              (regexp_split_to_array(m.dstobj, '\.'))[
+                array_length(regexp_split_to_array(m.dstobj, '\.'),1)
+              ]
+          END AS dst_col
         FROM synchdb_objmap AS m
-        WHERE m.objtype='column' AND m.enabled
+        WHERE m.objtype='column'
+          AND m.enabled
           AND m.name = p_connector_name
           AND split_part(m.srcobj,'.',1) = p_src_schema
           AND m.dstobj IS NOT NULL AND btrim(m.dstobj) <> ''
 
         UNION ALL
 
-        -- B) db-prefixed rules: db.schema.table.column OR db.table.column -> <dst column>
+        -- B) db-prefixed
         SELECT
-          CASE WHEN array_length(arr,1)=4 THEN arr[3]
-               WHEN array_length(arr,1)=3 THEN arr[2] END AS tbl,
-          arr[array_length(arr,1)]                        AS src_col,
-          (regexp_split_to_array(m2.dstobj, '\.'))[
-            array_length(regexp_split_to_array(m2.dstobj, '\.'),1)
-          ] AS dst_col
+          CASE
+            WHEN p_case_strategy='lower' THEN lower(
+              CASE WHEN array_length(arr,1)=4 THEN arr[3]
+                   WHEN array_length(arr,1)=3 THEN arr[2] END
+            )
+            WHEN p_case_strategy='upper' THEN upper(
+              CASE WHEN array_length(arr,1)=4 THEN arr[3]
+                   WHEN array_length(arr,1)=3 THEN arr[2] END
+            )
+            ELSE
+              CASE WHEN array_length(arr,1)=4 THEN arr[3]
+                   WHEN array_length(arr,1)=3 THEN arr[2] END
+          END AS tbl,
+
+          CASE
+            WHEN p_case_strategy='lower' THEN lower(arr[array_length(arr,1)])
+            WHEN p_case_strategy='upper' THEN upper(arr[array_length(arr,1)])
+            ELSE arr[array_length(arr,1)]
+          END AS src_col,
+
+          CASE
+            WHEN p_case_strategy='lower' THEN lower(
+              (regexp_split_to_array(m2.dstobj, '\.'))[
+                array_length(regexp_split_to_array(m2.dstobj, '\.'),1)
+              ]
+            )
+            WHEN p_case_strategy='upper' THEN upper(
+              (regexp_split_to_array(m2.dstobj, '\.'))[
+                array_length(regexp_split_to_array(m2.dstobj, '\.'),1)
+              ]
+            )
+            ELSE
+              (regexp_split_to_array(m2.dstobj, '\.'))[
+                array_length(regexp_split_to_array(m2.dstobj, '\.'),1)
+              ]
+          END AS dst_col
         FROM (
           SELECT regexp_split_to_array(srcobj, '\.') AS arr, dstobj
           FROM synchdb_objmap
-          WHERE objtype='column' AND enabled
+          WHERE objtype='column'
+            AND enabled
             AND name = p_connector_name
             AND dstobj IS NOT NULL AND btrim(dstobj) <> ''
         ) m2
@@ -3649,59 +3747,117 @@ BEGIN
             OR arr[2] = p_desired_schema
           )
       ),
+
       col_map AS (
-        -- Map destination columns (canonical) to canonical source columns
+        ----------------------------------------------------------------
+        -- Map destination columns -> canonical source column names
+        -- using canonical matching (tbl + dst_col).
+        ----------------------------------------------------------------
         SELECT
           d.ordinal_position,
           d.dst_col_ident,
           d.dst_col_canon,
           COALESCE(
             (SELECT cm.src_col
-               FROM colmap cm
-              WHERE cm.tbl = r.tbl_canon
-                AND cm.dst_col = d.dst_col_canon
-              LIMIT 1),
+             FROM colmap cm
+             WHERE cm.tbl = r.tbl_canon
+               AND cm.dst_col = d.dst_col_canon
+             LIMIT 1),
             d.dst_col_canon
           ) AS src_col_canon
         FROM dst_cols d
       ),
+
       src_presence AS (
         ----------------------------------------------------------------
-        -- FIX: collapse duplicate source columns per (table, canon name)
-        -- so "A" and "a" become exactly ONE mapping for canon 'a'
+        -- Source FT column inventory:
+        -- FIX: canonicalize column_name for matching, but keep actual ident.
+        -- DISTINCT ON avoids duplicates if case variants exist.
         ----------------------------------------------------------------
-        SELECT DISTINCT ON (table_name, column_name)
-               table_name         AS src_tbl_ident,
-               column_name AS src_col_canon,
-               column_name        AS src_col_ident
+        SELECT DISTINCT ON (table_name,
+                           CASE
+                             WHEN p_case_strategy='lower' THEN lower(column_name)
+                             WHEN p_case_strategy='upper' THEN upper(column_name)
+                             ELSE column_name
+                           END)
+          table_name AS src_tbl_ident,
+          CASE
+            WHEN p_case_strategy='lower' THEN lower(column_name)
+            WHEN p_case_strategy='upper' THEN upper(column_name)
+            ELSE column_name
+          END AS src_col_canon,
+          column_name AS src_col_ident
         FROM information_schema.columns
         WHERE table_schema = p_src_schema
-        ORDER BY table_name, column_name, ordinal_position
+        ORDER BY table_name,
+                 CASE
+                   WHEN p_case_strategy='lower' THEN lower(column_name)
+                   WHEN p_case_strategy='upper' THEN upper(column_name)
+                   ELSE column_name
+                 END,
+                 ordinal_position
       ),
+
       tmap AS (
-        -- Transform rules
+        ----------------------------------------------------------------
+        -- TRANSFORM rules:
+        -- A) schema-qualified: <src_schema>.<table>.<col> -> <expr>
+        -- B) db-prefixed:      db[.schema].table.col     -> <expr>
+        -- FIX: canonicalize tbl/src_col for matching.
+        ----------------------------------------------------------------
+
         -- A) schema-qualified
         SELECT
-          split_part(mt.srcobj,'.',2) AS tbl,
-          split_part(mt.srcobj,'.',3) AS src_col,
-          mt.dstobj                          AS expr
+          CASE
+            WHEN p_case_strategy='lower' THEN lower(split_part(mt.srcobj,'.',2))
+            WHEN p_case_strategy='upper' THEN upper(split_part(mt.srcobj,'.',2))
+            ELSE split_part(mt.srcobj,'.',2)
+          END AS tbl,
+
+          CASE
+            WHEN p_case_strategy='lower' THEN lower(split_part(mt.srcobj,'.',3))
+            WHEN p_case_strategy='upper' THEN upper(split_part(mt.srcobj,'.',3))
+            ELSE split_part(mt.srcobj,'.',3)
+          END AS src_col,
+
+          mt.dstobj AS expr
         FROM synchdb_objmap AS mt
-        WHERE mt.objtype='transform' AND mt.enabled
+        WHERE mt.objtype='transform'
+          AND mt.enabled
           AND mt.name = p_connector_name
           AND split_part(mt.srcobj,'.',1) = p_src_schema
+          AND mt.dstobj IS NOT NULL AND btrim(mt.dstobj) <> ''
 
         UNION ALL
 
         -- B) db-prefixed
         SELECT
-          CASE WHEN array_length(arr,1)=4 THEN arr[3]
-               WHEN array_length(arr,1)=3 THEN arr[2] END AS tbl,
-          arr[array_length(arr,1)]                        AS src_col,
-          t.dstobj                                        AS expr
+          CASE
+            WHEN p_case_strategy='lower' THEN lower(
+              CASE WHEN array_length(arr,1)=4 THEN arr[3]
+                   WHEN array_length(arr,1)=3 THEN arr[2] END
+            )
+            WHEN p_case_strategy='upper' THEN upper(
+              CASE WHEN array_length(arr,1)=4 THEN arr[3]
+                   WHEN array_length(arr,1)=3 THEN arr[2] END
+            )
+            ELSE
+              CASE WHEN array_length(arr,1)=4 THEN arr[3]
+                   WHEN array_length(arr,1)=3 THEN arr[2] END
+          END AS tbl,
+
+          CASE
+            WHEN p_case_strategy='lower' THEN lower(arr[array_length(arr,1)])
+            WHEN p_case_strategy='upper' THEN upper(arr[array_length(arr,1)])
+            ELSE arr[array_length(arr,1)]
+          END AS src_col,
+
+          t.dstobj AS expr
         FROM (
           SELECT regexp_split_to_array(srcobj, '\.') AS arr, dstobj
           FROM synchdb_objmap
-          WHERE objtype='transform' AND enabled
+          WHERE objtype='transform'
+            AND enabled
             AND name = p_connector_name
             AND dstobj IS NOT NULL AND btrim(dstobj) <> ''
         ) t
@@ -3712,8 +3868,12 @@ BEGIN
             OR arr[2] = p_desired_schema
           )
       ),
+
       exprs AS (
-        -- Build source expressions using *actual* source column identifiers
+        ----------------------------------------------------------------
+        -- Build source expressions using actual source column identifiers.
+        -- Matching for transform uses canonicalized tbl + src_col.
+        ----------------------------------------------------------------
         SELECT
           m.ordinal_position,
           m.dst_col_ident,
@@ -3722,10 +3882,10 @@ BEGIN
               'NULL'
             ELSE COALESCE(
                    (SELECT replace(tt.expr, '%d', quote_ident(sp.src_col_ident))
-                      FROM tmap tt
-                     WHERE tt.tbl = r.tbl_canon
-                       AND tt.src_col = m.src_col_canon
-                     LIMIT 1),
+                    FROM tmap tt
+                    WHERE tt.tbl = r.tbl_canon
+                      AND tt.src_col = m.src_col_canon
+                    LIMIT 1),
                    quote_ident(sp.src_col_ident)
                  )
           END AS src_expr
@@ -3734,6 +3894,7 @@ BEGIN
           ON sp.src_tbl_ident = r.src_tbl_name   -- exact FT name
          AND sp.src_col_canon = m.src_col_canon
       )
+
       SELECT
         string_agg(quote_ident(dst_col_ident), ', ' ORDER BY ordinal_position),
         string_agg(src_expr,                  ', ' ORDER BY ordinal_position)
@@ -3745,6 +3906,10 @@ BEGIN
         CONTINUE;
       END IF;
 
+      -- Optional debug while validating:
+      -- RAISE NOTICE 'dst_list=%', dst_list;
+      -- RAISE NOTICE 'src_list=%', src_list;
+
       ------------------------------------------------------------------
       -- Optional truncate
       ------------------------------------------------------------------
@@ -3752,7 +3917,6 @@ BEGIN
         BEGIN
           EXECUTE format('TRUNCATE %I.%I', p_dst_schema, r.dst_tbl_name);
         EXCEPTION WHEN OTHERS THEN
-          -- record failure (UPSERT)
           IF NOT v_err_tbl_created THEN
             EXECUTE format(
               'CREATE TABLE IF NOT EXISTS %I.%I (
@@ -3771,19 +3935,19 @@ BEGIN
             v_err_tbl_exists  := true;
           END IF;
 
-          GET STACKED DIAGNOSTICS err_state = RETURNED_SQLSTATE,
-                                  err_msg   = MESSAGE_TEXT,
-								  err_detail = PG_EXCEPTION_DETAIL;
+          GET STACKED DIAGNOSTICS err_state  = RETURNED_SQLSTATE,
+                                  err_msg    = MESSAGE_TEXT,
+                                  err_detail = PG_EXCEPTION_DETAIL;
 
           EXECUTE format(
             'INSERT INTO %I.%I (connector_name, tbl, err_state, err_msg, err_detail, err_offset)
              VALUES ($1,$2,$3,$4,$5,$6)
              ON CONFLICT (connector_name, tbl)
-             DO UPDATE SET err_state = EXCLUDED.err_state,
-                           err_msg   = EXCLUDED.err_msg,
-                           err_detail= EXCLUDED.err_detail,
-                           err_offset= EXCLUDED.err_offset,
-                           ts        = now()',
+             DO UPDATE SET err_state  = EXCLUDED.err_state,
+                           err_msg    = EXCLUDED.err_msg,
+                           err_detail = EXCLUDED.err_detail,
+                           err_offset = EXCLUDED.err_offset,
+                           ts         = now()',
             'public', v_err_tbl_ident
           )
           USING p_connector_name, v_tbl_display, err_state, err_msg, err_detail, p_offset;
@@ -3807,14 +3971,16 @@ BEGIN
           src_list,
           p_src_schema, r.src_tbl_name
         );
+
         GET DIAGNOSTICS v_rows = ROW_COUNT;
         PERFORM synchdb_set_snapstats(p_connector_name, 0::bigint, v_rows::bigint, 0::bigint, 0::bigint);
+
         RAISE NOTICE 'Loaded %.% from %.% (rows=%)',
                      p_dst_schema, r.dst_tbl_name,
                      p_src_schema, r.src_tbl_name,
                      v_rows;
 
-        -- success for the whole table (non-batch): delete error row if table exists
+        -- success for whole table: delete error row if table exists
         IF v_err_tbl_exists THEN
           EXECUTE format(
             'DELETE FROM %I.%I WHERE connector_name = $1 AND tbl = $2',
@@ -3878,19 +4044,19 @@ BEGIN
                 v_err_tbl_exists  := true;
               END IF;
 
-              GET STACKED DIAGNOSTICS err_state = RETURNED_SQLSTATE,
-                                      err_msg   = MESSAGE_TEXT,
-									  err_detail = PG_EXCEPTION_DETAIL;
+              GET STACKED DIAGNOSTICS err_state  = RETURNED_SQLSTATE,
+                                      err_msg    = MESSAGE_TEXT,
+                                      err_detail = PG_EXCEPTION_DETAIL;
 
               EXECUTE format(
                 'INSERT INTO %I.%I (connector_name, tbl, err_state, err_msg, err_detail, err_offset)
                  VALUES ($1,$2,$3,$4,$5,$6)
                  ON CONFLICT (connector_name, tbl)
-                 DO UPDATE SET err_state = EXCLUDED.err_state,
-                               err_msg   = EXCLUDED.err_msg,
-                               err_detail= EXCLUDED.err_detail,
-                               err_offset= EXCLUDED.err_offset,
-                               ts        = now()',
+                 DO UPDATE SET err_state  = EXCLUDED.err_state,
+                               err_msg    = EXCLUDED.err_msg,
+                               err_detail = EXCLUDED.err_detail,
+                               err_offset = EXCLUDED.err_offset,
+                               ts         = now()',
                 'public', v_err_tbl_ident
               )
               USING p_connector_name, v_tbl_display, err_state, err_msg, err_detail, p_offset;
@@ -3919,7 +4085,7 @@ BEGIN
           v_off := v_off + p_rows_per_tick;
         END LOOP;
 
-        -- If no batch failed, delete error row for this table (if the table exists)
+        -- If no batch failed, delete error row for this table (if it exists)
         IF NOT v_any_batch_failed AND v_err_tbl_exists THEN
           EXECUTE format(
             'DELETE FROM %I.%I WHERE connector_name = $1 AND tbl = $2',
@@ -3931,8 +4097,7 @@ BEGIN
 
     EXCEPTION
       WHEN OTHERS THEN
-
-		RAISE WARNING 'an error has occured while migrating a table';
+        RAISE WARNING 'An error has occurred while migrating a table (%).', v_tbl_display;
 
         -- record failure (UPSERT) for this table
         IF NOT v_err_tbl_created THEN
@@ -3953,19 +4118,19 @@ BEGIN
           v_err_tbl_exists  := true;
         END IF;
 
-        GET STACKED DIAGNOSTICS err_state = RETURNED_SQLSTATE,
-                                err_msg   = MESSAGE_TEXT,
-								err_detail = PG_EXCEPTION_DETAIL;
+        GET STACKED DIAGNOSTICS err_state  = RETURNED_SQLSTATE,
+                                err_msg    = MESSAGE_TEXT,
+                                err_detail = PG_EXCEPTION_DETAIL;
 
         EXECUTE format(
           'INSERT INTO %I.%I (connector_name, tbl, err_state, err_msg, err_detail, err_offset)
            VALUES ($1,$2,$3,$4,$5,$6)
            ON CONFLICT (connector_name, tbl)
-           DO UPDATE SET err_state = EXCLUDED.err_state,
-                         err_msg   = EXCLUDED.err_msg,
-						 err_detail= EXCLUDED.err_detail,
-                         err_offset= EXCLUDED.err_offset,
-                         ts        = now()',
+           DO UPDATE SET err_state  = EXCLUDED.err_state,
+                         err_msg    = EXCLUDED.err_msg,
+                         err_detail = EXCLUDED.err_detail,
+                         err_offset = EXCLUDED.err_offset,
+                         ts         = now()',
           'public', v_err_tbl_ident
         )
         USING p_connector_name, v_tbl_display, err_state, err_msg, err_detail, p_offset;
@@ -3979,7 +4144,9 @@ BEGIN
     END; -- end per-table block
   END LOOP;
 
+  ----------------------------------------------------------------------
   -- Final summary (only if we created the error table this run OR it pre-existed)
+  ----------------------------------------------------------------------
   IF v_err_tbl_created OR v_err_tbl_exists THEN
     EXECUTE format(
       'SELECT count(*)
@@ -3997,8 +4164,8 @@ BEGIN
   END IF;
 END;
 $$;
-  
-COMMENT ON FUNCTION synchdb_migrate_data_with_transforms(name, name, name, name, text, name, boolean, int, boolean, boolean) IS
+
+COMMENT ON FUNCTION synchdb_migrate_data_with_transforms(name, name, name, name, text, text, name, boolean, int, boolean, boolean) IS
    'migrate data while applying transform expressions if available - sub-transaction mode';
 
 CREATE OR REPLACE FUNCTION synchdb_migrate_data_with_transforms_nosubs(
@@ -4276,7 +4443,8 @@ CREATE OR REPLACE FUNCTION synchdb_apply_table_mappings(
     p_src_schema      name,               -- e.g. 'psql_stage'
     p_connector_name  name,               -- filter objmap rows by connector name
     p_desired_db      name,               -- e.g. 'free' (must match the db token in srcobj)
-    p_desired_schema  name DEFAULT NULL   -- e.g. 'dbzuser' (only enforced if srcobj includes a schema)
+    p_desired_schema  name DEFAULT NULL,   -- e.g. 'dbzuser' (only enforced if srcobj includes a schema)
+	p_case_strategy   text DEFAULT 'asis'
 ) RETURNS void
 LANGUAGE plpgsql
 AS $$
@@ -4309,6 +4477,15 @@ BEGIN
       s_db := parts[1]; s_table := parts[2];         -- no schema segment
     ELSE
       CONTINUE;                                      -- unsupported form
+    END IF;
+
+    IF p_case_strategy = 'lower' THEN
+      s_table := lower(s_table);
+    ELSIF p_case_strategy = 'upper' THEN
+      s_table := upper(s_table);
+    ELSE
+      -- 'asis' → leave untouched
+      NULL;
     END IF;
 
     -- Require matching database
@@ -4356,8 +4533,9 @@ BEGIN
         AND c.relkind = 'r'
         AND c.relname = d_table
     ) THEN
-      RAISE NOTICE 'Skipping % -> %.%: destination exists', s_table, d_schema, d_table;
-      CONTINUE;
+      RAISE NOTICE 'dropping % -> %.%: destination exists', s_table, d_schema, d_table;
+      EXECUTE format('DROP TABLE %I.%I', d_schema, d_table);
+      -- CONTINUE;
     END IF;
 
     -- Same-schema rename vs. cross-schema move (rename first to avoid collisions)
@@ -4377,7 +4555,7 @@ BEGIN
 END;
 $$;
 
-COMMENT ON FUNCTION synchdb_apply_table_mappings(name, name, name, name) IS
+COMMENT ON FUNCTION synchdb_apply_table_mappings(name, name, name, name, text) IS
    'transform table names according to synchdb_objmap';
 
 CREATE OR REPLACE FUNCTION synchdb_finalize_initial_snapshot(
@@ -4753,7 +4931,7 @@ BEGIN
 
     RAISE NOTICE 'Step 7: Applying column mappings to schema "%" using objmap %.% for connector %',
                  p_dest_schema, p_lookup_db, p_lookup_schema, p_connector_name;
-    PERFORM synchdb_apply_column_mappings(p_dest_schema, p_connector_name, p_lookup_db, p_lookup_schema);
+    PERFORM synchdb_apply_column_mappings(p_dest_schema, p_connector_name, p_lookup_db, p_lookup_schema, p_case_strategy);
 
     RAISE NOTICE 'Step 8: Migrating data with transforms from "%" to "%" (lookup: %.% for connector %)',
                  p_stage_schema, p_dest_schema, p_lookup_db, p_lookup_schema, p_connector_name;
@@ -4768,6 +4946,7 @@ BEGIN
                 p_dest_schema,
                 p_lookup_db,
                 json_build_object('scn', v_scn)::text,
+				p_case_strategy,
                 p_lookup_schema,
                 false, 0,
                 true,
@@ -4780,6 +4959,7 @@ BEGIN
                 p_dest_schema,
                 p_lookup_db,
                 json_build_object('file', v_binlog_file, 'pos', v_binlog_pos, 'ts_sec', floor(extract(epoch from clock_timestamp())))::text,
+				p_case_strategy,
                 null,
                 false, 0,
                 true,
@@ -4792,6 +4972,7 @@ BEGIN
                 p_dest_schema,
                 p_lookup_db,
                 json_build_object('lsn', v_lsn)::text,
+				p_case_strategy,
                 p_lookup_schema,
                 false, 0,
                 true,
@@ -4816,7 +4997,7 @@ BEGIN
 
     RAISE NOTICE 'Step 9: Applying table mappings on destination schema "%" (lookup: %.% for connector %)',
                  p_dest_schema, p_lookup_db, p_lookup_schema, p_connector_name;
-    PERFORM synchdb_apply_table_mappings(p_dest_schema, p_connector_name, p_lookup_db, p_lookup_schema);
+    PERFORM synchdb_apply_table_mappings(p_dest_schema, p_connector_name, p_lookup_db, p_lookup_schema, p_case_strategy);
 
     -- Connector-specific completion notice + return value
     IF v_connector IN ('oracle', 'olr') THEN
@@ -5097,14 +5278,14 @@ BEGIN
 
     RAISE NOTICE 'Step 7: Applying column mappings to schema "%" using objmap %.% for connector %',
                  p_dest_schema, p_lookup_db, p_lookup_schema, p_connector_name;
-    PERFORM synchdb_apply_column_mappings(p_dest_schema, p_connector_name, p_lookup_db, p_lookup_schema);
+    PERFORM synchdb_apply_column_mappings(p_dest_schema, p_connector_name, p_lookup_db, p_lookup_schema, p_case_strategy);
 
     RAISE NOTICE 'Step 8: Migrating data with transforms from "%" to "%" (lookup: %.% for connector %)',
                  p_stage_schema, p_dest_schema, p_lookup_db, p_lookup_schema, p_connector_name;
 
     RAISE NOTICE 'Step 9: Applying table mappings on destination schema "%" (lookup: %.% for connector %)',
                  p_dest_schema, p_lookup_db, p_lookup_schema, p_connector_name;
-    PERFORM synchdb_apply_table_mappings(p_dest_schema, p_connector_name, p_lookup_db, p_lookup_schema);
+    PERFORM synchdb_apply_table_mappings(p_dest_schema, p_connector_name, p_lookup_db, p_lookup_schema, p_case_strategy);
 
     -- Connector-specific completion notice + return value
     IF v_connector IN ('oracle', 'olr') THEN

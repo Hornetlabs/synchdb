@@ -64,37 +64,35 @@ plugins:
             Quick Start: Inicio Rápido
             SynchDB Configuration: SynchDB Configuración
             Default Data Type Mapping: Mapeo de Tipos de Datos Predeterminado
-            Customize Object Mapping and Transformation: Personalizar la asignación y transformación de objetos
+            Object Transformation: Personalizar la asignación y transformación de objetos
             Automatic Connector Launcher: Lanzador Automático de Conectores
             DDL Replication: Replicación DDL
-            Selective Table Replication: Sincronización Selectiva de Tablas
             Set Offset: Establecer Desplazamiento
             Utility Functions: Funciones de Utilidad
             Changelog: Registro de Cambios
-            Configure Error Strategies: Configurar estrategias de error
+            Error Strategies: estrategias de error
             Create a Connector: Crear un conector
             Statistic View: Vista de estadísticas
             State View: Vista de estado
             Start/Stop a Connector: Iniciar/Detener un conector
             Object Mapping Workflow: Flujo de trabajo de mapeo de objetos
-            MySQL CDC to PostgreSQL: CDC de MySQL a PostgreSQL
-            SQL Server CDC to PostgreSQL: CDC de SQL Server a PostgreSQL
-            Oracle CDC to PostgreSQL: CDC de Oracle a PostgreSQL
-            Table Snapshot and Re-snapshot: Instantánea de tabla y nueva instantánea
+            MySQL Connector: Conector MySQL
+            SQL Server Connector: Conector SQL Server
+            Oracle Connector: Conector Oracle
+            Postgres Connector: Conector Postgres
             JMX Monitor Settings: Configuración del monitor JMX
             JVM Memory Usage: Uso de memoria de JVM
             Attribute View: Vista de atributos
             JMX Exporter Settings: Configuración del exportador JMX
-            Configure Openlog Replicator for Oracle Connector: Configurar Openlog Replicator para Oracle Connector
+            Openlog Replicator: Configurar Openlog Replicator
             Openlog Replicator Event Processor: Procesador de eventos del replicador Openlog
             Getting Started: Empezando
             Monitoring: escucha
             Tutorial: Tutorial
-            Secured Connection: Conexión segura
-            Configure Replication Offset: Configurar el desplazamiento de replicación
-            Configure Infinispan: Configurar Infinispan
-            Configure Snapshot Engine: Configurar el motor de instantáneas
+            Snapshot Engine: Configurar el motor de instantáneas
             FDW Based Snapshot: Instantánea basada en FDW
+            Letter Casing Strategy: Estrategia de mayúsculas y minúsculas
+            Native Openlog Replicator Connector: Conector nativo de replicador Openlog
         - locale: zh
           name: 中文
           site_name: SynchDB 文档
@@ -118,38 +116,36 @@ plugins:
             Quick Start: 快速入门
             SynchDB Configuration: SynchDB 配置
             Default Data Type Mapping: 默认数据类型映射
-            Customize Object Mapping and Transformation: 自定义对象映射和转换
+            Object Transformation: 对象映射和转换
             Automatic Connector Launcher: 连接器自动启动器
             DDL Replication: DDL复制
-            Selective Table Replication: 选择性表同步
             Set Offset: 设置偏移量
             Utility Functions: 实用函数
             Changelog: 变更日志
-            Configure Error Strategies: 配置错误处理策略
+            Error Strategies: 错误处理策略
             Create a Connector: 创建连接器
             Statistic View: 统计视图
             State View: 状态视图
             Start/Stop a Connector: 启动/停止连接器
             Object Mapping Workflow: 对象映射工作流程
-            MySQL -> PostgreSQL: MySQL CDC -> PostgreSQL
-            SQL Server -> PostgreSQL: SQL Server CDC -> PostgreSQL
-            Oracle -> PostgreSQL: Oracle CDC -> PostgreSQL
-            Table Snapshot and Re-snapshot: 表快照和重新快照
+            MySQL Connector: MySQL 連接器
+            SQL Server Connector: SQL Server 連接器
+            Oracle Connector: Oracle 連接器
+            Postgres Connector: Postgres 連接器
             JMX Monitor Settings: JMX 监视器设置
             JVM Memory Usage: JVM 内存使用情况
             Attribute View: 属性视图
             JMX Exporter Settings: JMX exporter 设置
-            Configure Openlog Replicator for Oracle Connector: 为 Oracle 连接器配置 Openlog Replicator
+            Openlog Replicator: Openlog Replicator 设置
             Openlog Replicator Event Processor: Openlog Replicator 事件处理器
             Debezium Event Processor: Debezium 事件处理器
             Getting Started: 快速入门
             Monitoring: 监控
             Tutorial: 教程
-            Secured Connection: 安全连接
-            Configure Replication Offset: 配置复制偏移
-            Configure Infinispan: 配置 infinispan
-            Configure Snapshot Engine: 配置快照引擎
+            Snapshot Engine: 配置快照引擎
             FDW Based Snapshot: 基於FDW的快照
+            Letter Casing Strategy: 字母大小寫規則
+            Native Openlog Replicator Connector: 原生 Openlog Replicator 连接器
   - mike:
       version_selector: true
       css_dir: css
@@ -175,12 +171,10 @@ nav:
    - Debezium Metadata Files: architecture/metadata_files.md
    - DDL Replication: architecture/ddl_replication.md
    - FDW Based Snapshot: architecture/fdw_based_snapshot.md
-   # - Test Framework: architecture/test_framework.md
  - Getting Started:
    - Installation: getting-started/installation.md
    - Source Database Setup: getting-started/remote_database_setups.md   
    - SynchDB Configuration: getting-started/configuration.md     
-   #- Prepare Sample Databases: getting-started/prepare_tests_env.md
    - Quick Start: getting-started/quick_start.md
  - Monitoring:
    - Statistic View: monitoring/stats_view.md
@@ -190,28 +184,21 @@ nav:
    - JMX Monitor Settings: monitoring/jmx_monitor.md
    - JMX Exporter Settings: monitoring/jmx_exporter.md
  - Tutorial:
-   - MySQL -> PostgreSQL: tutorial/mysql_cdc_to_postgresql.md
-   - SQL Server -> PostgreSQL: tutorial/sqlserver_cdc_to_postgresql.md
-   - Oracle -> PostgreSQL: tutorial/oracle_cdc_to_postgresql.md
-   # - Selective Table Replication: tutorial/selective_table_sync.md
-   # - Data Transformation: tutorial/data_transformation.md
-   # - Table Snapshot and Re-snapshot: tutorial/table_snapshot_resnapshot.md
-   # - Schema Only Synchronization: tutorial/schema_only_sync.md
-   # - Multi Source Replication: tutorial/multi_source_replication.md
-   - Object Mapping Workflow: tutorial/object_mapping_workflow.md
+   - MySQL Connector: tutorial/mysql_cdc_to_postgresql.md
+   - SQL Server Connector: tutorial/sqlserver_cdc_to_postgresql.md
+   - Oracle Connector: tutorial/oracle_cdc_to_postgresql.md
+   - Postgres Connector: tutorial/postgresql_cdc_to_postgresql.md
+   - Native Openlog Replicator Connector: tutorial/native_olr_cdc_to_postgresql.md
  - User guide:
    - Create a Connector: user-guide/create_a_connector.md
    - Start/Stop a Connector: user-guide/start_stop_connector.md
    - Automatic Connector Launcher: user-guide/connector_auto_launcher.md  
    - Default Data Type Mapping: user-guide/default_datatype_mapping.md
-   - Customize Object Mapping and Transformation: user-guide/object_mapping_rules.md
-   - Secured Connection: user-guide/secured_connection.md
-   - Configure Error Strategies: user-guide/configure_error_strategies.md
-   - Configure Replication Offset: user-guide/set_offset.md
-   - Configure Openlog Replicator for Oracle Connector: user-guide/configure_olr.md
-   - Configure Infinispan: user-guide/configure_infinispan.md
-   - Configure Snapshot Engine: user-guide/configure_snapshot_engine.md
-   # - Utility Functions: user-guide/utility_functions.md
+   - Object Transformation: user-guide/object_mapping_rules.md
+   - Letter Casing Strategy: user-guide/letter_casing_strategy.md
+   - Error Strategies: user-guide/configure_error_strategies.md
+   - Openlog Replicator: user-guide/configure_olr.md
+   - Snapshot Engine: user-guide/configure_snapshot_engine.md
  - Changelog: changelog.md
  # - Homepage: https://www.synchdb.com
 
