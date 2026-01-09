@@ -1443,7 +1443,13 @@ ra_run_orafdw_initial_snapshot_spi(ConnectorType connType, ConnectionInfo * conn
 		values[3]  = DirectFunctionCall1(namein,   CStringGetDatum("ora_stage"));
 		values[4]  = DirectFunctionCall1(namein,   CStringGetDatum(dstdb));
 		values[5]  = CStringGetTextDatum(conninfo->srcdb);
-		values[6]  = DirectFunctionCall1(namein,   CStringGetDatum(conninfo->srcschema));
+
+		/* we srcschema is not available, we put srcdb -> in the case of MySQL */
+		if (strlen(conninfo->srcschema) == 0 || !strcmp(conninfo->srcschema, "null"))
+			values[6]  = DirectFunctionCall1(namein,   CStringGetDatum(conninfo->srcdb));
+		else
+			values[6]  = DirectFunctionCall1(namein,   CStringGetDatum(conninfo->srcschema));
+
 		values[7]  = BoolGetDatum(true);
 		values[8]  = CStringGetTextDatum("replace");
 
