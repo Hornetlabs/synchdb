@@ -4533,8 +4533,9 @@ BEGIN
         AND c.relkind = 'r'
         AND c.relname = d_table
     ) THEN
-      RAISE NOTICE 'Skipping % -> %.%: destination exists', s_table, d_schema, d_table;
-      CONTINUE;
+      RAISE NOTICE 'dropping % -> %.%: destination exists', s_table, d_schema, d_table;
+      EXECUTE format('DROP TABLE %I.%I', d_schema, d_table);
+      -- CONTINUE;
     END IF;
 
     -- Same-schema rename vs. cross-schema move (rename first to avoid collisions)
