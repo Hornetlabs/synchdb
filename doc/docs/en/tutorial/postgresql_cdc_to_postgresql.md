@@ -1,4 +1,4 @@
-# Postgres -> Postgres
+# Postgres Connector
 
 ## **Prepare PostgreSQL Database for SynchDB**
 
@@ -150,10 +150,143 @@ After the initial snapshot, CDC will begin. Restarting a connector in `always` m
 
 ## **Preview Source and Destination Table Relationships with schemasync mode**
 
-Before attempting to do an initial snapshot of current table and data, which may be huge, it is possible to "preview" all the tables and data type mappings between source and destination tables before the actual data migration. This gives you an opportunity to modify a data type mapping, or an object name before actual migration happens. This can be done with the special "schemasync" initial snapshot mode. Refer to [object mapping workflow](../../tutorial/object_mapping_workflow/) for a detailed example.
+Before attempting to do an initial snapshot of current table and data, which may be huge, it is possible to "preview" all the tables and data type mappings between source and destination tables before the actual data migration. This gives you an opportunity to modify a data type mapping, or an object name before actual migration happens. This can be done with the special "schemasync" initial snapshot mode.
 
 Please note that you must set `synchdb.olr_snapshot_engine` to 'fdw' in order to use `schemasync` mode to preview the tables.
 
+### **Create a Connector and Start it in `schemasync` Mode**
+
+`schemasync` is a special mode that makes the connector connects to remote database and attempt to sync only the schema of designated tables. After this is done, the connector is put to `paused` state and user is able to review all the tables and data types created using the default rules and make change if needed.
+
+```sql
+SELECT synchdb_add_conninfo(
+    'pgconn', 
+    '127.0.0.1', 
+    5433, 
+    'pguser', 
+    'pgpass', 
+    'postgres', 
+    'public', 
+    'null', 
+    'null', 
+    'postgres'
+);
+
+SELECT synchdb_start_engine_bgw('pgconn', 'schemasync');
+```
+
+### **Ensure the connector is put to paused state**
+
+```sql
+SELECT name, connector_type, pid, stage, state FROM synchdb_state_view WHERE name = 'pgconn';;
+  name  | connector_type |   pid   |        stage        | state
+--------+----------------+---------+---------------------+--------
+ pgconn | postgres       | 1643157 | change data capture | paused
+
+```
+
+### **Review the Tables Created by Default Mapping Rules**
+
+```sql
+SELECT * FROM synchdb_att_view WHERE name = 'pgconn';
+  name  |   type   | attnum |       ext_tbname        |    pg_tbname     | ext_attname | pg_attname |  ext_atttypename  |  pg_atttypename   | transform
+--------+----------+--------+-------------------------+------------------+-------------+------------+-------------------+-------------------+-----------
+ pgconn | postgres |      1 | postgres.public.mytble  | postgres.mytble  | a           | a          | numeric           | numeric           |
+ pgconn | postgres |      2 | postgres.public.mytble  | postgres.mytble  | b           | b          | numeric           | numeric           |
+ pgconn | postgres |      3 | postgres.public.mytble  | postgres.mytble  | c           | c          | numeric           | numeric           |
+ pgconn | postgres |      1 | postgres.public.testing | postgres.testing | a           | a          | integer           | integer           |
+ pgconn | postgres |      2 | postgres.public.testing | postgres.testing | b           | b          | text              | text              |
+ pgconn | postgres |      3 | postgres.public.testing | postgres.testing | c           | c          | character varying | character varying |
+ pgconn | postgres |      4 | postgres.public.testing | postgres.testing | d           | d          | bigint            | bigint            |
+ pgconn | postgres |      1 | postgres.public.xyz     | postgres.xyz     | bbb         | bbb        | character varying | character varying |
+ pgconn | postgres |      2 | postgres.public.xyz     | postgres.xyz     | ccc         | ccc        | bytea             | bytea             |
+ pgconn | postgres |      3 | postgres.public.xyz     | postgres.xyz     | ddd         | ddd        | numeric           | numeric           |
+ pgconn | postgres |      4 | postgres.public.xyz     | postgres.xyz     | eee         | eee        | numeric           | numeric           |
+ pgconn | postgres |      5 | postgres.public.xyz     | postgres.xyz     | fff         | fff        | numeric           | numeric           |
+ pgconn | postgres |      6 | postgres.public.xyz     | postgres.xyz     | ggg         | ggg        | bigint            | bigint            |
+ pgconn | postgres |      7 | postgres.public.xyz     | postgres.xyz     | aaa         | aaa        | integer           | integer           |
+
+
+```
+
+### **Define Custom Mapping Rules (If Needed)**
+
+User can use `synchdb_add_objmap` function to create custom mapping rules. It can be used to map table name, column name, data types and defines a data transform expression rule
+
+```sql
+SELECT synchdb_add_objmap('pgconn','table','postgres.public.mytble','postgres.thetable');
+SELECT synchdb_add_objmap('pgconn','column','postgres.public.testing.c','ccc');
+SELECT synchdb_add_objmap('pgconn','datatype','postgres.public.xyz.ggg','int|0');
+SELECT synchdb_add_objmap('pgconn','transform','postgres.public.xyz.bbb','''>>>>>'' || ''%d'' || ''<<<<<''');
+```
+
+The above means:
+
+* source table 'postgres.public.mytble' will be mapped to 'postgres.thetable' in destination
+* source column 'postgres.public.testing.c'will be mapped to 'ccc' in destination
+* source data type for column 'postgres.public.xyz.ggg' will be mapped to 'int'
+* source column data 'postgres.public.xyz.bbb' will be transformed accoring to the expression where %d is the data placeholder
+
+### **Review All Object Mapping Rules Created So Far**
+
+```sql
+SELECT * FROM synchdb_objmap WHERE name = 'pgconn';
+  name  |  objtype  | enabled |          srcobj           |           dstobj
+--------+-----------+---------+---------------------------+----------------------------
+ pgconn | table     | t       | postgres.public.mytble    | postgres.thetable
+ pgconn | column    | t       | postgres.public.testing.c | ccc
+ pgconn | datatype  | t       | postgres.public.xyz.ggg   | int|0
+ pgconn | transform | t       | postgres.public.xyz.bbb   | '>>>>>' || '%d' || '<<<<<'
+
+
+```
+
+### **Reload the Object Mapping Rules**
+
+Once all custom rules have been defined, we need to signal the connector to load them. This will cause the connector to read and apply the object mapping rules. If it sees a discrepancy between current PostgreSQL values and the object mapping values, it will attempt to correct the mapping.
+
+```sql
+SELECT synchdb_reload_objmap('pgconn');
+
+```
+
+### **Review `synchdb_att_view` Again for Changes**
+
+```sql
+SELECT * from synchdb_att_view WHERE name = 'pgconn';;
+  name  |   type   | attnum |       ext_tbname        |     pg_tbname     | ext_attname | pg_attname |  ext_atttypename  |  pg_atttypename   |         transform
+--------+----------+--------+-------------------------+-------------------+-------------+------------+-------------------+-------------------+----------------------------
+ pgconn | postgres |      1 | postgres.public.mytble  | postgres.thetable | a           | a          | numeric           | numeric           |
+ pgconn | postgres |      2 | postgres.public.mytble  | postgres.thetable | b           | b          | numeric           | numeric           |
+ pgconn | postgres |      3 | postgres.public.mytble  | postgres.thetable | c           | c          | numeric           | numeric           |
+ pgconn | postgres |      1 | postgres.public.testing | postgres.testing  | a           | a          | integer           | integer           |
+ pgconn | postgres |      2 | postgres.public.testing | postgres.testing  | b           | b          | text              | text              |
+ pgconn | postgres |      3 | postgres.public.testing | postgres.testing  | c           | ccc        | character varying | character varying |
+ pgconn | postgres |      4 | postgres.public.testing | postgres.testing  | d           | d          | bigint            | bigint            |
+ pgconn | postgres |      1 | postgres.public.xyz     | postgres.xyz      | bbb         | bbb        | character varying | character varying | '>>>>>' || '%d' || '<<<<<'
+ pgconn | postgres |      2 | postgres.public.xyz     | postgres.xyz      | ccc         | ccc        | bytea             | bytea             |
+ pgconn | postgres |      3 | postgres.public.xyz     | postgres.xyz      | ddd         | ddd        | numeric           | numeric           |
+ pgconn | postgres |      4 | postgres.public.xyz     | postgres.xyz      | eee         | eee        | numeric           | numeric           |
+ pgconn | postgres |      5 | postgres.public.xyz     | postgres.xyz      | fff         | fff        | numeric           | numeric           |
+ pgconn | postgres |      6 | postgres.public.xyz     | postgres.xyz      | ggg         | ggg        | bigint            | integer           |
+ pgconn | postgres |      7 | postgres.public.xyz     | postgres.xyz      | aaa         | aaa        | integer           | integer           |
+
+```
+
+### **Resume the Connector or Redo the Entire Snapshot**
+
+Once the object mappings have been confirmed correct, we can resume the connector. Please note that, resume will proceed to streaming only the new table changes. The existing data of the tables will not be copied.
+
+```sql
+SELECT synchdb_resume_engine('pgconn');
+```
+
+To capture the table's existing data, we can also redo the entire snapshot with the new object mapping rules.
+
+```sql
+SELECT synchdb_stop_engine_bgw('pgconn');
+SELECT synchdb_start_engine_bgw('pgconn', 'always');
+```
 
 ## **Selective Table Sync**
 

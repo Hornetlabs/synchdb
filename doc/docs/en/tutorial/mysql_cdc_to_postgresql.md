@@ -1,4 +1,4 @@
-# MySQL -> PostgreSQL
+# MySQL Connector
 
 ## **Prepare MySQL Database for SynchDB**
 
@@ -153,7 +153,164 @@ After the initial snapshot, CDC will begin. Restarting a connector in `always` m
 
 ## **Preview Source and Destination Table Relationships with schemasync mode**
 
-Before attempting to do an initial snapshot of current table and data, which may be huge, it is possible to "preview" all the tables and data type mappings between source and destination tables before the actual data migration. This gives you an opportunity to modify a data type mapping, or an object name before actual migration happens. This can be done with the special "schemasync" initial snapshot mode. Refer to [object mapping workflow](../../tutorial/object_mapping_workflow/) for a detailed example.
+Before attempting to do an initial snapshot of current table and data, which may be huge, it is possible to "preview" all the tables and data type mappings between source and destination tables before the actual data migration. This gives you an opportunity to modify a data type mapping, or an object name before actual migration happens. This can be done with the special "schemasync" initial snapshot mode.
+
+Please note that you must set `synchdb.olr_snapshot_engine` to 'fdw' in order to use `schemasync` mode to preview the tables.
+
+### **Create a Connector and Start it in `schemasync` Mode**
+
+`schemasync` is a special mode that makes the connector connects to remote database and attempt to sync only the schema of designated tables. After this is done, the connector is put to `paused` state and user is able to review all the tables and data types created using the default rules and make change if needed.
+
+```sql
+SELECT synchdb_add_conninfo(
+    'mysqlconn', 
+    '127.0.0.1', 
+    3306, 
+    'mysqluser', 
+    'mysqlpwd', 
+    'inventory', 
+    'null', 
+    'null', 
+    'null', 
+    'mysql'
+);
+
+SELECT synchdb_start_engine_bgw('mysqlconn', 'schemasync');
+```
+
+### **Ensure the connector is put to paused state**
+
+```sql
+SELECT name, connector_type, pid, stage, state FROM synchdb_state_view WHERE name = 'mysqlconn';
+   name    | connector_type |   pid   |        stage        | state
+-----------+----------------+---------+---------------------+--------
+ mysqlconn | mysql          | 1644218 | change data capture | paused
+
+```
+
+### **Review the Tables Created by Default Mapping Rules**
+
+```sql
+SELECT * FROM synchdb_att_view WHERE name = 'mysqlconn';
+   name    |   type   | attnum |         ext_tbname         |         pg_tbname          | ext_attname  |  pg_attname  |  ext_atttypename  |  pg_atttypename   |         transform
+
+-----------+----------+--------+----------------------------+----------------------------+--------------+--------------+-------------------+-------------------+----------------------
+------
+ mysqlconn | mysql    |      1 | inventory.addresses        | inventory.addresses        | id           | id           | int               | integer           |
+ mysqlconn | mysql    |      2 | inventory.addresses        | inventory.addresses        | customer_id  | customer_id  | int               | integer           |
+ mysqlconn | mysql    |      3 | inventory.addresses        | inventory.addresses        | street       | street       | varchar           | character varying |
+ mysqlconn | mysql    |      4 | inventory.addresses        | inventory.addresses        | city         | city         | varchar           | character varying |
+ mysqlconn | mysql    |      5 | inventory.addresses        | inventory.addresses        | state        | state        | varchar           | character varying |
+ mysqlconn | mysql    |      6 | inventory.addresses        | inventory.addresses        | zip          | zip          | varchar           | character varying |
+ mysqlconn | mysql    |      7 | inventory.addresses        | inventory.addresses        | type         | type         | enum              | text              |
+ mysqlconn | mysql    |      1 | inventory.customers        | inventory.customers        | id           | id           | int               | integer           |
+ mysqlconn | mysql    |      2 | inventory.customers        | inventory.customers        | first_name   | first_name   | varchar           | character varying |
+ mysqlconn | mysql    |      3 | inventory.customers        | inventory.customers        | last_name    | last_name    | varchar           | character varying |
+ mysqlconn | mysql    |      4 | inventory.customers        | inventory.customers        | email        | email        | varchar           | character varying |
+ mysqlconn | mysql    |      1 | inventory.geom             | inventory.geom             | id           | id           | int               | integer           |
+ mysqlconn | mysql    |      2 | inventory.geom             | inventory.geom             | g            | g            | geometry          | text              |
+ mysqlconn | mysql    |      3 | inventory.geom             | inventory.geom             | h            | h            | geometry          | text              |
+ mysqlconn | mysql    |      1 | inventory.orders           | inventory.orders           | order_number | order_number | int               | integer           |
+ mysqlconn | mysql    |      2 | inventory.orders           | inventory.orders           | order_date   | order_date   | date              | date              |
+ mysqlconn | mysql    |      3 | inventory.orders           | inventory.orders           | purchaser    | purchaser    | int               | integer           |
+ mysqlconn | mysql    |      4 | inventory.orders           | inventory.orders           | quantity     | quantity     | int               | integer           |
+ mysqlconn | mysql    |      5 | inventory.orders           | inventory.orders           | product_id   | product_id   | int               | integer           |
+ mysqlconn | mysql    |      1 | inventory.products         | inventory.products         | id           | id           | int               | integer           |
+ mysqlconn | mysql    |      2 | inventory.products         | inventory.products         | name         | name         | varchar           | character varying |
+ mysqlconn | mysql    |      3 | inventory.products         | inventory.products         | description  | description  | varchar           | character varying |
+ mysqlconn | mysql    |      4 | inventory.products         | inventory.products         | weight       | weight       | float             | real              |
+ mysqlconn | mysql    |      1 | inventory.products_on_hand | inventory.products_on_hand | product_id   | product_id   | int               | integer           |
+ mysqlconn | mysql    |      2 | inventory.products_on_hand | inventory.products_on_hand | quantity     | quantity     | int               | integer           |
+
+```
+
+### **Define Custom Mapping (If Needed)**
+
+```sql
+SELECT synchdb_add_objmap('mysqlconn','table','inventory.products','inventory.myproducts');
+SELECT synchdb_add_objmap('mysqlconn','column','inventory.customers.email','contact');
+SELECT synchdb_add_objmap('mysqlconn','datatype','inventory.orders.quantity','bigint|0');
+SELECT synchdb_add_objmap('mysqlconn','transform','inventory.products.name','''>>>>>'' || ''%d'' || ''<<<<<''');
+```
+The above means:
+
+* source table 'inventory.products' will be mapped to 'inventory.myproducts' in destination
+* source column 'inventory.customers.email' will be mapped to 'contact' in destination
+* source data type for column 'inventory.orders.quantity' will be mapped to 'bigint'
+* source column data 'inventory.products.name' will be transformed accoring to the expression where %d is the data placeholder
+
+### **Review All Object Mapping Rules Created So Far**
+
+```sql
+SELECT * FROM synchdb_objmap WHERE name = 'mysqlconn';
+   name    |  objtype  | enabled |          srcobj           |           dstobj
+-----------+-----------+---------+---------------------------+----------------------------
+ mysqlconn | table     | t       | inventory.products        | inventory.myproducts
+ mysqlconn | column    | t       | inventory.customers.email | contact
+ mysqlconn | datatype  | t       | inventory.orders.quantity | bigint|0
+ mysqlconn | transform | t       | inventory.products.name   | '>>>>>' || '%d' || '<<<<<'
+
+```
+
+### **Reload the Object Mapping Rules**
+
+Once all custom rules have been defined, we need to signal the connector to load them. This will cause the connector to read and apply the object mapping rules. If it sees a discrepancy between current PostgreSQL values and the object mapping values, it will attempt to correct the mapping.
+
+```sql
+SELECT synchdb_reload_objmap('mysqlconn');
+
+```
+
+### **Review `synchdb_att_view` Again for Changes**
+
+```sql
+   name    | type  | attnum |         ext_tbname         |         pg_tbname          | ext_attname  |  pg_attname  | ext_atttypename |  pg_atttypename   |         transform
+
+-----------+-------+--------+----------------------------+----------------------------+--------------+--------------+-----------------+-------------------+---------------------------
+-
+ mysqlconn | mysql |      1 | inventory.addresses        | inventory.addresses        | id           | id           | int             | integer           |
+ mysqlconn | mysql |      2 | inventory.addresses        | inventory.addresses        | customer_id  | customer_id  | int             | integer           |
+ mysqlconn | mysql |      3 | inventory.addresses        | inventory.addresses        | street       | street       | varchar         | character varying |
+ mysqlconn | mysql |      4 | inventory.addresses        | inventory.addresses        | city         | city         | varchar         | character varying |
+ mysqlconn | mysql |      5 | inventory.addresses        | inventory.addresses        | state        | state        | varchar         | character varying |
+ mysqlconn | mysql |      6 | inventory.addresses        | inventory.addresses        | zip          | zip          | varchar         | character varying |
+ mysqlconn | mysql |      7 | inventory.addresses        | inventory.addresses        | type         | type         | enum            | text              |
+ mysqlconn | mysql |      1 | inventory.customers        | inventory.customers        | id           | id           | int             | integer           |
+ mysqlconn | mysql |      2 | inventory.customers        | inventory.customers        | first_name   | first_name   | varchar         | character varying |
+ mysqlconn | mysql |      3 | inventory.customers        | inventory.customers        | last_name    | last_name    | varchar         | character varying |
+ mysqlconn | mysql |      4 | inventory.customers        | inventory.customers        | email        | contact      | varchar         | character varying |
+ mysqlconn | mysql |      1 | inventory.geom             | inventory.geom             | id           | id           | int             | integer           |
+ mysqlconn | mysql |      2 | inventory.geom             | inventory.geom             | g            | g            | geometry        | text              |
+ mysqlconn | mysql |      3 | inventory.geom             | inventory.geom             | h            | h            | geometry        | text              |
+ mysqlconn | mysql |      1 | inventory.orders           | inventory.orders           | order_number | order_number | int             | integer           |
+ mysqlconn | mysql |      2 | inventory.orders           | inventory.orders           | order_date   | order_date   | date            | date              |
+ mysqlconn | mysql |      3 | inventory.orders           | inventory.orders           | purchaser    | purchaser    | int             | integer           |
+ mysqlconn | mysql |      4 | inventory.orders           | inventory.orders           | quantity     | quantity     | int             | bigint            |
+ mysqlconn | mysql |      5 | inventory.orders           | inventory.orders           | product_id   | product_id   | int             | integer           |
+ mysqlconn | mysql |      1 | inventory.products         | inventory.myproducts       | id           | id           | int             | integer           |
+ mysqlconn | mysql |      2 | inventory.products         | inventory.myproducts       | name         | name         | varchar         | character varying | '>>>>>' || '%d' || '<<<<<'
+ mysqlconn | mysql |      3 | inventory.products         | inventory.myproducts       | description  | description  | varchar         | character varying |
+ mysqlconn | mysql |      4 | inventory.products         | inventory.myproducts       | weight       | weight       | float           | real              |
+ mysqlconn | mysql |      1 | inventory.products_on_hand | inventory.products_on_hand | product_id   | product_id   | int             | integer           |
+ mysqlconn | mysql |      2 | inventory.products_on_hand | inventory.products_on_hand | quantity     | quantity     | int             | integer           |
+
+
+```
+
+### **Resume the Connector or Redo the Entire Snapshot**
+
+Once the object mappings have been confirmed correct, we can resume the connector. Please note that, resume will proceed to streaming only the new table changes. The existing data of the tables will not be copied.
+
+```sql
+SELECT synchdb_resume_engine('mysqlconn');
+```
+
+To capture the table's existing data, we can also redo the entire snapshot with the new object mapping rules.
+
+```sql
+SELECT synchdb_stop_engine_bgw('mysqlconn');
+SELECT synchdb_start_engine_bgw('mysqlconn', 'always');
+```
 
 ## **Selective Table Sync**
 
@@ -240,4 +397,91 @@ postgres=# \dt inventory.*
  inventory | orders    | table | ubuntu
  inventory | products  | table | ubuntu
 
+```
+
+## Secured Connection
+
+### **Configure Secured Connection**
+
+to secure the connection to remote database, we need to configure additional SSL related parameters to a connector that has been created by `synchdb_add_conninfo`. The SSL certificates and private keys must be packaged as Java keystore file with a passphrase. These information is then passed to SynchDB via synchdb_add_extra_conninfo().
+
+### **synchdb_add_extra_conninfo**
+
+**Purpose**: Configures extra connector parameters to an existing connector created by `synchdb_add_conninfo`
+
+| Parameter | Description | Required | Example | Notes |
+|:-:|:-|:-:|:-|:-|
+| `name` | Unique identifier for this connector | ✓ | `'mysqlconn'` | Must be unique across all connectors |
+| `ssl_mode` | SSL mode | ☐ | `'verify_ca'` | can be one of: <br><ul><li> "disabled" - no SSL is used. </li><li> "preferred" - SSL is used if server supports it. </li><li> "required" - SSL must be used to establish a connection. </li><li> "verify_ca" - connector establishes TLS with the server and will also verify server's TLS certificate against configured truststore. </li><li> "verify_identity" - same behavior as verify_ca but it also checks the server certificate's common name to match the hostname of the system. |
+| `ssl_keystore` | keystore path | ☐ | `/path/to/keystore` | path to the keystore file |
+| `ssl_keystore_pass` | keystore password | ☐ | `'mykeystorepass'` | password to access the keystore file |
+| `ssl_truststore` | trust store path | ☐ | `'/path/to/truststore'` | path to the truststore file |
+| `ssl_truststore_pass` | trust store password | ☐ | `'mytruststorepass'` | password to access the truststore file |
+
+
+```sql
+SELECT synchdb_add_extra_conninfo('mysqlconn', 'verify_ca', '/path/to/keystore', 'mykeystorepass', '/path/to/truststore', 'mytruststorepass');
+```
+
+### **synchdb_del_extra_conninfo**
+
+**Purpose**: Deletes extra connector paramters created by `synchdb_add_extra_conninfo`
+```sql
+SELECT synchdb_del_extra_conninfo('mysqlconn');
+```
+
+## Custom Start Offset Values
+
+A start offset value represents a point to start replication from in the similar way as PostgreSQL's resume LSN. When Debezium runner engine starts, it will start the replication from this offset value. Setting this offset value to a earlier value will cause Debezium runner engine to start replication from earlier records, possibly replicating duplicate data records. We should be extra cautious when setting start offset values on Debezium.
+
+### **Record Settable Offset Values**
+
+During operation, new offsets will be generated nd flushed to disk by Debezium runner engine. The last flushed offset can be retrieved from `synchdb_state_view()` utility command:
+
+```sql
+postgres=# select name, last_dbz_offset from synchdb_state_view;
+     name      |                                           last_dbz_offset
+---------------+------------------------------------------------------------------------------------------------------
+ mysqlconn     | {"ts_sec":1741301103,"file":"mysql-bin.000009","pos":574318212,"row":1,"server_id":223344,"event":2}
+
+```
+
+Depending on the connector type, this offset value differs. From the example above, the `mysql` connector's last flushed offset is `{"ts_sec":1741301103,"file":"mysql-bin.000009","pos":574318212,"row":1,"server_id":223344,"event":2}` and `sqlserver`'s last flushed offset is `{"commit_lsn":"0000006a:00006608:0003","snapshot":true,"snapshot_completed":false}`. 
+
+We should save this values regularly, so in case we run into a problem, we know the offset location in the past that can be set to resume the replication operation.
+
+
+### **Pause the Connector**
+
+A connector must be in a `paused` state before a new offset value can be set.
+
+Use `synchdb_pause_engine()` SQL function to pause a runnng connector. This will halt the Debezium runner engine from replicating from the heterogeneous database. When paused, it is possible to alter the Debezium connector's offset value to replicate from a specific point in the past using `synchdb_set_offset()` SQL routine. It takes `conninfo_name` as its argument which can be found from the output of `synchdb_get_state()` view.
+
+For example:
+
+```sql
+SELECT synchdb_pause_engine('mysqlconn');
+```
+
+### **Set the new Offset**
+
+Use `synchdb_set_offset()` SQL function to change a connector worker's starting offset. This can only be done when the connector is put into `paused` state. The function takes 2 parameters, `conninfo_name` and `a valid offset string`, both of which can be found from the output of `synchdb_get_state()` view.
+
+For example:
+
+```sql
+SELECT 
+  synchdb_set_offset(
+    'mysqlconn', '{"ts_sec":1741301103,"file":"mysql-bin.000009","pos":574318212,"row":1,"server_id":223344,"event":2}'
+  );
+```
+
+### **Resume the Connector**
+
+Use `synchdb_resume_engine()` SQL function to resume Debezium operation from a paused state. This function takes `connector name` as its only parameter, which can be found from the output of `synchdb_get_state()` view. The resumed Debezium runner engine will start the replication from the newly set offset value.
+
+For example:
+
+```sql
+SELECT synchdb_resume_engine('mysqlconn');
 ```

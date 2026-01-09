@@ -1,4 +1,4 @@
-# SQL Server -> PostgreSQL
+# SQL Server 连接器
 
 ## **为 SynchDB 准备 SQL Server 数据库**
 
@@ -148,7 +148,149 @@ WHERE name = 'sqlserverconn';
 
 ## **使用 schemasync 模式預覽來源表和目標表關係**
 
-在嘗試對當前表和資料（可能非常龐大）進行初始快照之前，可以在實際資料遷移之前「預覽」來源表和目標表之間的所有表和資料類型對應。這樣，您就有機會在實際遷移之前修改資料類型對應或物件名稱。這可以透過特殊的「schemasync」初始快照模式來實現。有關詳細範例，請參閱[对象映射工作流程](../../tutorial/object_mapping_workflow/)。
+在嘗試對當前表和資料（可能非常龐大）進行初始快照之前，可以在實際資料遷移之前「預覽」來源表和目標表之間的所有表和資料類型對應。這樣，您有機會在實際遷移之前修改資料類型對應或物件名稱。這可以透過特殊的「schemasync」初始快照模式來實現。
+
+請注意，您必須將 `synchdb.olr_snapshot_engine` 設定為 'fdw' 才能使用 `schemasync` 模式預覽表。
+
+### **建立連接器並以 `schemasync` 模式啟動它**
+
+`schemasync` 是一種特殊模式，它使連接器連接到遠端資料庫並嘗試僅同步指定表的模式。完成後，連接器將處於「暫停」狀態，使用者可以查看使用預設規則建立的所有資料表和資料類型，並根據需要進行變更。
+
+```sql
+SELECT synchdb_add_conninfo(
+    'sqlserverconn', 
+    '127.0.0.1', 
+    1433, 
+    'sa', 
+    'Password!', 
+    'testDB', 
+    'dbo', 
+    'null',
+    'null', 
+    'sqlserver'
+);
+
+SELECT synchdb_start_engine_bgw('sqlserverconn', 'schemasync');
+```
+
+### **確保連接器處於暫停狀態**
+
+```sql
+SELECT name, connector_type, pid, stage, state FROM synchdb_state_view WHERE name = 'sqlserverconn';
+     name      | connector_type |   pid   |        stage        | state
+---------------+----------------+---------+---------------------+--------
+ sqlserverconn | sqlserver      | 1647884 | change data capture | paused
+
+```
+
+### **查看預設映射規則所建立的表**
+
+```sql
+SELECT * FROM synchdb_att_view WHERE name = 'sqlserverconn';
+     name      |   type    | attnum |         ext_tbname          |        pg_tbname        | ext_attname  |  pg_attname  | ext_atttypename |  pg_atttypename   | transform
+---------------+-----------+--------+-----------------------------+-------------------------+--------------+--------------+-----------------+-------------------+-----------
+ sqlserverconn | sqlserver |      1 | testDB.dbo.customers        | testdb.customers        | id           | id           | int identity    | integer           |
+ sqlserverconn | sqlserver |      2 | testDB.dbo.customers        | testdb.customers        | first_name   | first_name   | varchar         | character varying |
+ sqlserverconn | sqlserver |      3 | testDB.dbo.customers        | testdb.customers        | last_name    | last_name    | varchar         | character varying |
+ sqlserverconn | sqlserver |      4 | testDB.dbo.customers        | testdb.customers        | email        | email        | varchar         | character varying |
+ sqlserverconn | sqlserver |      1 | testDB.dbo.orders           | testdb.orders           | order_number | order_number | int identity    | integer           |
+ sqlserverconn | sqlserver |      2 | testDB.dbo.orders           | testdb.orders           | order_date   | order_date   | date            | date              |
+ sqlserverconn | sqlserver |      3 | testDB.dbo.orders           | testdb.orders           | purchaser    | purchaser    | int             | integer           |
+ sqlserverconn | sqlserver |      4 | testDB.dbo.orders           | testdb.orders           | quantity     | quantity     | int             | integer           |
+ sqlserverconn | sqlserver |      5 | testDB.dbo.orders           | testdb.orders           | product_id   | product_id   | int             | integer           |
+ sqlserverconn | sqlserver |      1 | testDB.dbo.products         | testdb.products         | id           | id           | int identity    | integer           |
+ sqlserverconn | sqlserver |      2 | testDB.dbo.products         | testdb.products         | name         | name         | varchar         | character varying |
+ sqlserverconn | sqlserver |      3 | testDB.dbo.products         | testdb.products         | description  | description  | varchar         | character varying |
+ sqlserverconn | sqlserver |      4 | testDB.dbo.products         | testdb.products         | weight       | weight       | float           | real              |
+ sqlserverconn | sqlserver |      1 | testDB.dbo.products_on_hand | testdb.products_on_hand | product_id   | product_id   | int             | integer           |
+ sqlserverconn | sqlserver |      2 | testDB.dbo.products_on_hand | testdb.products_on_hand | quantity     | quantity     | int             | integer           |
+
+```
+
+### **定義自訂映射規則（如有需要）**
+
+使用者可以使用 `synchdb_add_objmap` 函數建立自訂映射規則。此函數可用於對應表名、列名、資料類型，並定義資料轉換表達式規則。
+
+```sql
+SELECT synchdb_add_objmap('sqlserverconn','table','testDB.dbo.products','testdb.myproducts');
+SELECT synchdb_add_objmap('sqlserverconn','column','testDB.dbo.customers.email','contact');
+SELECT synchdb_add_objmap('sqlserverconn','datatype','testDB.dbo.products_on_hand.quantity','bigint|0');
+SELECT synchdb_add_objmap('sqlserverconn','transform','testDB.dbo.products.name','''>>>>>'' || ''%d'' || ''<<<<<''');
+```
+
+以上內容意味著：
+
+* 來源表“testDB.dbo.product”將會對應到目標表“testdb.myproducts”
+* 來源列“testDB.dbo.customers.email”將會對應到目標表“contact”
+* 來源列“testDB.dbo.products_on_hand.quantity”的資料型別將會對應到“bigint”
+* 來源列「testDB.dbo.products.name」的資料將根據表達式進行轉換，其中 %d 為資料佔位符
+
+### **回顧所有已建立的物件映射規則**
+
+```sql
+SELECT * FROM synchdb_objmap WHERE name = 'sqlserverconn';
+     name      |  objtype  | enabled |                srcobj                |           dstobj
+---------------+-----------+---------+--------------------------------------+----------------------------
+ sqlserverconn | table     | t       | testDB.dbo.products                  | testdb.myproducts
+ sqlserverconn | column    | t       | testDB.dbo.customers.email           | contact
+ sqlserverconn | datatype  | t       | testDB.dbo.products_on_hand.quantity | bigint|0
+ sqlserverconn | transform | t       | testDB.dbo.product.name              | '>>>>>' || '%d' || '<<<<<'
+
+```
+
+### **重新載入物件映射規則**
+
+定義完所有自訂規則後，我們需要通知連接器載入這些規則。這將使連接器讀取並應用物件映射規則。如果連接器發現目前 PostgreSQL 值與物件對應值之間存在差異，它將嘗試修正映射。
+
+```sql
+SELECT synchdb_reload_objmap('sqlserverconn');
+
+```
+
+### **再次檢查 `synchdb_att_view` 是否有更改**
+
+```sql
+SELECT * from synchdb_att_view WHERE name = 'sqlserverconn';
+     name      |   type    | attnum |         ext_tbname          |        pg_tbname        | ext_attname  |  pg_attname  | ext_atttypename |  pg_atttypename   |         transform
+
+---------------+-----------+--------+-----------------------------+-------------------------+--------------+--------------+-----------------+-------------------+---------------------
+-------
+ sqlserverconn | sqlserver |      1 | testDB.dbo.customers        | testdb.customers        | id           | id           | int identity    | integer           |
+ sqlserverconn | sqlserver |      2 | testDB.dbo.customers        | testdb.customers        | first_name   | first_name   | varchar         | character varying |
+ sqlserverconn | sqlserver |      3 | testDB.dbo.customers        | testdb.customers        | last_name    | last_name    | varchar         | character varying |
+ sqlserverconn | sqlserver |      4 | testDB.dbo.customers        | testdb.customers        | email        | contact      | varchar         | character varying |
+ sqlserverconn | sqlserver |      1 | testDB.dbo.orders           | testdb.orders           | order_number | order_number | int identity    | integer           |
+ sqlserverconn | sqlserver |      2 | testDB.dbo.orders           | testdb.orders           | order_date   | order_date   | date            | date              |
+ sqlserverconn | sqlserver |      3 | testDB.dbo.orders           | testdb.orders           | purchaser    | purchaser    | int             | integer           |
+ sqlserverconn | sqlserver |      4 | testDB.dbo.orders           | testdb.orders           | quantity     | quantity     | int             | integer           |
+ sqlserverconn | sqlserver |      5 | testDB.dbo.orders           | testdb.orders           | product_id   | product_id   | int             | integer           |
+ sqlserverconn | sqlserver |      1 | testDB.dbo.products         | testdb.products         | id           | id           | int identity    | integer           |
+ sqlserverconn | sqlserver |      2 | testDB.dbo.products         | testdb.products         | name         | name         | varchar         | character varying | '>>>>>' || '%d' || '
+<<<<<'
+ sqlserverconn | sqlserver |      3 | testDB.dbo.products         | testdb.products         | description  | description  | varchar         | character varying |
+ sqlserverconn | sqlserver |      4 | testDB.dbo.products         | testdb.products         | weight       | weight       | float           | real              |
+ sqlserverconn | sqlserver |      1 | testDB.dbo.products_on_hand | testdb.products_on_hand | product_id   | product_id   | int             | integer           |
+ sqlserverconn | sqlserver |      2 | testDB.dbo.products_on_hand | testdb.products_on_hand | quantity     | quantity     | int             | bigint            |
+
+
+```
+
+### **恢復連接器或重新建立整個快照**
+
+確認物件映射正確後，我們可以恢復連接器。請注意，復原操作只會傳輸新的表更改，不會複製表中的現有資料。
+
+```sql
+SELECT synchdb_resume_engine('sqlserverconn');
+
+```
+
+要擷取表中的現有數據，我們也可以使用新的物件映射規則重新建立整個快照。
+
+```sql
+SELECT synchdb_stop_engine_bgw('sqlserverconn');
+SELECT synchdb_start_engine_bgw('sqlserverconn', 'always');
+
+```
 
 ## **選擇性表同步**
 
@@ -230,4 +372,84 @@ postgres=# \dt "testDB".*
  testDB | orders    | table | ubuntu
  testDB | products  | table | ubuntu
 
+```
+
+## 安全连接
+
+### **配置安全连接**
+
+为了确保与远程数据库的连接安全，我们需要为 `synchdb_add_conninfo` 创建的连接器配置额外的 SSL 相关参数。SSL 证书和私钥必须打包为 Java 密钥库文件，并附带密码。这些信息随后会通过 synchdb_add_extra_conninfo() 传递给 SynchDB。
+
+### **synchdb_add_extra_conninfo**
+
+**用途**：为 `synchdb_add_conninfo` 创建的现有连接器配置额外的连接器参数
+
+| 参数 | 描述 | 必需 | 示例 | 备注 |
+|:-:|:-|:-:|:-|:-|
+| `name` | 此连接器的唯一标识符 | ✓ | `'mysqlconn'` | 必须在所有连接器中唯一 |
+| `ssl_mode` | SSL 模式 | ☐ | `'verify_ca'` |可以是以下之一：<br><ul><li>“disabled”- 不使用 SSL。</li><li>“preferred”- 如果服务器支持，则使用 SSL。</li><li>“required”- 必须使用 SSL 建立连接。</li><li>“verify_ca”- 连接器与服务器建立 TLS，并将根据配置的信任库验证服务器的 TLS 证书。</li><li>“verify_identity”- 与 verify_ca 行为相同，但它还会检查服务器证书的通用名称以匹配系统的主机名。|
+| `ssl_keystore` | 密钥库路径 | ☐ | `/path/to/keystore` | 密钥库文件的路径 |
+| `ssl_keystore_pass` | 密钥库密码 | ☐ | `'mykeystorepass'` | 访问密钥库文件的密码 |
+| `ssl_truststore` | 信任库路径 | ☐ | `'/path/to/truststore'` | 信任库文件路径 |
+| `ssl_truststore_pass` | 信任库密码 | ☐ | `'mytruststorepass'` | 访问信任库文件的密码 |
+
+```sql
+SELECT synchdb_add_extra_conninfo('sqlserverconn', 'verify_ca', '/path/to/keystore', 'mykeystorepass', '/path/to/truststore', 'mytruststorepass');
+```
+
+### **synchdb_del_extra_conninfo**
+
+**用途**：删除由 `synchdb_add_extra_conninfo` 创建的额外连接器参数
+```sql
+SELECT synchdb_del_extra_conninfo('sqlserverconn');
+```
+
+## 自定义起始偏移量值
+
+起始偏移量值代表开始复制的点，类似于 PostgreSQL 的恢复 LSN。当 Debezium 运行引擎启动时，它将从这个偏移量值开始复制。将此偏移量值设置为较早的值将导致 Debezium 运行引擎从较早的记录开始复制，可能会复制重复的数据记录。在设置 Debezium 的起始偏移量值时，我们应该格外谨慎。
+
+### **记录可设置的偏移量值**
+
+在操作过程中，Debezium 运行引擎将生成新的偏移量并将其刷新到磁盘。最后刷新的偏移量可以通过 `synchdb_state_view()` 实用命令检索：
+
+```
+postgres=# select name, last_dbz_offset from synchdb_state_view;
+     name      |                                           last_dbz_offset
+---------------+------------------------------------------------------------------------------------------------------
+ sqlserverconn | {"commit_lsn":"0000006a:00006608:0003","snapshot":true,"snapshot_completed":false}
+
+```
+
+我们应该定期保存这些值，这样如果遇到问题，我们就知道过去可以设置的偏移量位置，以恢复复制操作。
+
+### **暂停连接器**
+
+在设置新的偏移量值之前，连接器必须处于 `paused`（暂停）状态。
+
+使用 `synchdb_pause_engine()` SQL 函数暂停正在运行的连接器。这将停止 Debezium 运行引擎从异构数据库复制。当暂停时，可以使用 `synchdb_set_offset()` SQL 例程更改 Debezium 连接器的偏移量值，以从过去的特定点开始复制。它以 `conninfo_name` 作为参数，可以从 `synchdb_get_state()` 视图的输出中找到。
+
+例如：
+
+```sql
+SELECT synchdb_pause_engine('sqlserverconn');
+```
+
+### **设置新的偏移量**
+
+使用 `synchdb_set_offset()` SQL 函数更改连接器工作进程的起始偏移量。只有当连接器处于 `paused` 状态时才能执行此操作。该函数接受两个参数，`conninfo_name` 和 `有效的偏移量字符串`，这两个参数都可以从 `synchdb_get_state()` 视图的输出中找到。
+
+例如：
+
+```sql
+SELECT synchdb_set_offset('sqlserverconn', '{"commit_lsn":"0000006a:00006608:0003","snapshot":true,"snapshot_completed":false}');
+```
+
+### **恢复连接器**
+
+使用 `synchdb_resume_engine()` SQL 函数从暂停状态恢复 Debezium 操作。此函数以 `连接器名称` 作为其唯一参数，可以从 `synchdb_get_state()` 视图的输出中找到。恢复的 Debezium 运行引擎将从新设置的偏移量值开始复制。
+
+例如：
+
+```sql
+SELECT synchdb_resume_engine('sqlserverconn');
 ```

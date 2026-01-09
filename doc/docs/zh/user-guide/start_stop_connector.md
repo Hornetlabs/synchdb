@@ -33,8 +33,6 @@ SELECT synchdb_start_engine_bgw('mysqlconn', 'always');
 | `initial_only` | 一次性快照，然后停止 | 数据迁移 |
 | `no_data` | 仅结构，无数据 | 结构同步 |
 | `never` | 跳过快照，仅流式传输 | 实时更新 |
-| `recovery` | 从源重建 | 灾难恢复 |
-| `when_needed` | 条件快照 | 自动恢复 |
 | `schemasync` | 仅结构，无数据，无 CDC | 正常操作 |
 
 **请参阅[教程](../../tutorial/selective_table_sync/)，了解何时使用何种模式**

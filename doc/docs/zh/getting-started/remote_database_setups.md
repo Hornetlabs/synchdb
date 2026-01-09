@@ -272,9 +272,22 @@ ALTER TABLE products ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS;
 ... etc
 ```
 
-## **Openlog Replicator 支持的其他 Oracle 设置**
+## **為 SynchDB 設定原生 Openlog Replicator 連接器**
 
-Openlog Replicator 需要额外权限才能流式传输 Oracle 更改：
+### **要求**
+
+- **Openlog Replicator 版本**：`1.3.0` ~ `1.8.5`（已驗證與 Debezium 2.7.x 相容）
+- 具有可供 OLR 存取的重做日誌的 Oracle 實例
+- 必須授予 OLR 額外的權限（見下文）
+- Openlog Replicator 必須已設定並正在執行
+- SynchDB 中已存在 Oracle 連接器（使用 `synchdb_add_conninfo()` 建立）
+- <<<**重要**>>> **SynchDB 必須使用標誌 (WITH_OLR=1) 編譯和構建，才能支援原生 Openlog Replicator 連接器**
+
+請參閱此[外部指南](https://highgo.atlassian.net/wiki/external/OTUzY2Q2OWFkNzUzNGVkM2EyZGIyMDE1YzVhMDdkNWE)有關透過 Docker 部署 Openlog Replicator 的詳細信息，請參閱相關文件。
+
+### **額外的 Oracle 權限**
+
+除了 Oracle 連接器所需的設定外，Openlog Replicator 還需要以下額外權限：
 
 ```sql
 
@@ -317,6 +330,129 @@ BEGIN
     END LOOP;
 END;
 ```
+
+## **Openlog Replicator 設定範例**
+
+SynchDB 的 OLR 支援基於以下組態範例建置。
+
+
+**Version 1.3.0**
+```json
+{
+  "version": "1.3.0",
+  "source": [
+    {
+      "alias": "SOURCE",
+      "name": "ORACLE",
+      "reader": {
+        "type": "online",
+        "user": "DBZUSER",
+        "password": "dbz",
+        "server": "//ora19c:1521/FREE"
+      },
+      "format": {
+        "type": "json",
+        "column": 2,
+        "db": 3,
+        "interval-dts": 9,
+        "interval-ytm": 4,
+        "message": 2,
+        "rid": 1,
+        "schema": 7,
+        "timestamp-all": 1,
+        "scn-all": 1
+      },
+      "memory": {
+        "min-mb": 64,
+        "max-mb": 1024
+      },
+      "filter": {
+        "table": [
+          {"owner": "DBZUSER", "table": ".*"}
+        ]
+      },
+      "flags": 32
+    }
+  ],
+  "target": [
+    {
+      "alias": "SYNCHDB",
+      "source": "SOURCE",
+      "writer": {
+        "type": "network",
+        "uri": "0.0.0.0:7070"
+      }
+    }
+  ]
+}
+
+```
+
+**Version 1.8.5**
+```json
+{
+  "version": "1.8.5",
+  "source": [
+    {
+      "alias": "SOURCE",
+      "name": "ORACLE",
+      "reader": {
+        "type": "online",
+        "user": "DBZUSER",
+        "password": "dbz",
+        "server": "//ora19c:1521/FREE"
+      },
+      "format": {
+        "type": "json",
+        "column": 2,
+        "db": 3,
+        "interval-dts": 9,
+        "interval-ytm": 4,
+        "message": 2,
+        "rid": 1,
+        "schema": 7,
+        "timestamp-all": 1,
+        "scn-type": 1
+      },
+      "memory": {
+        "min-mb": 64,
+        "max-mb": 1024,
+        "swap-path": "/opt/OpenLogReplicator/olrswap"
+      },
+      "filter": {
+        "table": [
+          {"owner": "DBZUSER", "table": ".*"}
+        ]
+      },
+      "flags": 32
+    }
+  ],
+  "target": [
+    {
+      "alias": "DEBEZIUM",
+      "source": "SOURCE",
+      "writer": {
+        "type": "network",
+        "uri": "0.0.0.0:7070"
+      }
+    }
+  ]
+}
+
+```
+
+請注意以下事項：
+
+- "source".name": "ORACLE" -> 使用 `synchdb_add_olr_conninfo()` 定義 OLR 參數時，此項目應與 `olr_source` 值相符（請參閱下文）。
+- "source".reader".user" -> 使用 `synchdb_add_conninfo()` 建立連接器時，此項目應與 `username` 值相符。
+- "source".reader".password" -> 使用 `synchdb_add_conninfo()` 建立連接器時，此項目應與 `password` 值相符。
+- "source".reader".server" -> 使用 `synchdb_add_conninfo()` 建立連接器時，此項目應包含 `hostname`、`port` 和 `source database` 的值。
+- "source".filter".table":[] -> 此項目用於篩選 Openlog Replicator 擷取的變更事件。 <<<**重要提示**>>>：目前這是過濾來自 Oracle 的變更事件的唯一方法，因為 SynchDB 中的 OLR 實作目前不進行任何過濾。 （透過 `synchdb_add_conninfo()` 建立連接器時，`table` 和 `snapshot table` 的值將被忽略。）
+- "format":{} -> Debezium 或原生 Openlog Replicator 連接器接收的特定有效負載格式。請按指定方式使用這些值。
+- "memory".swap-path" -> 這告訴 OLR 在記憶體不足的情況下將交換檔案寫入何處。
+- "target".[0].."writer"."type": -> 此項目必須指定“network”，因為 Debezium 和原生 Openlog Replicator 連接器都透過網路與 Openlog Replicator 通訊。
+- "target".[0].."writer"."uri": -> 這是 Openlog Replicator 監聽的綁定主機和端口，SynchDB 應該能夠在透過 `synchdb_add_olr_conninfo()` 定義 OLR 參數時，透過 `olr_host` 和 `olrport` 存取它們。
+
 
 ## **設定 SynchDB 的 Postgres 連接器**
 

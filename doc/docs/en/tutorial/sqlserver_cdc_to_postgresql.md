@@ -1,4 +1,4 @@
-# SQL Server -> PostgreSQL
+# SQL Server Connector
 
 ## **Prepare SQL Server Database for SynchDB**
 
@@ -132,7 +132,146 @@ After the initial snapshot, CDC will begin. Restarting a connector in `always` m
 
 ## **Preview Source and Destination Table Relationships with schemasync mode**
 
-Before attempting to do an initial snapshot of current table and data, which may be huge, it is possible to "preview" all the tables and data type mappings between source and destination tables before the actual data migration. This gives you an opportunity to modify a data type mapping, or an object name before actual migration happens. This can be done with the special "schemasync" initial snapshot mode. Refer to [object mapping workflow](../../tutorial/object_mapping_workflow/) for a detailed example.
+Before attempting to do an initial snapshot of current table and data, which may be huge, it is possible to "preview" all the tables and data type mappings between source and destination tables before the actual data migration. This gives you an opportunity to modify a data type mapping, or an object name before actual migration happens. This can be done with the special "schemasync" initial snapshot mode.
+
+Please note that you must set `synchdb.olr_snapshot_engine` to 'fdw' in order to use `schemasync` mode to preview the tables.
+
+### **Create a Connector and Start it in `schemasync` Mode**
+
+`schemasync` is a special mode that makes the connector connects to remote database and attempt to sync only the schema of designated tables. After this is done, the connector is put to `paused` state and user is able to review all the tables and data types created using the default rules and make change if needed.
+
+```sql
+SELECT synchdb_add_conninfo(
+    'sqlserverconn', 
+    '127.0.0.1', 
+    1433, 
+    'sa', 
+    'Password!', 
+    'testDB', 
+    'dbo', 
+    'null',
+    'null', 
+    'sqlserver'
+);
+
+SELECT synchdb_start_engine_bgw('sqlserverconn', 'schemasync');
+```
+
+### **Ensure the connector is put to paused state**
+
+```sql
+SELECT name, connector_type, pid, stage, state FROM synchdb_state_view WHERE name = 'sqlserverconn';
+     name      | connector_type |   pid   |        stage        | state
+---------------+----------------+---------+---------------------+--------
+ sqlserverconn | sqlserver      | 1647884 | change data capture | paused
+
+```
+
+### **Review the Tables Created by Default Mapping Rules**
+
+```sql
+SELECT * FROM synchdb_att_view WHERE name = 'sqlserverconn';
+     name      |   type    | attnum |         ext_tbname          |        pg_tbname        | ext_attname  |  pg_attname  | ext_atttypename |  pg_atttypename   | transform
+---------------+-----------+--------+-----------------------------+-------------------------+--------------+--------------+-----------------+-------------------+-----------
+ sqlserverconn | sqlserver |      1 | testDB.dbo.customers        | testdb.customers        | id           | id           | int identity    | integer           |
+ sqlserverconn | sqlserver |      2 | testDB.dbo.customers        | testdb.customers        | first_name   | first_name   | varchar         | character varying |
+ sqlserverconn | sqlserver |      3 | testDB.dbo.customers        | testdb.customers        | last_name    | last_name    | varchar         | character varying |
+ sqlserverconn | sqlserver |      4 | testDB.dbo.customers        | testdb.customers        | email        | email        | varchar         | character varying |
+ sqlserverconn | sqlserver |      1 | testDB.dbo.orders           | testdb.orders           | order_number | order_number | int identity    | integer           |
+ sqlserverconn | sqlserver |      2 | testDB.dbo.orders           | testdb.orders           | order_date   | order_date   | date            | date              |
+ sqlserverconn | sqlserver |      3 | testDB.dbo.orders           | testdb.orders           | purchaser    | purchaser    | int             | integer           |
+ sqlserverconn | sqlserver |      4 | testDB.dbo.orders           | testdb.orders           | quantity     | quantity     | int             | integer           |
+ sqlserverconn | sqlserver |      5 | testDB.dbo.orders           | testdb.orders           | product_id   | product_id   | int             | integer           |
+ sqlserverconn | sqlserver |      1 | testDB.dbo.products         | testdb.products         | id           | id           | int identity    | integer           |
+ sqlserverconn | sqlserver |      2 | testDB.dbo.products         | testdb.products         | name         | name         | varchar         | character varying |
+ sqlserverconn | sqlserver |      3 | testDB.dbo.products         | testdb.products         | description  | description  | varchar         | character varying |
+ sqlserverconn | sqlserver |      4 | testDB.dbo.products         | testdb.products         | weight       | weight       | float           | real              |
+ sqlserverconn | sqlserver |      1 | testDB.dbo.products_on_hand | testdb.products_on_hand | product_id   | product_id   | int             | integer           |
+ sqlserverconn | sqlserver |      2 | testDB.dbo.products_on_hand | testdb.products_on_hand | quantity     | quantity     | int             | integer           |
+
+```
+
+### **Define Custom Mapping Rules (If Needed)**
+
+User can use `synchdb_add_objmap` function to create custom mapping rules. It can be used to map table name, column name, data types and defines a data transform expression rule
+
+```sql
+SELECT synchdb_add_objmap('sqlserverconn','table','testDB.dbo.products','testdb.myproducts');
+SELECT synchdb_add_objmap('sqlserverconn','column','testDB.dbo.customers.email','contact');
+SELECT synchdb_add_objmap('sqlserverconn','datatype','testDB.dbo.products_on_hand.quantity','bigint|0');
+SELECT synchdb_add_objmap('sqlserverconn','transform','testDB.dbo.products.name','''>>>>>'' || ''%d'' || ''<<<<<''');
+```
+The above means:
+
+* source table 'testDB.dbo.product' will be mapped to 'testdb.myproducts' in destination
+* source column 'testDB.dbo.customers.email' will be mapped to 'contact' in destination
+* source data type for column 'testDB.dbo.products_on_hand.quantity' will be mapped to 'bigint'
+* source column data 'testDB.dbo.products.name' will be transformed accoring to the expression where %d is the data placeholder
+
+### **Review All Object Mapping Rules Created So Far**
+
+```sql
+SELECT * FROM synchdb_objmap WHERE name = 'sqlserverconn';
+     name      |  objtype  | enabled |                srcobj                |           dstobj
+---------------+-----------+---------+--------------------------------------+----------------------------
+ sqlserverconn | table     | t       | testDB.dbo.products                  | testdb.myproducts
+ sqlserverconn | column    | t       | testDB.dbo.customers.email           | contact
+ sqlserverconn | datatype  | t       | testDB.dbo.products_on_hand.quantity | bigint|0
+ sqlserverconn | transform | t       | testDB.dbo.product.name              | '>>>>>' || '%d' || '<<<<<'
+
+```
+
+### **Reload the Object Mapping Rules**
+
+Once all custom rules have been defined, we need to signal the connector to load them. This will cause the connector to read and apply the object mapping rules. If it sees a discrepancy between current PostgreSQL values and the object mapping values, it will attempt to correct the mapping.
+
+```sql
+SELECT synchdb_reload_objmap('sqlserverconn');
+
+```
+
+### **Review `synchdb_att_view` Again for Changes**
+
+```sql
+SELECT * from synchdb_att_view WHERE name = 'sqlserverconn';
+     name      |   type    | attnum |         ext_tbname          |        pg_tbname        | ext_attname  |  pg_attname  | ext_atttypename |  pg_atttypename   |         transform
+
+---------------+-----------+--------+-----------------------------+-------------------------+--------------+--------------+-----------------+-------------------+---------------------
+-------
+ sqlserverconn | sqlserver |      1 | testDB.dbo.customers        | testdb.customers        | id           | id           | int identity    | integer           |
+ sqlserverconn | sqlserver |      2 | testDB.dbo.customers        | testdb.customers        | first_name   | first_name   | varchar         | character varying |
+ sqlserverconn | sqlserver |      3 | testDB.dbo.customers        | testdb.customers        | last_name    | last_name    | varchar         | character varying |
+ sqlserverconn | sqlserver |      4 | testDB.dbo.customers        | testdb.customers        | email        | contact      | varchar         | character varying |
+ sqlserverconn | sqlserver |      1 | testDB.dbo.orders           | testdb.orders           | order_number | order_number | int identity    | integer           |
+ sqlserverconn | sqlserver |      2 | testDB.dbo.orders           | testdb.orders           | order_date   | order_date   | date            | date              |
+ sqlserverconn | sqlserver |      3 | testDB.dbo.orders           | testdb.orders           | purchaser    | purchaser    | int             | integer           |
+ sqlserverconn | sqlserver |      4 | testDB.dbo.orders           | testdb.orders           | quantity     | quantity     | int             | integer           |
+ sqlserverconn | sqlserver |      5 | testDB.dbo.orders           | testdb.orders           | product_id   | product_id   | int             | integer           |
+ sqlserverconn | sqlserver |      1 | testDB.dbo.products         | testdb.products         | id           | id           | int identity    | integer           |
+ sqlserverconn | sqlserver |      2 | testDB.dbo.products         | testdb.products         | name         | name         | varchar         | character varying | '>>>>>' || '%d' || '
+<<<<<'
+ sqlserverconn | sqlserver |      3 | testDB.dbo.products         | testdb.products         | description  | description  | varchar         | character varying |
+ sqlserverconn | sqlserver |      4 | testDB.dbo.products         | testdb.products         | weight       | weight       | float           | real              |
+ sqlserverconn | sqlserver |      1 | testDB.dbo.products_on_hand | testdb.products_on_hand | product_id   | product_id   | int             | integer           |
+ sqlserverconn | sqlserver |      2 | testDB.dbo.products_on_hand | testdb.products_on_hand | quantity     | quantity     | int             | bigint            |
+
+
+```
+
+### **Resume the Connector or Redo the Entire Snapshot**
+
+Once the object mappings have been confirmed correct, we can resume the connector. Please note that, resume will proceed to streaming only the new table changes. The existing data of the tables will not be copied.
+
+```sql
+SELECT synchdb_resume_engine('sqlserverconn');
+```
+
+To capture the table's existing data, we can also redo the entire snapshot with the new object mapping rules.
+
+```sql
+SELECT synchdb_stop_engine_bgw('sqlserverconn');
+SELECT synchdb_start_engine_bgw('sqlserverconn', 'always');
+```
 
 ## **Selective Table Sync**
 
@@ -212,4 +351,88 @@ postgres=# \dt "testDB".*
  testDB | orders    | table | ubuntu
  testDB | products  | table | ubuntu
 
+```
+
+## Secured Connection
+
+### **Configure Secured Connection**
+
+to secure the connection to remote database, we need to configure additional SSL related parameters to a connector that has been created by `synchdb_add_conninfo`. The SSL certificates and private keys must be packaged as Java keystore file with a passphrase. These information is then passed to SynchDB via synchdb_add_extra_conninfo().
+
+### **synchdb_add_extra_conninfo**
+
+**Purpose**: Configures extra connector parameters to an existing connector created by `synchdb_add_conninfo`
+
+| Parameter | Description | Required | Example | Notes |
+|:-:|:-|:-:|:-|:-|
+| `name` | Unique identifier for this connector | ✓ | `'mysqlconn'` | Must be unique across all connectors |
+| `ssl_mode` | SSL mode | ☐ | `'verify_ca'` | can be one of: <br><ul><li> "disabled" - no SSL is used. </li><li> "preferred" - SSL is used if server supports it. </li><li> "required" - SSL must be used to establish a connection. </li><li> "verify_ca" - connector establishes TLS with the server and will also verify server's TLS certificate against configured truststore. </li><li> "verify_identity" - same behavior as verify_ca but it also checks the server certificate's common name to match the hostname of the system. |
+| `ssl_keystore` | keystore path | ☐ | `/path/to/keystore` | path to the keystore file |
+| `ssl_keystore_pass` | keystore password | ☐ | `'mykeystorepass'` | password to access the keystore file |
+| `ssl_truststore` | trust store path | ☐ | `'/path/to/truststore'` | path to the truststore file |
+| `ssl_truststore_pass` | trust store password | ☐ | `'mytruststorepass'` | password to access the truststore file |
+
+
+```sql
+SELECT synchdb_add_extra_conninfo('sqlserverconn', 'verify_ca', '/path/to/keystore', 'mykeystorepass', '/path/to/truststore', 'mytruststorepass');
+```
+
+### **synchdb_del_extra_conninfo**
+
+**Purpose**: Deletes extra connector paramters created by `synchdb_add_extra_conninfo`
+```sql
+SELECT synchdb_del_extra_conninfo('sqlserverconn');
+```
+
+## Custom Start Offset Values
+
+A start offset value represents a point to start replication from in the similar way as PostgreSQL's resume LSN. When Debezium runner engine starts, it will start the replication from this offset value. Setting this offset value to a earlier value will cause Debezium runner engine to start replication from earlier records, possibly replicating duplicate data records. We should be extra cautious when setting start offset values on Debezium.
+
+### **Record Settable Offset Values**
+
+During operation, new offsets will be generated and flushed to disk by Debezium runner engine. The last flushed offset can be retrieved from `synchdb_state_view()` utility command:
+
+```sql
+postgres=# select name, last_dbz_offset from synchdb_state_view;
+     name      |                                           last_dbz_offset
+---------------+------------------------------------------------------------------------------------------------------
+ sqlserverconn | {"commit_lsn":"0000006a:00006608:0003","snapshot":true,"snapshot_completed":false}
+
+```
+
+We should save this values regularly, so in case we run into a problem, we know the offset location in the past that can be set to resume the replication operation.
+
+### **Pause the Connector**
+
+A connector must be in a `paused` state before a new offset value can be set.
+
+Use `synchdb_pause_engine()` SQL function to pause a runnng connector. This will halt the Debezium runner engine from replicating from the heterogeneous database. When paused, it is possible to alter the Debezium connector's offset value to replicate from a specific point in the past using `synchdb_set_offset()` SQL routine. It takes `conninfo_name` as its argument which can be found from the output of `synchdb_get_state()` view.
+
+For example:
+
+```sql
+SELECT synchdb_pause_engine('sqlserverconn');
+```
+
+### **Set the new Offset**
+
+Use `synchdb_set_offset()` SQL function to change a connector worker's starting offset. This can only be done when the connector is put into `paused` state. The function takes 2 parameters, `conninfo_name` and `a valid offset string`, both of which can be found from the output of `synchdb_get_state()` view.
+
+For example:
+
+```sql
+SELECT 
+  synchdb_set_offset(
+    'sqlserverconn', '{"commit_lsn":"0000006a:00006608:0003","snapshot":true,"snapshot_completed":false}'
+  );
+```
+
+### **Resume the Connector**
+
+Use `synchdb_resume_engine()` SQL function to resume Debezium operation from a paused state. This function takes `connector name` as its only parameter, which can be found from the output of `synchdb_get_state()` view. The resumed Debezium runner engine will start the replication from the newly set offset value.
+
+For example:
+
+```sql
+SELECT synchdb_resume_engine('sqlserverconn');
 ```

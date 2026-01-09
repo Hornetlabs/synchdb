@@ -1,4 +1,4 @@
-# Postgres -> Postgres
+# Postgres 连接器
 
 ## **為 SynchDB 準備 PostgreSQL 資料庫**
 
@@ -155,9 +155,145 @@ WHERE name = 'pgconn';
 
 ## **使用 schemasync 模式預覽來源表和目標表關係**
 
-在嘗試對當前表和資料（可能非常龐大）進行初始快照之前，可以在實際資料遷移之前「預覽」來源表和目標表之間的所有表和資料類型對應。這使您可以在實際遷移之前修改資料類型對應或物件名稱。這可以透過特殊的「schemasync」初始快照模式來實現。有關詳細範例，請參閱[物件對映工作流程](../../tutorial/object_mapping_workflow/)。
+在嘗試對當前表和資料（可能非常龐大）進行初始快照之前，可以在實際資料遷移之前「預覽」來源表和目標表之間的所有表和資料類型對應。這樣，您有機會在實際遷移之前修改資料類型對應或物件名稱。這可以透過特殊的「schemasync」初始快照模式來實現。
 
 請注意，您必須將 `synchdb.olr_snapshot_engine` 設定為 'fdw' 才能使用 `schemasync` 模式預覽表。
+
+### **建立連接器並以 `schemasync` 模式啟動它**
+
+`schemasync` 是一種特殊模式，它使連接器連接到遠端資料庫並嘗試僅同步指定表的模式。完成後，連接器將處於「暫停」狀態，使用者可以查看使用預設規則建立的所有資料表和資料類型，並根據需要進行變更。
+
+```sql
+SELECT synchdb_add_conninfo(
+    'pgconn', 
+    '127.0.0.1', 
+    5433, 
+    'pguser', 
+    'pgpass', 
+    'postgres', 
+    'public', 
+    'null', 
+    'null', 
+    'postgres'
+);
+
+SELECT synchdb_start_engine_bgw('pgconn', 'schemasync');
+```
+
+### **確保連接器處於暫停狀態**
+
+```sql
+SELECT name, connector_type, pid, stage, state FROM synchdb_state_view WHERE name = 'pgconn';;
+  name  | connector_type |   pid   |        stage        | state
+--------+----------------+---------+---------------------+--------
+ pgconn | postgres       | 1643157 | change data capture | paused
+
+```
+
+### **查看預設映射規則所建立的表**
+
+```sql
+SELECT * FROM synchdb_att_view WHERE name = 'pgconn';
+  name  |   type   | attnum |       ext_tbname        |    pg_tbname     | ext_attname | pg_attname |  ext_atttypename  |  pg_atttypename   | transform
+--------+----------+--------+-------------------------+------------------+-------------+------------+-------------------+-------------------+-----------
+ pgconn | postgres |      1 | postgres.public.mytble  | postgres.mytble  | a           | a          | numeric           | numeric           |
+ pgconn | postgres |      2 | postgres.public.mytble  | postgres.mytble  | b           | b          | numeric           | numeric           |
+ pgconn | postgres |      3 | postgres.public.mytble  | postgres.mytble  | c           | c          | numeric           | numeric           |
+ pgconn | postgres |      1 | postgres.public.testing | postgres.testing | a           | a          | integer           | integer           |
+ pgconn | postgres |      2 | postgres.public.testing | postgres.testing | b           | b          | text              | text              |
+ pgconn | postgres |      3 | postgres.public.testing | postgres.testing | c           | c          | character varying | character varying |
+ pgconn | postgres |      4 | postgres.public.testing | postgres.testing | d           | d          | bigint            | bigint            |
+ pgconn | postgres |      1 | postgres.public.xyz     | postgres.xyz     | bbb         | bbb        | character varying | character varying |
+ pgconn | postgres |      2 | postgres.public.xyz     | postgres.xyz     | ccc         | ccc        | bytea             | bytea             |
+ pgconn | postgres |      3 | postgres.public.xyz     | postgres.xyz     | ddd         | ddd        | numeric           | numeric           |
+ pgconn | postgres |      4 | postgres.public.xyz     | postgres.xyz     | eee         | eee        | numeric           | numeric           |
+ pgconn | postgres |      5 | postgres.public.xyz     | postgres.xyz     | fff         | fff        | numeric           | numeric           |
+ pgconn | postgres |      6 | postgres.public.xyz     | postgres.xyz     | ggg         | ggg        | bigint            | bigint            |
+ pgconn | postgres |      7 | postgres.public.xyz     | postgres.xyz     | aaa         | aaa        | integer           | integer           |
+
+
+```
+
+### **定義自訂映射規則（如有需要）**
+
+使用者可以使用 `synchdb_add_objmap` 函數建立自訂映射規則。此函數可用於對應表名、列名、資料類型，並定義資料轉換表達式規則。
+
+```sql
+SELECT synchdb_add_objmap('pgconn','table','postgres.public.mytble','postgres.thetable');
+SELECT synchdb_add_objmap('pgconn','column','postgres.public.testing.c','ccc');
+SELECT synchdb_add_objmap('pgconn','datatype','postgres.public.xyz.ggg','int|0');
+SELECT synchdb_add_objmap('pgconn','transform','postgres.public.xyz.bbb','''>>>>>'' || ''%d'' || ''<<<<<''');
+```
+
+以上內容意味著：
+
+* 來源表 'postgres.public.mytble' 將會對應到目標表 'postgres.thetable'
+* 來源列 'postgres.public.testing.c' 將會對應到目標列 'ccc'
+* 來源列 'postgres.public.xyz.ggg' 的資料型別將會對應到 'int'
+* 來源列資料 'postgres.public.xyz.bbb' 將根據表達式進行轉換，其中 %d 為資料佔位符
+
+### **回顧所有已建立的物件映射規則**
+
+```sql
+SELECT * FROM synchdb_objmap WHERE name = 'pgconn';
+  name  |  objtype  | enabled |          srcobj           |           dstobj
+--------+-----------+---------+---------------------------+----------------------------
+ pgconn | table     | t       | postgres.public.mytble    | postgres.thetable
+ pgconn | column    | t       | postgres.public.testing.c | ccc
+ pgconn | datatype  | t       | postgres.public.xyz.ggg   | int|0
+ pgconn | transform | t       | postgres.public.xyz.bbb   | '>>>>>' || '%d' || '<<<<<'
+
+
+```
+
+### **重新載入物件映射規則**
+
+定義完所有自訂規則後，我們需要通知連接器載入這些規則。這將使連接器讀取並應用物件映射規則。如果連接器發現目前 PostgreSQL 值與物件對應值之間存在差異，它將嘗試修正映射。
+
+```sql
+SELECT synchdb_reload_objmap('pgconn');
+
+```
+
+### **再次檢查 `synchdb_att_view` 是否有更改**
+
+```sql
+SELECT * from synchdb_att_view WHERE name = 'pgconn';;
+  name  |   type   | attnum |       ext_tbname        |     pg_tbname     | ext_attname | pg_attname |  ext_atttypename  |  pg_atttypename   |         transform
+--------+----------+--------+-------------------------+-------------------+-------------+------------+-------------------+-------------------+----------------------------
+ pgconn | postgres |      1 | postgres.public.mytble  | postgres.thetable | a           | a          | numeric           | numeric           |
+ pgconn | postgres |      2 | postgres.public.mytble  | postgres.thetable | b           | b          | numeric           | numeric           |
+ pgconn | postgres |      3 | postgres.public.mytble  | postgres.thetable | c           | c          | numeric           | numeric           |
+ pgconn | postgres |      1 | postgres.public.testing | postgres.testing  | a           | a          | integer           | integer           |
+ pgconn | postgres |      2 | postgres.public.testing | postgres.testing  | b           | b          | text              | text              |
+ pgconn | postgres |      3 | postgres.public.testing | postgres.testing  | c           | ccc        | character varying | character varying |
+ pgconn | postgres |      4 | postgres.public.testing | postgres.testing  | d           | d          | bigint            | bigint            |
+ pgconn | postgres |      1 | postgres.public.xyz     | postgres.xyz      | bbb         | bbb        | character varying | character varying | '>>>>>' || '%d' || '<<<<<'
+ pgconn | postgres |      2 | postgres.public.xyz     | postgres.xyz      | ccc         | ccc        | bytea             | bytea             |
+ pgconn | postgres |      3 | postgres.public.xyz     | postgres.xyz      | ddd         | ddd        | numeric           | numeric           |
+ pgconn | postgres |      4 | postgres.public.xyz     | postgres.xyz      | eee         | eee        | numeric           | numeric           |
+ pgconn | postgres |      5 | postgres.public.xyz     | postgres.xyz      | fff         | fff        | numeric           | numeric           |
+ pgconn | postgres |      6 | postgres.public.xyz     | postgres.xyz      | ggg         | ggg        | bigint            | integer           |
+ pgconn | postgres |      7 | postgres.public.xyz     | postgres.xyz      | aaa         | aaa        | integer           | integer           |
+
+```
+
+### **恢復連接器或重新建立整個快照**
+
+確認物件映射正確後，我們可以恢復連接器。請注意，復原操作只會傳輸新的表更改，不會複製表中的現有資料。
+
+```sql
+SELECT synchdb_resume_engine('pgconn');
+
+```
+
+要擷取表中的現有數據，我們也可以使用新的物件映射規則重新建立整個快照。
+
+```sql
+SELECT synchdb_stop_engine_bgw('pgconn');
+SELECT synchdb_start_engine_bgw('pgconn', 'always');
+
+```
 
 ## **選擇性表同步**
 

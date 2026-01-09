@@ -2,7 +2,7 @@
 
 ## **创建连接器**
 
-连接器代表与特定源数据库的连接，复制一组表并应用于 PostgreSQL。如果您有多个需要复制的源数据库，则需要多个连接器（每个连接器一个）。也可以创建多个连接到同一源数据库但复制不同表集的连接器。
+连接器代表与特定源数据库的连接，复制一组表并应用于 PostgreSQL。如果您有多个需要复制的源数据库，则需要多个连接器（每个连接器一个）。也可以创建多个连接到同一源数据库但复制不同或相同表集的连接器。
 
 可以使用实用 SQL 函数 `synchdb_add_conninfo()` 创建连接器。
 
@@ -15,22 +15,23 @@ synchdb_add_conninfo 接受以下参数：
 | port | 连接到异构数据库的端口号。|
 | username | 用于与异构数据库进行身份验证的用户名。|
 | password | 用于验证用户名的密码 |
-| 源数据库 | 这是我们要从中复制更改的异构数据库中的源数据库的名称。|
-| 目标数据库 | （已弃用）始终默认使用与 synchDB 安装位置相同的数据库 |
-| 表 |（可选）- 以 `[database].[table]` 或 `[database].[schema].[table]` 的形式表示，该参数必须存在于异构数据库中，因此引擎将仅复制指定的表。如果留空，则复制所有表。或者，可以使用 `file:` 前缀指定表列表文件 |
-| 快照表 |（可选）- 以 `[database].[table]` 或 `[database].[schema].[table]` 的形式表示，该参数必须存在于上述 `table` 设置中，因此引擎仅在快照模式设置为 `always` 时才会重建这些表的快照。如果留空或为 null，则当快照模式设置为 `always` 时，将重建上述 `table` 设置中指定的所有表。或者，可以使用 `file:` 前缀指定快照表列表文件 |
-| 连接器 | 要使用的连接器类型（如下）。|
+| source database | 这是我们要从中复制更改的异构数据库中的源数据库的名称。|
+| source schema | 這是來源資料庫中來源模式的名稱，我們要從中複製變更。 |
+| table |（可选）- 以 `[database].[table]` 或 `[database].[schema].[table]` 的形式表示，该参数必须存在于异构数据库中，因此引擎将仅复制指定的表。如果留空，则复制所有表。或者，可以使用 `file:` 前缀指定表列表文件 |
+| snapshot table |（可选）- 以 `[database].[table]` 或 `[database].[schema].[table]` 的形式表示，该参数必须存在于上述 `table` 设置中，因此引擎仅在快照模式设置为 `always` 时才会重建这些表的快照。如果留空或为 null，则当快照模式设置为 `always` 时，将重建上述 `table` 设置中指定的所有表。或者，可以使用 `file:` 前缀指定快照表列表文件 |
+| connector | 要使用的连接器类型（如下）。|
 
-<<**注意**>> 如果連接器類型為“olr”，SynchDB 仍將使用 Debezium 執行初始快照，初始快照包含“table”和“snapshot table”參數中指定的表和快照表。完成後，SynchDB 將連接到 Openlog Replicator 進行複製，而不會過濾「table」參數中指定的所需表。表過濾是在 Openlog Replicator 的配置中完成的。因此，請確保 Openlog Replicator 和 SynchDB 連接器的「table」過濾參數配置一致，以避免潛在的差異。
+<<**注意**>> `來源資料庫`、`來源模式`、`使用者名稱`、`密碼`、`表`和`快照表`區分大小寫，您必須按照來源資料庫中的名稱準確指定它們，因此請記住這些名稱的字母大小寫。
 
 ## **连接器类型**
 
 SynchDb 支持以下连接器类型：
 
-* mysql -> MySQL 数据库
-* sqlserver -> Microsoft SQL Server 数据库
-* oracle -> Oracle 数据库
-* olr -> 原生 Openlog Replicator (BETA)
+* mysql             -> MySQL 数据库
+* sqlserver         -> Microsoft SQL Server 数据库
+* oracle            -> Oracle 数据库
+* olr               -> 原生 Openlog Replicator
+* postgres          -> PostgreSQL 数据库
 
 ## **检查已创建的连接器**
 
@@ -44,15 +45,15 @@ postgres=# select * from synchdb_conninfo;
 -[ RECORD 1 ]-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 name     | sqlserverconn
 isactive | t
-data     | {"pwd": "\\xc30d0407030245ca4a983b6304c079d23a0191c6dabc1683e4f66fc538db65b9ab2788257762438961f8201e6bcefafa60460fbf441e55d844e7f27b31745f04e7251c0123a159540676c4", "port": 1433, "user": "sa", "dstdb": "postgres", "srcdb": "testDB", "table": "null", "hostname": "192.168.1.86", "connector": "sqlserver"}
+data     | {"pwd": "\\xc30d0407030245ca4a983b6304c079d23a0191c6dabc1683e4f66fc538db65b9ab2788257762438961f8201e6bcefafa60460fbf441e55d844e7f27b31745f04e7251c0123a159540676c4", "port": 1433, "user": "sa", "srcschema": "dbo", "srcdb": "testDB", "table": null, "snapshottable": null, "hostname": "192.168.1.86", "connector": "sqlserver"}
 -[ RECORD 2 ]-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 name     | mysqlconn
 isactive | t
-data     | {"pwd": "\\xc30d04070302986aff858065e96b62d23901b418a1f0bfdf874ea9143ec096cd648a1588090ee840de58fb6ba5a04c6430d8fe7f7d466b70a930597d48b8d31e736e77032cb34c86354e", "port": 3306, "user": "mysqluser", "dstdb": "postgres", "srcdb": "inventory", "table": "null", "hostname": "192.168.1.86", "connector": "mysql"}
+data     | {"pwd": "\\xc30d04070302986aff858065e96b62d23901b418a1f0bfdf874ea9143ec096cd648a1588090ee840de58fb6ba5a04c6430d8fe7f7d466b70a930597d48b8d31e736e77032cb34c86354e", "port": 3306, "user": "mysqluser", "srcschema": null, "srcdb": "inventory", "table": null, "snapshottable": null, "hostname": "192.168.1.86", "connector": "mysql"}
 -[ RECORD 3 ]-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 name     | oracleconn
 isactive | t
-data     | {"pwd": "\\xc30d04070302e3baf1293d0d553066d234014f6fc52e6eea425884b1f65f1955bf504b85062dfe538ca2e22bfd6db9916662406fc45a3a530b7bf43ce4cfaa2b049a1c9af8", "port": 1528, "user": "c##dbzuser", "dstdb": "postgres", "srcdb": "FREE", "table": "null", "hostname": "192.168.1.86", "connector": "oracle"}
+data     | {"pwd": "\\xc30d04070302e3baf1293d0d553066d234014f6fc52e6eea425884b1f65f1955bf504b85062dfe538ca2e22bfd6db9916662406fc45a3a530b7bf43ce4cfaa2b049a1c9af8", "port": 1528, "user": "DBZUSER", "srcschema": "DBZUSER", "srcdb": "FREE", "table": null, "snapshottable": null, "hostname": "192.168.1.86", "connector": "oracle"}
 
 
 ```
@@ -67,15 +68,15 @@ data     | {"pwd": "\\xc30d04070302e3baf1293d0d553066d234014f6fc52e6eea425884b1f
 {
     "table_list":
     [
-        "mydb.myschema.mytable1",
-        "mydb.myschema.mytable2",
+        "myschema.mytable1",
+        "myschema.mytable2",
         ...
         ...
     ],
     "snapshot_table_list":
     [
-        "mydb.myschema.mytable1",
-        "mydb.myschema.mytable2",
+        "myschema.mytable1",
+        "myschema.mytable2",
         ...
         ...
     ]
@@ -94,29 +95,29 @@ SynchDB 通过名称查找以下关键 JSON 数组：
 
 ## **示例：为每个支持的源数据库创建一个连接器以复制所有表**
 
-1. 创建一个名为“mysqlconn”的 MySQL 连接器，将 MySQL 中“inventory”下的所有表复制到 PostgreSQL 中目标数据库“postgres”：
+1. 建立一個名為 `mysqlconn` 的 MySQL 連接器，用於複製 MySQL 中 `inventory` 下的所有表。來源模式可以設定為 'null'，因為 MySQL 不支援空值。
 ```sql
 SELECT synchdb_add_conninfo(
     'mysqlconn', '127.0.0.1', 3306, 'mysqluser', 
-    'mysqlpwd', 'inventory', 'postgres', 
+    'mysqlpwd', 'inventory', 'null', 
     'null', 'null', 'mysql');
 ```
 
-2. 创建一个名为“sqlserverconn”的SQLServer连接器，将“testDB”下的所有表复制到PostgreSQL中的目标数据库“postgres”：
+2. 建立一個名為 `sqlserver conn` 的 SQL Server 連接器，以複製 `testDB` 資料庫和 `dbo` 架構下的所有資料表。
 ```sql
 SELECT 
   synchdb_add_conninfo(
     'sqlserverconn', '127.0.0.1', 1433, 
-    'sa', 'Password!', 'testDB', 'postgres', 
+    'sa', 'Password!', 'testDB', 'dbo', 
     'null', 'null', 'sqlserver');
 ```
 
-3. 创建一个名为“oracleconn”的 Oracle 连接器，将“FREE”下的所有表复制到 PostgreSQL 中的目标数据库“postgres”：
+3. 建立一個名為 `oracleconn` 的 Oracle 連接器，用於複製 `FREE` 資料庫和 `DBZUSER` 模式下的所有表：
 ```sql
 SELECT 
   synchdb_add_conninfo(
     'oracleconn', '127.0.0.1', 1521, 
-    'c##dbzuser', 'dbz', 'FREE', 'postgres', 
+    'DBZUSER', 'dbz', 'FREE', 'DBZUSER', 
     'null', 'null', 'oracle');
 ```
 
@@ -128,7 +129,7 @@ SELECT
 ```sql
 SELECT synchdb_add_conninfo(
     'mysqlconn', '127.0.0.1', 3306, 'mysqluser', 
-    'mysqlpwd', 'inventory', 'postgres', 
+    'mysqlpwd', 'inventory', 'null', 
     'inventory.orders,inventory.customers', 'null', 'mysql');
 
 ```
@@ -139,7 +140,7 @@ SELECT synchdb_add_conninfo(
 ```sql
 SELECT synchdb_add_conninfo(
     'mysqlconn', '127.0.0.1', 3306, 'mysqluser', 
-    'mysqlpwd', 'inventory', 'postgres', 
+    'mysqlpwd', 'inventory', 'null', 
     'file:/path/to/mytablefile.json', 'file:/path/to/mytablefile.json', 'mysql');
 
 ```

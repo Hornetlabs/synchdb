@@ -33,8 +33,6 @@ SELECT synchdb_start_engine_bgw('mysqlconn', 'always');
 | `initial_only` | One-time snapshot, then stop | Data migration |
 | `no_data` | Structure only, no data | Schema synchronization |
 | `never` | Skip snapshot, stream only | Real-time updates |
-| `recovery` | Rebuilds from source | Disaster recovery |
-| `when_needed` | Conditional snapshot | Automatic recovery |
 | `schemasync` | Structure only, no data, no CDC | normal operations |
 
 
