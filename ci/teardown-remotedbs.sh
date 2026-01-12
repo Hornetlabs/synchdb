@@ -83,6 +83,13 @@ function teardown_synchdbnet()
 	docker network rm synchdbnet >/dev/null 2>&1
 }
 
+function teardown_postgres()
+{
+	echo "tearing down postgres..."
+	docker stop postgres
+	docker rm postgres
+}
+
 function teardown_remotedb()
 {
 	dbtype="$1"
@@ -112,6 +119,9 @@ function teardown_remotedb()
 			;;
 		"oradata")
 			teardown_oradata
+			;;
+		"postgres")
+			teardown_postgres
 			;;
 		*)
 			echo "$dbtype not supported"

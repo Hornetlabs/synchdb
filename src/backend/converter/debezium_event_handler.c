@@ -33,6 +33,7 @@ extern bool synchdb_log_event_on_error;
 extern char * g_eventStr;
 extern HTAB * dataCacheHash;
 extern int synchdb_letter_casing_strategy;
+extern int synchdb_error_strategy;
 
 static DdlType name_to_ddltype(const char * name);
 static DbzType getDbzTypeFromString(const char * typestring);
@@ -461,8 +462,6 @@ parseDBZDDL(Jsonb * jb, bool isfirst, bool islast, bool deriveMsg)
     /* free the data inside strinfo as we no longer needs it */
     pfree(strinfo.data);
 
-//    fc_normalize_name(synchdb_letter_casing_strategy, ddlinfo->id, strlen(ddlinfo->id));
-
     if (ddlinfo->type == DDL_CREATE_TABLE || ddlinfo->type == DDL_ALTER_TABLE)
     {
 		/* fetch payload.tableChanges.0.table.columns as jsonb */
@@ -597,9 +596,6 @@ parseDBZDDL(Jsonb * jb, bool isfirst, bool islast, bool deriveMsg)
 					{
 						elog(DEBUG1, "consuming %s = %s", key, value);
 						ddlcol->name = pstrdup(value);
-
-//						fc_normalize_name(synchdb_letter_casing_strategy, ddlcol->name,
-//								strlen(ddlcol->name));
 					}
 					if (!strcmp(key, "length"))
 					{
@@ -789,8 +785,6 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 			dbzdml->dbz_ts_ms = strtoull(strinfo.data, NULL, 10);
 	}
 
-//	fc_normalize_name(synchdb_letter_casing_strategy, objid.data, objid.len);
-
 	dbzdml->remoteObjectId = pstrdup(objid.data);
 	dbzdml->mappedObjectId = transform_object_name(dbzdml->remoteObjectId, "table");
 	if (dbzdml->mappedObjectId)
@@ -858,9 +852,6 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 	 * convert db and table to all lower case letters.
 	 */
 
-//	fc_normalize_name(synchdb_letter_casing_strategy, dbzdml->schema, strlen(dbzdml->schema));
-//	fc_normalize_name(synchdb_letter_casing_strategy, dbzdml->table, strlen(dbzdml->table));
-
 	/* prepare cache key */
 	strlcpy(cachekey.schema, dbzdml->schema, sizeof(cachekey.schema));
 	strlcpy(cachekey.table, dbzdml->table, sizeof(cachekey.table));
@@ -876,15 +867,25 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 	}
 	else
 	{
-		schemaoid = get_namespace_oid(dbzdml->schema, false);
+		schemaoid = get_namespace_oid(dbzdml->schema, true);
 		if (!OidIsValid(schemaoid))
 		{
 			char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
 			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "no valid OID found for schema '%s'", dbzdml->schema);
 			set_shm_connector_errmsg(myConnectorId, msg);
 
-			/* trigger pg's error shutdown routine */
-			elog(ERROR, "%s", msg);
+			if (synchdb_log_event_on_error && g_eventStr != NULL)
+				elog(LOG, "%s", g_eventStr);
+
+			/* act based on error strategy */
+			if (synchdb_error_strategy == STRAT_EXIT_ON_ERROR)
+				elog(ERROR, "%s", msg);
+			else
+			{
+				destroyDBZDML(dbzdml);
+				dbzdml = NULL;
+				goto end;
+			}
 		}
 
 		dbzdml->tableoid = get_relname_relid(dbzdml->table, schemaoid);
@@ -894,8 +895,18 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "no valid OID found for table '%s'", dbzdml->table);
 			set_shm_connector_errmsg(myConnectorId, msg);
 
-			/* trigger pg's error shutdown routine */
-			elog(ERROR, "%s", msg);
+			if (synchdb_log_event_on_error && g_eventStr != NULL)
+				elog(LOG, "%s", g_eventStr);
+
+			/* act based on error strategy */
+			if (synchdb_error_strategy == STRAT_EXIT_ON_ERROR)
+				elog(ERROR, "%s", msg);
+			else
+			{
+				destroyDBZDML(dbzdml);
+				dbzdml = NULL;
+				goto end;
+			}
 		}
 
 		/* populate cached information */

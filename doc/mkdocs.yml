@@ -84,7 +84,6 @@ plugins:
             JVM Memory Usage: Uso de memoria de JVM
             Attribute View: Vista de atributos
             JMX Exporter Settings: Configuración del exportador JMX
-            Openlog Replicator: Configurar Openlog Replicator
             Openlog Replicator Event Processor: Procesador de eventos del replicador Openlog
             Getting Started: Empezando
             Monitoring: escucha
@@ -136,7 +135,6 @@ plugins:
             JVM Memory Usage: JVM 内存使用情况
             Attribute View: 属性视图
             JMX Exporter Settings: JMX exporter 设置
-            Openlog Replicator: Openlog Replicator 设置
             Openlog Replicator Event Processor: Openlog Replicator 事件处理器
             Debezium Event Processor: Debezium 事件处理器
             Getting Started: 快速入门
@@ -197,7 +195,6 @@ nav:
    - Object Transformation: user-guide/object_mapping_rules.md
    - Letter Casing Strategy: user-guide/letter_casing_strategy.md
    - Error Strategies: user-guide/configure_error_strategies.md
-   - Openlog Replicator: user-guide/configure_olr.md
    - Snapshot Engine: user-guide/configure_snapshot_engine.md
  - Changelog: changelog.md
  # - Homepage: https://www.synchdb.com
