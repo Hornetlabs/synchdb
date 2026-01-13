@@ -53,6 +53,9 @@
 extern bool synchdb_dml_use_spi;
 extern int myConnectorId;
 extern int synchdb_letter_casing_strategy;
+extern int synchdb_error_strategy;
+extern bool synchdb_log_event_on_error;
+extern char * g_eventStr;
 
 /* data transformation related hash tables */
 HTAB * dataCacheHash = NULL;
@@ -3803,15 +3806,21 @@ updateSynchdbAttribute(DBZ_DDL * dbzddl, PG_DDL * pgddl, ConnectorType conntype,
 			return;
 		}
 
-		schemaoid = get_namespace_oid(pgddl->schema, false);
+		schemaoid = get_namespace_oid(pgddl->schema, true);
 		if (!OidIsValid(schemaoid))
 		{
 			char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
 			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "no valid OID found for schema '%s'", pgddl->schema);
 			set_shm_connector_errmsg(myConnectorId, msg);
 
-			/* trigger pg's error shutdown routine */
-			elog(ERROR, "%s", msg);
+			if (synchdb_log_event_on_error && g_eventStr != NULL)
+				elog(LOG, "%s", g_eventStr);
+
+			/* act based on error strategy */
+			if (synchdb_error_strategy == STRAT_EXIT_ON_ERROR)
+				elog(ERROR, "%s", msg);
+			else
+				return;
 		}
 
 		tableoid = get_relname_relid(pgddl->tbname, schemaoid);
@@ -3821,8 +3830,14 @@ updateSynchdbAttribute(DBZ_DDL * dbzddl, PG_DDL * pgddl, ConnectorType conntype,
 			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "no valid OID found for table '%s'", pgddl->tbname);
 			set_shm_connector_errmsg(myConnectorId, msg);
 
-			/* trigger pg's error shutdown routine */
-			elog(ERROR, "%s", msg);
+			if (synchdb_log_event_on_error && g_eventStr != NULL)
+				elog(LOG, "%s", g_eventStr);
+
+			/* act based on error strategy */
+			if (synchdb_error_strategy == STRAT_EXIT_ON_ERROR)
+				elog(ERROR, "%s", msg);
+			else
+				return;
 		}
 
 		appendStringInfo(&strinfo, "INSERT INTO %s (name, type, attrelid, attnum, "

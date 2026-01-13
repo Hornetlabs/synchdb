@@ -38,6 +38,7 @@ extern char * dbz_skipped_operations;
 extern bool synchdb_log_event_on_error;
 extern char * g_eventStr;
 extern int synchdb_letter_casing_strategy;
+extern int synchdb_error_strategy;
 
 /* Oracle raw parser function prototype */
 typedef List * (*oracle_raw_parser_fn)(const char *str, RawParseMode mode);
@@ -1544,7 +1545,7 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 	}
 	else
 	{
-		schemaoid = get_namespace_oid(olrdml->schema, false);
+		schemaoid = get_namespace_oid(olrdml->schema, true);
 		if (!OidIsValid(schemaoid))
 		{
 			char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
@@ -1554,8 +1555,15 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 			if (synchdb_log_event_on_error && g_eventStr != NULL)
 				elog(LOG, "%s", g_eventStr);
 
-			/* trigger pg's error shutdown routine */
-			elog(ERROR, "%s", msg);
+			/* act based on error strategy */
+			if (synchdb_error_strategy == STRAT_EXIT_ON_ERROR)
+				elog(ERROR, "%s", msg);
+			else
+			{
+				destroyOLRDML(olrdml);
+				olrdml = NULL;
+				goto end;
+			}
 		}
 
 		olrdml->tableoid = get_relname_relid(olrdml->table, schemaoid);
@@ -1568,8 +1576,15 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 			if (synchdb_log_event_on_error && g_eventStr != NULL)
 				elog(LOG, "%s", g_eventStr);
 
-			/* trigger pg's error shutdown routine */
-			elog(ERROR, "%s", msg);
+			/* act based on error strategy */
+			if (synchdb_error_strategy == STRAT_EXIT_ON_ERROR)
+				elog(ERROR, "%s", msg);
+			else
+			{
+				destroyOLRDML(olrdml);
+				olrdml = NULL;
+				goto end;
+			}
 		}
 
 		/* populate cached information */

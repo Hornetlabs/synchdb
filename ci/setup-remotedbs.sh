@@ -504,6 +504,28 @@ function setup_olr()
     fi
 }
 
+function setup_postgres()
+{
+    echo "setting up postgres..."
+    if [ $INTERNAL -eq 1 ]; then
+        docker_compose -f testenv/postgres/synchdb-postgres-test-internal.yaml up -d
+    else
+        docker_compose -f testenv/postgres/synchdb-postgres-test.yaml up -d
+    fi
+    echo "sleep to give container time to startup..."
+    sleep 30  # Give containers time to fully start
+
+	docker exec -i postgres psql -U postgres -d postgres -c "CREATE TABLE orders (order_number int primary key, order_date timestamp without time zone, purchaser int, quantity int , product_id int)"
+	docker exec -i postgres psql -U postgres -d postgres -c "INSERT INTO orders(order_number, order_date, purchaser, quantity, product_id) VALUES (10001, '2026-01-01', 1003, 2, 107)"
+	docker exec -i postgres psql -U postgres -d postgres -c "INSERT INTO orders(order_number, order_date, purchaser, quantity, product_id) VALUES (10002, '2026-01-01', 1003, 2, 107)"
+	docker exec -i postgres psql -U postgres -d postgres -c "INSERT INTO orders(order_number, order_date, purchaser, quantity, product_id) VALUES (10003, '2026-01-01', 1003, 2, 107)"
+	docker exec -i postgres psql -U postgres -d postgres -c "INSERT INTO orders(order_number, order_date, purchaser, quantity, product_id) VALUES (10004, '2026-01-01', 1003, 2, 107)"
+
+	# install ddl trigger function
+	docker exec -i postgres psql -U postgres -d postgres < ./postgres-connector-src-ddl-setup.sql
+    exit 0
+}
+
 function setup_remotedb()
 {
 	dbtype="$1"
@@ -529,6 +551,9 @@ function setup_remotedb()
 			setup_oradata
 			setup_ora19c "olr"
 			setup_olr
+			;;
+		"postgres")
+			setup_postgres
 			;;
 		*)
 			echo "$dbtype not supported"
