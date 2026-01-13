@@ -23,20 +23,21 @@ please select a quick deploy option:
          4) synchdb + oracle23ai
          5) synchdb + oracle19c
          6) synchdb + olr(oracle19c)
-         7) synchdb + all source databases
-         8) custom deployment
-         9) deploy monitoring
-        10) teardown deployment
+         7) synchdb + postgres18
+         8) synchdb + all source databases
+         9) custom deployment
+        10) deploy monitoring
+        11) teardown deployment
 enter your selection:
 
 ```
 
 * 仅对于 synchdb 部署，请使用选项 `1)`。
 * 对于 synchdb + 1 个源数据库，请使用选项 `2)` 至 `6)`。
-* 对于 synchdb + 所有源数据库，请使用选项 `7)`。
-* 对于 synchdb + 自定义源数据库，请使用选项 `8)`。
-* 对于 prometheus 和 grafana 监控部署，请使用选项 `9)`。
-* 要拆除所有部署，请使用选项 `10)`。
+* 对于 synchdb + 所有源数据库，请使用选项 `8)`。
+* 对于 synchdb + 自定义源数据库，请使用选项 `9)`。
+* 对于 prometheus 和 grafana 监控部署，请使用选项 `10)`。
+* 要拆除所有部署，请使用选项 `11)`。
 
 ## **测试源数据库访问详情**
 
@@ -71,6 +72,13 @@ enter your selection:
 **Openlog Replicator (OLR)：**
 
 * 服务名称：ORACLE
+
+**Postgres:**
+
+* 数据库：postgres
+* 模式：public
+* 用户: postgres
+* 密码: pass
 
 ## **使用 psql 访问 Synchdb**
 
@@ -173,6 +181,20 @@ SELECT synchdb_add_olr_conninfo('olrconn',
 
 ```
 
+**Postgres:**
+```sql
+SELECT synchdb_add_conninfo('postgresconn',
+                            'postgres',
+                            5432,
+                            'postgres',
+                            'pass',
+                            'postgres',
+                            'public',
+                            'null',
+                            'null',
+                            'postgres');
+
+```
 
 **查看已创建的连接器：**
 
@@ -188,9 +210,9 @@ SELECT * FROM synchdb_conninfo;
 默认情况下，源数据库名称将映射到目标数据库中的架构名称。可以使用对象映射来更改此架构名称。让我们从基于 Oracle 的连接器中更改“orders”表的目标架构，其余部分保留默认值。
 
 ```sql
-SELECT synchdb_add_objmap('oracleconn','table','free.c##dbzuser.orders','oracle23ai.orders');
-SELECT synchdb_add_objmap('ora19cconn','table','free.dbzuser.orders','oracle19c.orders');
-SELECT synchdb_add_objmap('olrconn','table','free.dbzuser.orders','olr.orders');
+SELECT synchdb_add_objmap('oracleconn','table','FREE.C##DBZUSER.ORDERS','oracle23ai.orders');
+SELECT synchdb_add_objmap('ora19cconn','table','FREE.DBZUSER.ORDERS','oracle19c.orders');
+SELECT synchdb_add_objmap('olrconn','table','FREE.DBZUSER.ORDERS','olr.orders');
 
 ```
 
@@ -240,40 +262,121 @@ SELECT synchdb_add_jmx_exporter_conninfo(
 
 ```
 
+**Postgres:**
+```sql
+SELECT synchdb_add_jmx_exporter_conninfo(
+                            'postgresconn',
+                            '/home/ubuntu/jmx_prometheus_javaagent-1.3.0.jar',
+                            9408,
+                            '/home/ubuntu/jmxexport.conf');
+
+```
+
 关于创建 JMX Exporter 的更多详细信息，请参见[此处](../../monitoring/jmx_exporter/)
 
-## **启动连接器**
+## **启动连接器 - 默认 debezium 快照引擎**
 
 **MySQL:**
 ```sql
+ALTER SYSTEM SET synchdb.snapshot_engine = 'debezium';
+SELECT pg_reload_conf();
 SELECT synchdb_start_engine_bgw('mysqlconn');
 
 ```
 
 **Sqlserver:**
 ```sql
+ALTER SYSTEM SET synchdb.snapshot_engine = 'debezium';
+SELECT pg_reload_conf();
 SELECT synchdb_start_engine_bgw('sqlserverconn');
 
 ```
 
 **Oracle23ai:**
 ```sql
+ALTER SYSTEM SET synchdb.snapshot_engine = 'debezium';
+SELECT pg_reload_conf();
 SELECT synchdb_start_engine_bgw('oracleconn');
 
 ```
 
 **Oracle19c:**
 ```sql
+ALTER SYSTEM SET synchdb.snapshot_engine = 'debezium';
+SELECT pg_reload_conf();
 SELECT synchdb_start_engine_bgw('ora19cconn');
+
 ```
 
 **OLR(Oracle19c):**
 ```sql
+ALTER SYSTEM SET synchdb.snapshot_engine = 'debezium';
+SELECT pg_reload_conf();
 SELECT synchdb_start_engine_bgw('olrconn');
 
 ```
 
+**Postgres:**
+```sql
+-- Requires user to pre-create schemas and tables:
+CREATE SCHEMA postgres;
+CREATE TABLE postgres.orders (order_number INT PRIMARY KEY, order_date TIMESTAMP WITHOUT TIME ZONE, purchaser INT, quantity INT , product_id INT);
+SELECT synchdb_start_engine_bgw('postgresconn');
+
+```
+
 有关连接器启动的更多详细信息，请参见[此处](../../user-guide/start_stop_connector/)
+
+## **启动连接器 - 使用 fdw 快照引擎**
+
+**MySQL:**
+```sql
+ALTER SYSTEM SET synchdb.snapshot_engine = 'fdw';
+SELECT pg_reload_conf();
+SELECT synchdb_start_engine_bgw('mysqlconn');
+
+```
+
+**Sqlserver:**
+```sql
+-- not supported yet. Connector will default to debezium when started
+ALTER SYSTEM SET synchdb.snapshot_engine = 'fdw';
+SELECT pg_reload_conf();
+SELECT synchdb_start_engine_bgw('sqlserverconn');
+
+```
+
+**Oracle23ai:**
+```sql
+ALTER SYSTEM SET synchdb.snapshot_engine = 'fdw';
+SELECT pg_reload_conf();
+SELECT synchdb_start_engine_bgw('oracleconn');
+
+```
+
+**Oracle19c:**
+```sql
+ALTER SYSTEM SET synchdb.snapshot_engine = 'fdw';
+SELECT pg_reload_conf();
+SELECT synchdb_start_engine_bgw('ora19cconn');
+
+```
+
+**OLR(Oracle19c):**
+```sql
+ALTER SYSTEM SET synchdb.snapshot_engine = 'fdw';
+SELECT pg_reload_conf();
+SELECT synchdb_start_engine_bgw('olrconn');
+
+```
+
+**Postgres:**
+```sql
+ALTER SYSTEM SET synchdb.snapshot_engine = 'fdw';
+SELECT pg_reload_conf();
+SELECT synchdb_start_engine_bgw('postgresconn');
+
+```
 
 ## **检查连接器运行状态**
 
@@ -291,10 +394,11 @@ postgres=# SELECT * FROM synchdb_state_view;
 ---------------+----------------+--------+------------------+---------+----------+------------------------------------------------------------------------------------------------------
  sqlserverconn | sqlserver      | 579820 | initial snapshot | polling | no error | {"commit_lsn":"0000006a:00006608:0003","snapshot":true,"snapshot_completed":false}
  mysqlconn     | mysql          | 579845 | initial snapshot | polling | no error | {"ts_sec":1741301103,"file":"mysql-bin.000009","pos":574318212,"row":1,"server_id":223344,"event":2}
- oracleconn    | oracle         | 580053 | initial snapshot | polling | no error | offset file not flushed yet
- ora19cconn    | oracle         | 593421 | initial snapshot | polling | no error | offset file not flushed yet
- olrconn       | oracle         | 601235 | initial snapshot | polling | no error | offset file not flushed yet
-(5 rows)
+ oracleconn    | oracle         | 580053 | initial snapshot | polling | no error | {"commit_scn":"3118146:1:02001f00c0020000","snapshot_scn":"3081987","scn":"3118125"}
+ ora19cconn    | oracle         | 593421 | initial snapshot | polling | no error | {"commit_scn":"3118146:1:02001f00c0020000","snapshot_scn":"3081987","scn":"3118125"}
+ olrconn       | oracle         | 601235 | initial snapshot | polling | no error | {"scn":5031082, "c_scn":5031085, "c_idx":3}
+ postgresconn  | postgres       | 631565 | initial snapshot | polling | no error | {"lsn_proc":37396384,"messageType":"INSERT","lsn":37396384,"txId":1015,"ts_usec":1767740340957961}
+(6 rows)
 
 ```
 
@@ -304,11 +408,6 @@ postgres=# SELECT * FROM synchdb_state_view;
 默认情况下，连接器将执行“初始”快照，以捕获表模式和初始数据，然后转换并将它们应用到不同“模式”下的 PostgreSQL。您应该看到类似以下内容：
 
 **MySQL:**
-```sql
-\dt inventory.*
-
-```
-
 ```sql
 \dt inventory.*
                List of relations
@@ -326,11 +425,6 @@ postgres=# SELECT * FROM synchdb_state_view;
 **Sqlserver:**
 ```sql
 \dt testdb.*
-
-```
-
-```sql
-\dt testdb.*
              List of relations
  Schema |       Name       | Type  | Owner
 --------+------------------+-------+--------
@@ -345,11 +439,6 @@ postgres=# SELECT * FROM synchdb_state_view;
 **Oracle23ai**
 ```sql
 \dt oracle23ai.*
-
-```
-
-```sql
-\dt oracle23ai.*
           List of relations
    Schema   |  Name  | Type  | Owner
 ------------+--------+-------+--------
@@ -359,11 +448,6 @@ postgres=# SELECT * FROM synchdb_state_view;
 ```
 
 **Oracle19c**
-```sql
-\dt oracle19c.*
-
-```
-
 ```sql
 \dt oracle19c.*
           List of relations
@@ -376,16 +460,22 @@ postgres=# SELECT * FROM synchdb_state_view;
 **OLR**
 ```sql
 \dt olr.*
-
-```
-
-```sql
-\dt olr.*
         List of relations
  Schema |  Name  | Type  | Owner
 --------+--------+-------+--------
  olr    | orders | table | ubuntu
 (1 row)
+```
+
+**Postgres**
+```sql
+\dt postgres.*
+          List of relations
+  Schema  |  Name  | Type  | Owner
+----------+--------+-------+--------
+ postgres | orders | table | ubuntu
+(1 row)
+
 ```
 
 ## 模拟 INSERT 事件并观察变更数据捕获 (CDC)
@@ -487,6 +577,25 @@ postgres=# SELECT * FROM olr.orders;
 
 ```
 
+**Postgres:**
+```bash
+docker exec -i postgres psql -U postgres -d postgres -c "INSERT INTO orders(order_number, order_date, purchaser, quantity, product_id) VALUES (10005, '2026-01-01', 1003, 10000, 102)"
+
+```
+
+```sql
+postgres=# SELECT * FROM postgres.orders;
+ order_number |     order_date      | purchaser | quantity | product_id
+--------------+---------------------+-----------+----------+------------
+        10001 | 2024-01-01 00:00:00 |      1003 |        2 |        107
+        10002 | 2024-01-01 00:00:00 |      1003 |        2 |        107
+        10003 | 2024-01-01 00:00:00 |      1003 |        2 |        107
+        10004 | 2024-01-01 00:00:00 |      1003 |        2 |        107
+        10005 | 2026-01-01 00:00:00 |      1003 |    10000 |        102
+(5 rows)
+
+```
+
 ## Grafana 上的连接器指标 - 可选
 
 ![img](../../images/grafana-home.jpg)
@@ -557,5 +666,12 @@ SELECT synchdb_del_conninfo('ora19cconn');
 ```sql
 SELECT synchdb_stop_engine_bgw('olrconn');
 SELECT synchdb_del_conninfo('olrconn');
+
+```
+
+**Postgres**
+```sql
+SELECT synchdb_stop_engine_bgw('postgresconn');
+SELECT synchdb_del_conninfo('postgresconn');
 
 ```

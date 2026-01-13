@@ -23,20 +23,21 @@ please select a quick deploy option:
          4) synchdb + oracle23ai
          5) synchdb + oracle19c
          6) synchdb + olr(oracle19c)
-         7) synchdb + all source databases
-         8) custom deployment
-         9) deploy monitoring
-        10) teardown deployment
+         7) synchdb + postgres18
+         8) synchdb + all source databases
+         9) custom deployment
+        10) deploy monitoring
+        11) teardown deployment
 enter your selection:
 
 ```
 
 * For synchdb deployment only, use option `1)`.
 * For synchdb + 1 source database, use option `2)` to `6)`.
-* For synchdb + all source databases, use option `7)`.
-* For synchdb + custom source databases, use option `8)`.
-* For prometheus and grafana monitoring deployment, use option `9)`.
-* to teardown all deployment, use option `10)`.
+* For synchdb + all source databases, use option `8)`.
+* For synchdb + custom source databases, use option `9)`.
+* For prometheus and grafana monitoring deployment, use option `10)`.
+* to teardown all deployment, use option `11)`.
 
 ## **Access Details of Source Databases for Testing**
 
@@ -71,6 +72,13 @@ enter your selection:
 **Openlog Replicator (OLR):**
 
 * service name: ORACLE
+
+**Postgres:**
+
+* database: postgres
+* schema: public
+* user: postgres
+* password: pass
 
 ## **Access Synchdb with psql**
 
@@ -172,6 +180,21 @@ SELECT synchdb_add_olr_conninfo('olrconn',
 
 ```
 
+**Postgres:**
+```sql
+SELECT synchdb_add_conninfo('postgresconn',
+                            'postgres',
+                            5432,
+                            'postgres',
+                            'pass',
+                            'postgres',
+                            'public',
+                            'null',
+                            'null',
+                            'postgres');
+
+```
+
 **View Created Connectors:**
 
 ```sql
@@ -186,9 +209,9 @@ More details on creating a connector can be found [here](../../user-guide/create
 By default, source database names will be mapped to a schema name in destination. Object mappings can be used to change this schema name. Let's change the destination schema for `orders` table from oracle based connectors and leave the rest as default.
 
 ```sql
-SELECT synchdb_add_objmap('oracleconn','table','free.c##dbzuser.orders','oracle23ai.orders');
-SELECT synchdb_add_objmap('ora19cconn','table','free.dbzuser.orders','oracle19c.orders');
-SELECT synchdb_add_objmap('olrconn','table','free.dbzuser.orders','olr.orders');
+SELECT synchdb_add_objmap('oracleconn','table','FREE.C##DBZUSER.ORDERS','oracle23ai.orders');
+SELECT synchdb_add_objmap('ora19cconn','table','FREE.DBZUSER.ORDERS','oracle19c.orders');
+SELECT synchdb_add_objmap('olrconn','table','FREE.DBZUSER.ORDERS','olr.orders');
 
 ```
 
@@ -238,43 +261,125 @@ SELECT synchdb_add_jmx_exporter_conninfo(
 
 ```
 
+**Postgres:**
+```sql
+SELECT synchdb_add_jmx_exporter_conninfo(
+                            'postgresconn',
+                            '/home/ubuntu/jmx_prometheus_javaagent-1.3.0.jar',
+                            9408,
+                            '/home/ubuntu/jmxexport.conf');
+
+```
+
 More details on creating a JMX Exporter can be found [here](../../monitoring/jmx_exporter/)
 
-## **Start a Connector**
+## **Start a Connector - Default Debezium Snapshot Engine**
 
 **MySQL:**
 ```sql
+ALTER SYSTEM SET synchdb.snapshot_engine = 'debezium';
+SELECT pg_reload_conf();
 SELECT synchdb_start_engine_bgw('mysqlconn');
 
 ```
 
 **Sqlserver:**
 ```sql
+ALTER SYSTEM SET synchdb.snapshot_engine = 'debezium';
+SELECT pg_reload_conf();
 SELECT synchdb_start_engine_bgw('sqlserverconn');
 
 ```
 
 **Oracle23ai:**
 ```sql
+ALTER SYSTEM SET synchdb.snapshot_engine = 'debezium';
+SELECT pg_reload_conf();
 SELECT synchdb_start_engine_bgw('oracleconn');
 
 ```
 
 **Oracle19c:**
 ```sql
+ALTER SYSTEM SET synchdb.snapshot_engine = 'debezium';
+SELECT pg_reload_conf();
 SELECT synchdb_start_engine_bgw('ora19cconn');
 
 ```
 
 **OLR(Oracle19c):**
 ```sql
+ALTER SYSTEM SET synchdb.snapshot_engine = 'debezium';
+SELECT pg_reload_conf();
 SELECT synchdb_start_engine_bgw('olrconn');
+
+```
+
+**Postgres:**
+```sql
+ALTER SYSTEM SET synchdb.snapshot_engine = 'debezium';
+SELECT pg_reload_conf();
+-- Requires user to pre-create schemas and tables:
+CREATE SCHEMA postgres;
+CREATE TABLE postgres.orders (order_number INT PRIMARY KEY, order_date TIMESTAMP WITHOUT TIME ZONE, purchaser INT, quantity INT , product_id INT);
+SELECT synchdb_start_engine_bgw('postgresconn');
 
 ```
 
 More details on connector start can be found [here](../../user-guide/start_stop_connector/)
 
-## Check Connector Running State
+## **Start a Connector - FDW Snapshot Engine**
+
+**MySQL:**
+```sql
+ALTER SYSTEM SET synchdb.snapshot_engine = 'fdw';
+SELECT pg_reload_conf();
+SELECT synchdb_start_engine_bgw('mysqlconn');
+
+```
+
+**Sqlserver:**
+```sql
+-- not supported yet. Connector will default to debezium when started
+ALTER SYSTEM SET synchdb.snapshot_engine = 'fdw';
+SELECT pg_reload_conf();
+SELECT synchdb_start_engine_bgw('sqlserverconn');
+
+```
+
+**Oracle23ai:**
+```sql
+ALTER SYSTEM SET synchdb.snapshot_engine = 'fdw';
+SELECT pg_reload_conf();
+SELECT synchdb_start_engine_bgw('oracleconn');
+
+```
+
+**Oracle19c:**
+```sql
+ALTER SYSTEM SET synchdb.snapshot_engine = 'fdw';
+SELECT pg_reload_conf();
+SELECT synchdb_start_engine_bgw('ora19cconn');
+
+```
+
+**OLR(Oracle19c):**
+```sql
+ALTER SYSTEM SET synchdb.snapshot_engine = 'fdw';
+SELECT pg_reload_conf();
+SELECT synchdb_start_engine_bgw('olrconn');
+
+```
+
+**Postgres:**
+```sql
+ALTER SYSTEM SET synchdb.snapshot_engine = 'fdw';
+SELECT pg_reload_conf();
+SELECT synchdb_start_engine_bgw('postgresconn');
+
+```
+
+## **Check Connector Running State**
 
 Use `synchdb_state_view()` to examine all connectors' running states. 
 
@@ -290,25 +395,20 @@ postgres=# SELECT * FROM synchdb_state_view;
 ---------------+----------------+--------+------------------+---------+----------+------------------------------------------------------------------------------------------------------
  sqlserverconn | sqlserver      | 579820 | initial snapshot | polling | no error | {"commit_lsn":"0000006a:00006608:0003","snapshot":true,"snapshot_completed":false}
  mysqlconn     | mysql          | 579845 | initial snapshot | polling | no error | {"ts_sec":1741301103,"file":"mysql-bin.000009","pos":574318212,"row":1,"server_id":223344,"event":2}
- oracleconn    | oracle         | 580053 | initial snapshot | polling | no error | offset file not flushed yet
- ora19cconn    | oracle         | 593421 | initial snapshot | polling | no error | offset file not flushed yet
- olrconn       | oracle         | 601235 | initial snapshot | polling | no error | offset file not flushed yet
-(5 rows)
+ oracleconn    | oracle         | 580053 | initial snapshot | polling | no error | {"commit_scn":"3118146:1:02001f00c0020000","snapshot_scn":"3081987","scn":"3118125"}
+ ora19cconn    | oracle         | 593421 | initial snapshot | polling | no error | {"commit_scn":"3118146:1:02001f00c0020000","snapshot_scn":"3081987","scn":"3118125"}
+ olrconn       | oracle         | 601235 | initial snapshot | polling | no error | {"scn":5031082, "c_scn":5031085, "c_idx":3}
+ postgresconn  | postgres       | 631565 | initial snapshot | polling | no error | {"lsn_proc":37396384,"messageType":"INSERT","lsn":37396384,"txId":1015,"ts_usec":1767740340957961}
+(6 rows)
 
 ```
 
 More on running states [here](../../monitoring/state_view/), and also running statistics [here](../../monitoring/stats_view/).
 
-
 ## Check the Tables and Data from Initial Snapshot
 By default, the connector will perform a `initial` snapshot to capture both the table schema and initial data, convert and apply them to PostgreSQL under different `schema`. You should see something similar to the following:
 
 **MySQL:**
-```sql
-\dt inventory.*
-
-```
-
 ```sql
 \dt inventory.*
                List of relations
@@ -324,10 +424,6 @@ By default, the connector will perform a `initial` snapshot to capture both the 
 ```
 
 **Sqlserver:**
-```sql
-\dt testdb.*
-
-```
 
 ```sql
 \dt testdb.*
@@ -345,11 +441,6 @@ By default, the connector will perform a `initial` snapshot to capture both the 
 **Oracle23ai**
 ```sql
 \dt oracle23ai.*
-
-```
-
-```sql
-\dt oracle23ai.*
           List of relations
    Schema   |  Name  | Type  | Owner
 ------------+--------+-------+--------
@@ -359,10 +450,6 @@ By default, the connector will perform a `initial` snapshot to capture both the 
 ```
 
 **Oracle19c**
-```sql
-\dt oracle19c.*
-
-```
 
 ```sql
 \dt oracle19c.*
@@ -374,10 +461,6 @@ By default, the connector will perform a `initial` snapshot to capture both the 
 ```
 
 **OLR**
-```sql
-\dt olr.*
-
-```
 
 ```sql
 \dt olr.*
@@ -388,7 +471,19 @@ By default, the connector will perform a `initial` snapshot to capture both the 
 (1 row)
 ```
 
-## Similate an INSERT Event and Observe CDC
+**Postgres**
+
+```sql
+\dt postgres.*
+          List of relations
+  Schema  |  Name  | Type  | Owner
+----------+--------+-------+--------
+ postgres | orders | table | ubuntu
+(1 row)
+
+```
+
+## Simulate an INSERT Event and Observe CDC
 
 We can use `docker exec` to similate an INSERT for each connector type and observe the Change Data Capture (CDC).
 
@@ -487,6 +582,25 @@ postgres=# SELECT * FROM olr.orders;
 
 ```
 
+**Postgres:**
+```bash
+docker exec -i postgres psql -U postgres -d postgres -c "INSERT INTO orders(order_number, order_date, purchaser, quantity, product_id) VALUES (10005, '2026-01-01', 1003, 10000, 102)"
+
+```
+
+```sql
+postgres=# SELECT * FROM postgres.orders;
+ order_number |     order_date      | purchaser | quantity | product_id
+--------------+---------------------+-----------+----------+------------
+        10001 | 2024-01-01 00:00:00 |      1003 |        2 |        107
+        10002 | 2024-01-01 00:00:00 |      1003 |        2 |        107
+        10003 | 2024-01-01 00:00:00 |      1003 |        2 |        107
+        10004 | 2024-01-01 00:00:00 |      1003 |        2 |        107
+        10005 | 2026-01-01 00:00:00 |      1003 |    10000 |        102
+(5 rows)
+
+```
+
 ## Connector Metrics on Grafana - Optional
 
 ![img](../../images/grafana-home.jpg)
@@ -557,5 +671,12 @@ SELECT synchdb_del_conninfo('ora19cconn');
 ```sql
 SELECT synchdb_stop_engine_bgw('olrconn');
 SELECT synchdb_del_conninfo('olrconn');
+
+```
+
+**Postgres**
+```sql
+SELECT synchdb_stop_engine_bgw('postgresconn');
+SELECT synchdb_del_conninfo('postgresconn');
 
 ```
