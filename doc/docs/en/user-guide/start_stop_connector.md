@@ -2,7 +2,7 @@
 
 ## **Control a Connector**
 
-SynchDB provides several utility function to control the behavior and life cycle or a created connector.
+SynchDB provides several utility function to control the behavior and life cycle of a created connector.
 
 ## **Start a Connector with Default Snapshot Mode**
 

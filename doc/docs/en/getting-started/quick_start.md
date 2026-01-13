@@ -388,9 +388,9 @@ By default, the connector will perform a `initial` snapshot to capture both the 
 (1 row)
 ```
 
-## Similate an INSERT Event and Observe CDC
+## Simulate an INSERT Event and Observe CDC
 
-We can use `docker exec` to similate an INSERT for each connector type and observe the Change Data Capture (CDC).
+We can use `docker exec` to simulate an INSERT for each connector type and observe the Change Data Capture (CDC).
 
 **MySQL:**
 ```bash
