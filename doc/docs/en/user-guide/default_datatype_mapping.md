@@ -236,7 +236,7 @@ DatatypeHashEntry postgres_defaultTypeMappings[] =
 	{{"cidr", false}, "cidr", 0},
 	{{"circle", false}, "circle", 0},
 	{{"date", false}, "date", 0},
-	{{"decimal", false}, "dedcimal", -1},
+	{{"decimal", false}, "decimal", -1},
 	{{"double precision", false}, "double precision", 0},
 	{{"float", false}, "float", 0},
 	{{"float4", false}, "float4", 0},

@@ -41,7 +41,7 @@ SynchDB 1.3 delivers a major performance enhancement with the new FDW-based snap
 ### Changed
 
 * Openlog Replicator Connector: Enhanced Oracle parser to support more contraint operators: enable, disable, novalidate, validate
-* Openlog Replicator Connector: Enhanced Oracle parser to support MODIFY clauses with and without paraenthesis
+* Openlog Replicator Connector: Enhanced Oracle parser to support MODIFY clauses with and without parenthesis
 * Openlog Replicator Connector: Enhanced Oracle parser to support DEFAULT ON NULL clauses.
 * Openlog Replicator Connector: Improve processing performance by removing one pre-scan loop.
 * Openlog Replicator Connector: Optimized non-null terminated event processing as PostgreSQL text type to save one copy operation. (PG17+)

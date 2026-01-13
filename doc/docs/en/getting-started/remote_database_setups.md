@@ -264,7 +264,7 @@ sqlplus sys/oracle@//localhost:1521/FREE as sysdba
 
 ### **Enable Supplemental Log Data for Tables Designated for Capture**
 
-This configuration needs to be run on each table designzted for catpure in order to correctly handle the UPDATE and DELETE operations.
+This configuration needs to be run on each table designated for capture in order to correctly handle the UPDATE and DELETE operations.
 
 ```sql
 ALTER TABLE customer ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS;

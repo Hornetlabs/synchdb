@@ -38,7 +38,7 @@ Column Details:
 - ⚪ `executing` - Applying changes
 - 🟤 `updating offset` - Updating checkpoint
 - 🟨 `restarting` - Reinitializing
-- ⚪ `dumping memory` - JVM is prepaaring to dump memory info in log file
+- ⚪ `dumping memory` - JVM is preparing to dump memory info in log file
 - ⚫ `unknown` - Indeterminate state
 
 **Possible Stages**:
