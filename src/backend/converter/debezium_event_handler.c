@@ -357,9 +357,15 @@ deriveLogicalMessage(Jsonb ** jb)
 		elog(WARNING, "decoded DDL message is not valid JSON: %s", edata->message);
 		FreeErrorData(edata);
 		MemoryContextSwitchTo(oldctx);
+		if (tmpout)
+		    pfree(tmpout);
 		return -1;
 	}
 	PG_END_TRY();
+
+	/* tmpout not needed anymore */
+	if (tmpout)
+	    pfree(tmpout);
 
 	/* turn this ddl_jb to tableChanges array with just one value */
 	out = pushJsonbValue(&state, WJB_BEGIN_ARRAY, NULL);
@@ -381,6 +387,8 @@ deriveLogicalMessage(Jsonb ** jb)
 		BoolGetDatum(true)             /* create_missing */
 	);
 	*jb = DatumGetJsonbP(newjb_d);
+	if (path)
+	    pfree(path);
 	return 0;
 }
 
@@ -1066,10 +1074,10 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 									if (getPathElementString(jb, tmpPath, &strinfo, false) == 0)
 									{
 										/* postgres array is wrapped with curly brackets instead */
-										if (strinfo.data[0] == '[')
+										if (strinfo.len > 0 && strinfo.data[0] == '[')
 											strinfo.data[0] = '{';
-										if (strinfo.data[strinfo.len - 1] == ']')
-											strinfo.data[strinfo.len -1] = '}';
+										if (strinfo.len > 0 && strinfo.data[strinfo.len - 1] == ']')
+											strinfo.data[strinfo.len - 1] = '}';
 
 										value = pstrdup(strinfo.data);
 									}
@@ -1258,10 +1266,10 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 									if (getPathElementString(jb, tmpPath, &strinfo, false) == 0)
 									{
 										/* postgres array is wrapped with curly brackets instead */
-										if (strinfo.data[0] == '[')
+										if (strinfo.len > 0 && strinfo.data[0] == '[')
 											strinfo.data[0] = '{';
-										if (strinfo.data[strinfo.len - 1] == ']')
-											strinfo.data[strinfo.len -1] = '}';
+										if (strinfo.len > 0 && strinfo.data[strinfo.len - 1] == ']')
+											strinfo.data[strinfo.len - 1] = '}';
 
 										value = pstrdup(strinfo.data);
 									}
@@ -1485,10 +1493,10 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 										if (getPathElementString(jb, tmpPath, &strinfo, false) == 0)
 										{
 											/* postgres array is wrapped with curly brackets instead */
-											if (strinfo.data[0] == '[')
+											if (strinfo.len > 0 && strinfo.data[0] == '[')
 												strinfo.data[0] = '{';
-											if (strinfo.data[strinfo.len - 1] == ']')
-												strinfo.data[strinfo.len -1] = '}';
+											if (strinfo.len > 0 && strinfo.data[strinfo.len - 1] == ']')
+												strinfo.data[strinfo.len - 1] = '}';
 
 											value = pstrdup(strinfo.data);
 										}

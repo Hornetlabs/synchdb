@@ -3408,15 +3408,29 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 		{
 			if (synchdb_dml_use_spi)
 			{
+				bool atleastone = false;
+
 				/* --- Convert to use SPI to handler DML --- */
 				appendStringInfo(&strinfo, "INSERT INTO %s(", dbzdml->mappedObjectId);
 				foreach(cell, dbzdml->columnValuesAfter)
 				{
 					DBZ_DML_COLUMN_VALUE * colval = (DBZ_DML_COLUMN_VALUE *) lfirst(cell);
 					appendStringInfo(&strinfo, "%s,", colval->name);
+					atleastone = true;
 				}
-				strinfo.data[strinfo.len - 1] = '\0';
-				strinfo.len = strinfo.len - 1;
+
+				if (atleastone)
+				{
+					strinfo.data[strinfo.len - 1] = '\0';
+					strinfo.len = strinfo.len - 1;
+				}
+				else
+				{
+					elog(WARNING, "no column data is provided for %s. Insert skipped", dbzdml->mappedObjectId);
+					pfree(strinfo.data);
+					destroyPGDML(pgdml);
+					return NULL;
+				}
 				appendStringInfo(&strinfo, ") VALUES (");
 
 				foreach(cell, dbzdml->columnValuesAfter)
@@ -3435,9 +3449,18 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 					}
 				}
 				/* remove extra "," */
-				strinfo.data[strinfo.len - 1] = '\0';
-				strinfo.len = strinfo.len - 1;
-
+				if (atleastone)
+				{
+					strinfo.data[strinfo.len - 1] = '\0';
+					strinfo.len = strinfo.len - 1;
+				}
+				else
+				{
+					elog(WARNING, "no column data is provided for %s. Insert skipped", dbzdml->mappedObjectId);
+					pfree(strinfo.data);
+					destroyPGDML(pgdml);
+					return NULL;
+				}
 				appendStringInfo(&strinfo, ");");
 			}
 			else
@@ -3571,10 +3594,22 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 					{
 						appendStringInfo(&strinfo, "%s,", "null");
 					}
+					atleastone = true;
 				}
-				/* remove extra "," */
-				strinfo.data[strinfo.len - 1] = '\0';
-				strinfo.len = strinfo.len - 1;
+
+				if (atleastone)
+				{
+					/* remove extra "," */
+					strinfo.data[strinfo.len - 1] = '\0';
+					strinfo.len = strinfo.len - 1;
+				}
+				else
+				{
+					elog(WARNING, "no column data is provided for %s. Update skipped", dbzdml->mappedObjectId);
+					pfree(strinfo.data);
+					destroyPGDML(pgdml);
+					return NULL;
+				}
 
 				appendStringInfo(&strinfo,  " WHERE ");
 				foreach(cell, dbzdml->columnValuesBefore)
