@@ -2710,17 +2710,62 @@ BEGIN
 		RAISE NOTICE 'Created MySQL FT %.% -> %.% on %',
 				   p_stage_schema, v_tbl_pg, p_desired_db, r.table_name, p_server_name;
 	ELSIF v_conn_type = 'postgres' THEN
-		-- Ignore p_scn; use mysql_fdw options: dbname + table_name
-        EXECUTE format(
-            'CREATE FOREIGN TABLE %I.%I (%s) SERVER %I OPTIONS (schema_name %L, table_name %L)',
-            p_stage_schema, v_tbl_pg, v_cols_sql, p_server_name,
-            p_desired_schema::text, r.table_name
-        );
-
-        RAISE NOTICE 'Created Postgres FT %.% -> %.% on %',
+          ------------------------------------------------------------------
+      -- IMPORTANT for postgres_fdw:
+      -- If we normalize local FT column identifiers (upper/lower),
+      -- we MUST map them back to the real remote column names using
+      -- column OPTIONS (column_name 'remote_col').
+      ------------------------------------------------------------------
+      EXECUTE format($SQL$
+        SELECT string_agg(
+                 (
+                   quote_ident(
+                     CASE
+                       WHEN %L = 'lower' THEN lower(c.column_name)
+                       WHEN %L = 'upper' THEN upper(c.column_name)
+                       ELSE c.column_name
+                     END
+                   )
+                   || ' ' ||
+                   synchdb_translate_datatype(
+                       %L::name,
+                       lower(c.type_name)::name,
+                       COALESCE(c.length, -1)::int,
+                       COALESCE(c.scale, -1)::int,
+                       COALESCE(c.precision, -1)::int
+                   )
+                   || ' OPTIONS (column_name ' || quote_literal(c.column_name) || ')'
+                   || CASE
+                        WHEN lower(coalesce(c.nullable::text,'')) IN ('no','n','0','false','f')
+                        THEN ' NOT NULL'
+                        ELSE ''
+                      END
+                 ),
+                 ', ' ORDER BY c.position
+               )
+          FROM %I.columns c
+         WHERE c."schema"   = %L
+           AND c.table_name = %L
+      $SQL$,
+        p_case_strategy,            -- for local column identifier normalization
+        p_case_strategy,
+        v_conn_type,                -- datatype translator selector
+        p_source_schema,            -- your metadata schema (e.g. postgresmeta)
+        r.ora_owner,                -- remote schema name (your code uses ora_owner generically)
+        r.table_name
+      )
+      INTO v_cols_sql;
+	  
+      EXECUTE format(
+        'CREATE FOREIGN TABLE %I.%I (%s) SERVER %I OPTIONS (schema_name %L, table_name %L)',
+        p_stage_schema, v_tbl_pg, v_cols_sql, p_server_name,
+        p_desired_schema::text, r.table_name
+      );
+	  
+      RAISE NOTICE 'Created Postgres FT %.% -> %.% on %',
                    p_stage_schema, v_tbl_pg, p_desired_schema, r.table_name, p_server_name;
-
-    ELSE
+	
+	ELSE
       RAISE EXCEPTION 'Unsupported connector type: %', v_conn_type;
     END IF;
 	

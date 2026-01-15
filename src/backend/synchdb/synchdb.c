@@ -2373,6 +2373,14 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 									connInfo->flag);
 
 							/*
+							 * postgres connector under debezium snapshot engine requires user to create
+							 * schema manually, so there is not really a schema sync action here, so we
+							 * just mark it as done for now.
+							 */
+							if (connectorType == TYPE_POSTGRES && (connInfo->flag & CONNFLAG_SCHEMA_SYNC_MODE))
+								set_shm_connector_state(myConnectorId, STATE_SCHEMA_SYNC_DONE);
+
+							/*
 							 * if a valid batchid is set by dbz_engine_get_change(), it means we have
 							 * successfully completed a batch change request and we shall notify dbz
 							 * that it's been completed.
