@@ -343,7 +343,6 @@ static long long derive_value_from_byte(const unsigned char * bytes, int len);
 static char * derive_decimal_string_from_byte(const unsigned char *bytes, int len);
 static void reverse_byte_array(unsigned char * array, int length);
 static void trim_leading_zeros(char *str);
-static void prepend_zeros(char *str, int num_zeros);
 static void byte_to_binary(unsigned char byte, char * binary_str);
 static void bytes_to_binary_string(const unsigned char * bytes,
 		size_t len, char * binary_str, bool trim);
@@ -635,32 +634,6 @@ trim_leading_zeros(char *str)
 		str[j++] = str[i++];
 	}
 	str[j] = '\0';
-}
-
-/*
- * prepend_zeros
- *
- * prepend zeros to the given string and return as a new p-alloced string
- */
-static void
-prepend_zeros(char *str, int num_zeros)
-{
-    int original_len = strlen(str);
-    int new_len = original_len + num_zeros;
-    char * temp = palloc0(new_len + 1);
-
-    for (int i = 0; i < num_zeros; i++)
-    {
-        temp[i] = '0';
-    }
-
-    for (int i = 0; i < original_len; i++)
-    {
-        temp[i + num_zeros] = str[i];
-    }
-    temp[new_len] = '\0';
-    strcpy(str, temp);
-    pfree(temp);
 }
 
 /*
@@ -2083,6 +2056,8 @@ handle_base64_to_bit(const char * in, bool addquote, int typemod, bool padzero)
 		/* 8 bits per byte + extra zeros + terminating null */
 		out = (char *) palloc0((tmpoutlen * 8) + extrazeros + 1);
 
+		elog(WARNING, "in len = %d, extrazero = %d, typmod = %d, trim = %d", (tmpoutlen * 8),
+				extrazeros, typemod, !padzero);
 		/* zeros */
 		memset(out, '0', extrazeros);
 
@@ -2834,12 +2809,14 @@ handle_data_by_type_category(char * in, DBZ_DML_COLUMN_VALUE * colval, Connector
 				case DBZTYPE_STRUCT:
 				{
 					expand_struct_value(in, colval, conntype);
-					out = handle_base64_to_bit(colval->value, addquote, colval->typemod, true);
+					out = handle_base64_to_bit(colval->value, addquote, colval->typemod,
+							conntype == TYPE_MYSQL ? true : false);
 					break;
 				}
 				case DBZTYPE_BYTES:
 				{
-					out = handle_base64_to_bit(in, addquote, colval->typemod, true);
+					out = handle_base64_to_bit(in, addquote, colval->typemod,
+							conntype == TYPE_MYSQL ? true : false);
 					break;
 				}
 				case DBZTYPE_STRING:
@@ -3020,13 +2997,13 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 				{
 					expand_struct_value(in, colval, type);
 					out = handle_base64_to_bit(colval->value, addquote, colval->typemod,
-							colval->dbztype == BITOID ? true : false);
+							type == TYPE_MYSQL ? true : false);
 					break;
 				}
 				case DBZTYPE_BYTES:
 				{
 					out = handle_base64_to_bit(in, addquote, colval->typemod,
-							colval->dbztype == BITOID ? true : false);
+							type == TYPE_MYSQL ? true : false);
 					break;
 				}
 				case DBZTYPE_STRING:
