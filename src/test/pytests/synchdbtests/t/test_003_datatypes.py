@@ -631,8 +631,8 @@ def test_AllDefaultDataTypes(pg_cursor, dbvendor):
             assert row[29] == extrow[29]
             assert row[30] == None
             assert row[31] == None
-            assert row[32] == extrow[32] # bit
-            #assert row[33] == extrow[33] # varbit
+            assert row[32] == extrow[32]
+            assert row[33] == extrow[33]
             assert row[34] == NumericRange(*map(int, extrow[34][1:-1].split(',')), bounds=extrow[34][0] + extrow[34][-1])
             assert row[35] == NumericRange(*map(int, extrow[35][1:-1].split(',')), bounds=extrow[35][0] + extrow[35][-1])
             assert row[36] == NumericRange(*map(Decimal, extrow[36][1:-1].split(',')), bounds=extrow[36][0] + extrow[36][-1])

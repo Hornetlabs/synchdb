@@ -346,7 +346,7 @@ static void trim_leading_zeros(char *str);
 static void prepend_zeros(char *str, int num_zeros);
 static void byte_to_binary(unsigned char byte, char * binary_str);
 static void bytes_to_binary_string(const unsigned char * bytes,
-		size_t len, char * binary_str);
+		size_t len, char * binary_str, bool trim);
 static char * transform_data_expression(const char * remoteObjid, const char * colname);
 static void populate_primary_keys(StringInfoData * strinfo, const char * id,
 		const char * jsonin, bool alter, bool isinline);
@@ -367,7 +367,7 @@ static void expand_struct_value(char * in, DBZ_DML_COLUMN_VALUE * colval,
 		ConnectorType conntype);
 static char * handle_base64_to_numeric_with_scale(const char * in, int scale);
 static char * handle_string_to_numeric(const char * in, bool addquote);
-static char * handle_base64_to_bit(const char * in, bool addquote, int typemod);
+static char * handle_base64_to_bit(const char * in, bool addquote, int typemod, bool padzero);
 static char * handle_string_to_bit(const char * in, bool addquote);
 static char * handle_numeric_to_bit(const char * in, bool addquote);
 static char * construct_datestr(long long input, bool addquote, int timerep);
@@ -640,7 +640,7 @@ trim_leading_zeros(char *str)
 /*
  * prepend_zeros
  *
- * prepend zeros to the given string
+ * prepend zeros to the given string and return as a new p-alloced string
  */
 static void
 prepend_zeros(char *str, int num_zeros)
@@ -684,7 +684,7 @@ byte_to_binary(unsigned char byte, char * binary_str)
  * convert the given bytes to a binary string with 1s and 0s
  */
 static void
-bytes_to_binary_string(const unsigned char * bytes, size_t len, char * binary_str)
+bytes_to_binary_string(const unsigned char * bytes, size_t len, char * binary_str, bool trim)
 {
 	char byte_str[9];
 	size_t i = 0;
@@ -695,6 +695,9 @@ bytes_to_binary_string(const unsigned char * bytes, size_t len, char * binary_st
 		byte_to_binary(bytes[i], byte_str);
 		strcat(binary_str, byte_str);
 	}
+
+	if (trim)
+		trim_leading_zeros(binary_str);
 }
 
 /*
@@ -2042,42 +2045,50 @@ handle_string_to_numeric(const char * in, bool addquote)
 }
 
 static char *
-handle_base64_to_bit(const char * in, bool addquote, int typemod)
+handle_base64_to_bit(const char * in, bool addquote, int typemod, bool padzero)
 {
 	int tmpoutlen = pg_b64_dec_len(strlen(in));
 	unsigned char * tmpout = (unsigned char *) palloc0(tmpoutlen);
 	char * out = NULL;
+	int extrazeros = 0;
 
 #if SYNCHDB_PG_MAJOR_VERSION >= 1800
 	tmpoutlen = pg_b64_decode(in, strlen(in), tmpout, tmpoutlen);
 #else
 	tmpoutlen = pg_b64_decode(in, strlen(in), (char*)tmpout, tmpoutlen);
 #endif
+
+	if (padzero)
+		extrazeros = (typemod - (tmpoutlen * 8));
+
 	if (addquote)
 	{
-		/* 8 bits per byte + 2 single quotes + b + terminating null */
-		char * tmp = NULL;
-		out = (char *) palloc0((tmpoutlen * 8) + 2 + 1 + 1);
-		tmp = out;
-		reverse_byte_array(tmpout, tmpoutlen);
-		strcat(tmp, "'b");
-		tmp += 2;
-		bytes_to_binary_string(tmpout, tmpoutlen, tmp);
-		trim_leading_zeros(tmp);
-		if (strlen(tmp) < typemod)
-			prepend_zeros(tmp, typemod - strlen(tmp));
+		/* 8 bits per byte + 2 single quotes + b + extra zeros + terminating null */
+		out = (char *) palloc0((tmpoutlen * 8) + 2 + 1 + extrazeros + 1);
 
-		strcat(tmp, "'");
+		strcat(out, "'b");
+		out += 2;
+
+		/* zeros */
+		memset(out, '0', extrazeros);
+
+		/* bit value */
+		reverse_byte_array(tmpout, tmpoutlen);
+		bytes_to_binary_string(tmpout, tmpoutlen, out + extrazeros, !padzero);
+
+		strcat(out, "'");
 	}
 	else
 	{
-		/* 8 bits per byte + terminating null */
-		out = (char *) palloc0(tmpoutlen * 8 + 1);
+		/* 8 bits per byte + extra zeros + terminating null */
+		out = (char *) palloc0((tmpoutlen * 8) + extrazeros + 1);
+
+		/* zeros */
+		memset(out, '0', extrazeros);
+
+		/* bit value */
 		reverse_byte_array(tmpout, tmpoutlen);
-		bytes_to_binary_string(tmpout, tmpoutlen, out);
-		trim_leading_zeros(out);
-		if (strlen(out) < typemod)
-			prepend_zeros(out, typemod - strlen(out));
+		bytes_to_binary_string(tmpout, tmpoutlen, out + extrazeros, !padzero);
 	}
 	pfree(tmpout);
 	return out;
@@ -2823,12 +2834,12 @@ handle_data_by_type_category(char * in, DBZ_DML_COLUMN_VALUE * colval, Connector
 				case DBZTYPE_STRUCT:
 				{
 					expand_struct_value(in, colval, conntype);
-					out = handle_base64_to_bit(colval->value, addquote, colval->typemod);
+					out = handle_base64_to_bit(colval->value, addquote, colval->typemod, true);
 					break;
 				}
 				case DBZTYPE_BYTES:
 				{
-					out = handle_base64_to_bit(in, addquote, colval->typemod);
+					out = handle_base64_to_bit(in, addquote, colval->typemod, true);
 					break;
 				}
 				case DBZTYPE_STRING:
@@ -3008,12 +3019,14 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 				case DBZTYPE_STRUCT:
 				{
 					expand_struct_value(in, colval, type);
-					out = handle_base64_to_bit(colval->value, addquote, colval->typemod);
+					out = handle_base64_to_bit(colval->value, addquote, colval->typemod,
+							colval->dbztype == BITOID ? true : false);
 					break;
 				}
 				case DBZTYPE_BYTES:
 				{
-					out = handle_base64_to_bit(in, addquote, colval->typemod);
+					out = handle_base64_to_bit(in, addquote, colval->typemod,
+							colval->dbztype == BITOID ? true : false);
 					break;
 				}
 				case DBZTYPE_STRING:
