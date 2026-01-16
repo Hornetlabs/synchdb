@@ -143,4 +143,4 @@ sudo make install
 
 ```
 
-postgre is reasdy to go. Start a connector normally with synchdb.olr_snapshot_engine set to 'fdw'. If a snapshot is required, SynchDB will complete it via FDW. You do not have to run `CREATE EXTENSION mysql_fdw` prior to using FDW based initial snapshot, nor do you have to `CREATE SERVER` or `CREATE USER MAPPING`. SynchDB takes care of all of these when it performs the snapshot..
+postgres is ready to go. Start a connector normally with synchdb.olr_snapshot_engine set to 'fdw'. If a snapshot is required, SynchDB will complete it via FDW. You do not have to run `CREATE EXTENSION mysql_fdw` prior to using FDW based initial snapshot, nor do you have to `CREATE SERVER` or `CREATE USER MAPPING`. SynchDB takes care of all of these when it performs the snapshot..

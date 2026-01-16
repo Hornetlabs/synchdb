@@ -216,7 +216,7 @@ Run ldconfig to reload:
 sudo ldconfig
 ```
 
-Ensure synchdo.so extension can link to libjvm Java library on your system:
+Ensure synchdb.so extension can link to libjvm Java library on your system:
 ``` BASH
 ldd synchdb.so
         linux-vdso.so.1 (0x00007ffeae35a000)

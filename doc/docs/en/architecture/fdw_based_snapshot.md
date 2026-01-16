@@ -36,7 +36,7 @@ WARNING: **BACKUP_ADMIN permission is required to obtain the "cut-point" paramet
 
 * Before snapshot begins, read the current SCN value, which serves as a "cut-off" point for the snapshot
 * During foreign table schema migration, extra attribute "AS OF SCN xxx" will be associated with each desired foreign table,causing all the foreign reads to use Oracle's FLASHBACK query
-* FLASHBACK query returns the table results as of the SCN specified so consistency is automatically guarenteed. No extra locking needed.
+* FLASHBACK query returns the table results as of the SCN specified so consistency is automatically guaranteed. No extra locking needed.
 * Migrate all desired tables schema and data with proper type translations with FLASHBACK query.
 * Once done, the CDC can resume from the cut-off point, which will handle the data changes that happened during the snapshot.
 

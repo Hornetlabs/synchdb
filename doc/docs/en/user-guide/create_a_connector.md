@@ -8,7 +8,7 @@ Creating a connector can be done with utility SQL function `synchdb_add_conninfo
 
 synchdb_add_conninfo takes these arguments:
 
-|        argumet        | description |
+|        argument        | description |
 |-------------------- |-|
 | name                  | a unique identifier that represents this connector info |
 | hostname              | the IP address or hostname of the heterogeneous database. |
