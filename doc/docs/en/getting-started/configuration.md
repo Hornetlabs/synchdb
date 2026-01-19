@@ -63,7 +63,7 @@ synchdb.dbz_offset_flush_interval_ms=60000                              # Flush 
 synchdb.dbz_capture_only_selected_table_ddl=false                       # Debezium will only capture the schema of selected tables rather than all tables
 synchdb.max_connector_workers=10                                        # 10 connector workers can be run at a time
 synchdb.error_handling_strategy='retry'                                 # connector should retry on error
-synchdb.dbz_log_leve='error'                                            # Debezium Runner should log error messages only
+synchdb.dbz_log_level='error'                                            # Debezium Runner should log error messages only
 synchdb.log_change_on_error=true                                        # log JSON change event on error
 synchdb.cdc_start_delay_ms=30000                                        # wait 30s after snapshot completes and before CDC begins
 synchdb.olr_snapshot_engine="fdw"                                       # use FDW based snapshot engine to complete the snapshot process
@@ -119,11 +119,11 @@ synchdb.letter_casing_strategy="asis"                                   # preser
 10. **synchdb.dbz_incremental_snapshot_chunk_size**
     - Lower values: Slower processing of change events at lower JVM memory usage during incremental snapshot
     - Higher values: Faster processing of change events at higher JVM memory usage during incremental snapshot
-    - Recommended to set it the same as `synchdb.dbz_batch_size` and adjust Adjust based on resource requirements
+    - Recommended to set it the same as `synchdb.dbz_batch_size` and adjust based on resource requirements
 
 11. **synchdb.dbz_offset_flush_interval_ms**
-    - Lower values: More frequent update to offset file, more IO, less old batches to re-preocess after fault restored
-    - Higher values: Less frequent update to offset file, less IO, more old batches to re-preocess after fault restored
+    - Lower values: More frequent update to offset file, more IO, less old batches to re-process after fault restored
+    - Higher values: Less frequent update to offset file, less IO, more old batches to re-process after fault restored
     - Recommended to set it to 60000 as Debezium's recommendation
 
 12. **synchdb.max_connector_workers**

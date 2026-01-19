@@ -29,7 +29,7 @@ The Oracle Parser is responsible for parsing a Oracle query (DDL only) and produ
 
 The JSON Parser is responsible for parsing the incoming JSON change event into C structures that SynchDB can work with. SynchDB relies on PostgreSQL's native JSONB utility for all the parsing and iteration needs. Each DML event contains the `scn` and `commit scn` values, tells how each column value is represented based on data types, and the before / after values. 
 
-Unlink a DDL event from Debezium, Openlog Replicator's DDL Event contains the raw Oracle DDL query instead of a broken-down structure. This means that a `2) Oracle parser` is required to parse this DDL query further to learn about its intended actions.
+Unlike a DDL event from Debezium, Openlog Replicator's DDL Event contains the raw Oracle DDL query instead of a broken-down structure. This means that a `2) Oracle parser` is required to parse this DDL query further to learn about its intended actions.
 
 **DML payload:**
 ```json
@@ -165,7 +165,7 @@ The following Oracle features declared in DDL commands are not supported by Open
 * Index organized tables (IOT)
 * `CREATE TABLE AS` clauses
 * `CREATE TYPE` clauses
-* `CREATE TABLE OF` caluses
+* `CREATE TABLE OF` clauses
 * `ALTER TABLE MODIFY name DEFAULT`
 * `ALTER TABLE MODIFY name NOT NULL`
 * `ALTER TABLE MODIFY name NULL`
@@ -174,7 +174,7 @@ The following Oracle features declared in DDL commands are not supported by Open
 * `ALTER TABLE RENAME`
 
 
-The following constraints clauses are accpeted but ignored by Openlog Replicator connector:
+The following constraints clauses are accepted but ignored by Openlog Replicator connector:
 
 * ENABLE VALIDATE
 * ENABLE NOVALIDATE
@@ -229,4 +229,4 @@ the SPI Client component exists under the Replication Agent, which serves as a b
 
 ### **10) Executor APIs**
 
-Also residing in the Replication Agent. This component is responsible for initialize a executor context, open the table, acquire proper locks, create TupleTableSlot (TTS) from the output of DML Converter, call the executor API to execute INSERT, UPDATE, DELETE operations and do resource cleanup. This is generally a much faster approach to do data operations than SPI because it does not need to parse an input query string likst SPI does.
+Also residing in the Replication Agent. This component is responsible for initialize a executor context, open the table, acquire proper locks, create TupleTableSlot (TTS) from the output of DML Converter, call the executor API to execute INSERT, UPDATE, DELETE operations and do resource cleanup. This is generally a much faster approach to do data operations than SPI because it does not need to parse an input query string like SPI does.

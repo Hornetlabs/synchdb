@@ -2,7 +2,7 @@
 
 ## **Handling Non-Native Data Types**
 
-It is possible that a table contains a column data type that is custom created by the user or created by another installed extension. In this case, it cannot be processed using tradition native data type handling becasue the type is most likely not supported natively. Instead, the DML Converter accesses the catalog, obtains the OID of the non-native data type, and looks up its "category" as defined in PostgreSQL. Below is a list of category supported by PostgreSQL as of version 17:
+It is possible that a table contains a column data type that is custom created by the user or created by another installed extension. In this case, it cannot be processed using tradition native data type handling because the type is most likely not supported natively. Instead, the DML Converter accesses the catalog, obtains the OID of the non-native data type, and looks up its "category" as defined in PostgreSQL. Below is a list of category supported by PostgreSQL as of version 17:
 
 ```
 #define  TYPCATEGORY_INVALID	'\0'

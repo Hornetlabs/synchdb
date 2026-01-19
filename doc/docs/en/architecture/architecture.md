@@ -1,6 +1,6 @@
 # Architecture Overview
 
-## **Overall Archtecture Diagram**
+## **Overall Architecture Diagram**
 
 ![img](../../images/synchdb-arch2.jpg)
 

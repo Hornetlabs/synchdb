@@ -34,7 +34,7 @@ This architecture allows PostgreSQL to leverage the rich ecosystem of Debezium c
 - PostgreSQL: 16, 17, 18
 - IvorySQL: 4, 5
 
-## **Supported Source Databasess**
+## **Supported Source Databases**
 
 - MySQL: 8.0.x, 8.2
 - SQL Server: 2017, 2019, 2022

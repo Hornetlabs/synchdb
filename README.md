@@ -20,7 +20,7 @@ Visit SynchDB documentation site [here](https://docs.synchdb.com/) for more desi
 SynchDB extension consists of these major components:
 * Debezium Runner (Java) - Responsible for connecting to source databases and get change events.
 * SynchDB Worker - Responsible for polling change events from Debezium Runner via JNI.
-* Event Processor - Reponsible for processing raw events into internal structures.
+* Event Processor - Responsible for processing raw events into internal structures.
 * Data Converter - Responsible for transforming data values.
 * Replication Agent - Responsible for applying changes to PostgreSQL.
 
@@ -30,7 +30,7 @@ SynchDB extension consists of these major components:
 The following software is required to build and run SynchDB. The versions listed are the versions tested during development. Older versions may still work.
 * Java Development Kit 17 or later. Download [here](https://www.oracle.com/ca-en/java/technologies/downloads/)
 * Apache Maven 3.6.3 or later. Download [here](https://maven.apache.org/download.cgi)
-* PostgreSQL source or build enviornment. Git clone [here](https://github.com/postgres/postgres). Refer to this [wiki](https://wiki.postgresql.org/wiki/Compile_and_Install_from_source_code) to build PostgreSQL from source or this [page](https://www.postgresql.org/download/linux/) to install PostgreSQL via packages
+* PostgreSQL source or build environment. Git clone [here](https://github.com/postgres/postgres). Refer to this [wiki](https://wiki.postgresql.org/wiki/Compile_and_Install_from_source_code) to build PostgreSQL from source or this [page](https://www.postgresql.org/download/linux/) to install PostgreSQL via packages
 * Docker compose 2.28.1 (for testing). Refer to [here](https://docs.docker.com/compose/install/linux/)
 * Unix based operating system like Ubuntu 22.04 or MacOS
 
@@ -131,7 +131,7 @@ Run ldconfig to reload:
 sudo ldconfig
 ```
 
-Ensure synchdo.so extension can link to libjvm Java library on your system:
+Ensure synchdb.so extension can link to libjvm Java library on your system:
 ``` BASH
 ldd synchdb.so
         linux-vdso.so.1 (0x00007ffeae35a000)
@@ -171,9 +171,9 @@ CREATE EXTENSION synchdb CASCADE;
 ```
 
 ### Create a Connector
-A connector represents the details to connecto to a remote heterogeneous database and describes what tables to replicate from. It can be created with `synchdb_add_conninfo()` function.
+A connector represents the details to connect to a remote heterogeneous database and describes what tables to replicate from. It can be created with `synchdb_add_conninfo()` function.
 
-Create a MySQL connector and replicate `inventory.orders` and `inventory.customers` tables under `invnetory` database:
+Create a MySQL connector and replicate `inventory.orders` and `inventory.customers` tables under `inventory` database:
 ``` SQL
 SELECT synchdb_add_conninfo('mysqlconn','127.0.0.1', 3306, 'mysqluser', 'mysqlpwd', 'inventory', 'postgres', 'inventory.orders,inventory.customers', 'null', 'mysql');
 ```

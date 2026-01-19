@@ -25,7 +25,7 @@ Column Details:
 | stage           | the stage of the connector. See below.|
 | state           | the state of the connector. See below.|
 | err             | the last error message encountered by the worker which would have caused it to exit. This error could originated from PostgreSQL while processing a change, or originated from Debezium running engine while accessing data from heterogeneous database. |
-| last_dbz_offset | the last Debezium offset captured by synchdb. Note that this may not reflect the current and real-time offset value of the connector engine. Rather, this is shown as a checkpoint that we could restart from this offeet point if needed.|
+| last_dbz_offset | the last Debezium offset captured by synchdb. Note that this may not reflect the current and real-time offset value of the connector engine. Rather, this is shown as a checkpoint that we could restart from this offset point if needed.|
 
 **Possible States**:
 
@@ -38,7 +38,7 @@ Column Details:
 - ⚪ `executing` - Applying changes
 - 🟤 `updating offset` - Updating checkpoint
 - 🟨 `restarting` - Reinitializing
-- ⚪ `dumping memory` - JVM is prepaaring to dump memory info in log file
+- ⚪ `dumping memory` - JVM is preparing to dump memory info in log file
 - ⚫ `unknown` - Indeterminate state
 
 **Possible Stages**:
