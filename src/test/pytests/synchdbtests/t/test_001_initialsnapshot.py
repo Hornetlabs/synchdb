@@ -136,7 +136,6 @@ def test_InitialSnapshotDBZ(pg_cursor, dbvendor):
                 assert id[0].lower() + "." + id[2].lower() == row[1]
             else:
                 assert row[0].lower() == row[1]
-    
         # check attname mappings
         rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
         assert len(rows) > 0
@@ -173,8 +172,11 @@ def test_InitialSnapshotFDW(pg_cursor, dbvendor):
     schema = getSchema(dbvendor)
 
     if dbvendor == "mysql":
-        assert True
-        return
+        isfdw = run_pg_query_one(pg_cursor, f"SELECT EXISTS ( SELECT 1 FROM pg_available_extensions WHERE name = 'mysql_fdw' ) AS mysql_fdw_available")
+        if isfdw[0] == False:
+            print ("test_InitialSnapshotFDW skipped - mysql_fdw not available for install")
+            assert True
+            return
     elif dbvendor == "sqlserver":
         assert True
         return
@@ -255,7 +257,7 @@ def test_InitialSnapshotFDW(pg_cursor, dbvendor):
     assert int(pgrow[4]) == int(extrow[0][4])
 
     # test cdc now
-    if dbvendor == "postgres":
+    if dbvendor == "postgres" or dbvendor == "mysql":
         query = """
             INSERT INTO orders(order_number, order_date, purchaser, quantity,
             product_id) VALUES (10005, '2025-12-12', 1002, 10000, 102);
@@ -404,8 +406,11 @@ def test_InitialSnapshotFDW_uppercase(pg_cursor, dbvendor):
     schema = getSchema(dbvendor)
 
     if dbvendor == "mysql":
-        assert True
-        return
+        isfdw = run_pg_query_one(pg_cursor, f"SELECT EXISTS ( SELECT 1 FROM pg_available_extensions WHERE name = 'mysql_fdw' ) AS mysql_fdw_available")
+        if isfdw[0] == False:
+            print ("test_InitialSnapshotFDW_uppercase skipped - mysql_fdw not available for install")
+            assert True
+            return
     elif dbvendor == "sqlserver":
         assert True
         return
@@ -656,15 +661,18 @@ def test_InitialSnapshotFDW_asis(pg_cursor, dbvendor):
     schema = getSchema(dbvendor)
 
     if dbvendor == "mysql":
-        assert True
-        return
+        isfdw = run_pg_query_one(pg_cursor, f"SELECT EXISTS ( SELECT 1 FROM pg_available_extensions WHERE name = 'mysql_fdw' ) AS mysql_fdw_available")
+        if isfdw[0] == False:
+            print ("test_InitialSnapshotFDW_asis skipped - mysql_fdw not available for install")
+            assert True
+            return
     elif dbvendor == "sqlserver":
         assert True
         return
     elif dbvendor == "postgres":
         isfdw = run_pg_query_one(pg_cursor, f"SELECT EXISTS ( SELECT 1 FROM pg_available_extensions WHERE name = 'postgres_fdw' ) AS postgres_fdw_available")
         if isfdw[0] == False:
-            print ("test_InitialSnapshotFDW_asis kipped - postgres_fdw not available for install")
+            print ("test_InitialSnapshotFDW_asis skipped - postgres_fdw not available for install")
             assert True
             return
     else:
@@ -903,8 +911,11 @@ def test_ConnectorStartSchemaSyncModeFDW(pg_cursor, dbvendor):
     schema = getSchema(dbvendor)
 
     if dbvendor == "mysql":
-        assert True
-        return
+        isfdw = run_pg_query_one(pg_cursor, f"SELECT EXISTS ( SELECT 1 FROM pg_available_extensions WHERE name = 'mysql_fdw' ) AS mysql_fdw_available")
+        if isfdw[0] == False:
+            print ("test_ConnectorStartSchemaSyncModeFDW skipped - mysql_fdw not available for install")
+            assert True
+            return
     elif dbvendor == "sqlserver":
         assert True
         return
@@ -982,7 +993,7 @@ def test_ConnectorStartSchemaSyncModeFDW(pg_cursor, dbvendor):
 
     time.sleep(10)
     # test a bit of cdc
-    if dbvendor == "postgres":
+    if dbvendor == "postgres" or dbvendor == "mysql":
         query = """
 			INSERT INTO orders(order_number, order_date, purchaser, quantity,
 			product_id) VALUES (10005, '2025-12-12', 1002, 10000, 102);
@@ -1085,8 +1096,11 @@ def test_ConnectorStartAlwaysModeFDW(pg_cursor, dbvendor):
     schema = getSchema(dbvendor)
 
     if dbvendor == "mysql":
-        assert True
-        return
+        isfdw = run_pg_query_one(pg_cursor, f"SELECT EXISTS ( SELECT 1 FROM pg_available_extensions WHERE name = 'mysql_fdw' ) AS mysql_fdw_available")
+        if isfdw[0] == False:
+            print ("test_InitialSnapshotFDW_asis skipped - mysql_fdw not available for install")
+            assert True
+            return
     elif dbvendor == "sqlserver":
         assert True
         return
@@ -1239,8 +1253,11 @@ def test_ConnectorStartNodataModeFDW(pg_cursor, dbvendor):
     schema = getSchema(dbvendor)
 
     if dbvendor == "mysql":
-        assert True
-        return
+        isfdw = run_pg_query_one(pg_cursor, f"SELECT EXISTS ( SELECT 1 FROM pg_available_extensions WHERE name = 'mysql_fdw' ) AS mysql_fdw_available")
+        if isfdw[0] == False:
+            print ("test_ConnectorStartNodataModeFDW skipped - mysql_fdw not available for install")
+            assert True
+            return
     elif dbvendor == "sqlserver":
         assert True
         return

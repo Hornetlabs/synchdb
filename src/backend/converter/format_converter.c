@@ -2056,8 +2056,6 @@ handle_base64_to_bit(const char * in, bool addquote, int typemod, bool padzero)
 		/* 8 bits per byte + extra zeros + terminating null */
 		out = (char *) palloc0((tmpoutlen * 8) + extrazeros + 1);
 
-		elog(WARNING, "in len = %d, extrazero = %d, typmod = %d, trim = %d", (tmpoutlen * 8),
-				extrazeros, typemod, !padzero);
 		/* zeros */
 		memset(out, '0', extrazeros);
 
