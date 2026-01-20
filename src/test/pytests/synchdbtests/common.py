@@ -60,6 +60,13 @@ OLR_HOST=get_container_ip(name="OpenLogReplicator")
 OLR_PORT="7070"
 OLR_SERVICE="ORACLE"
 
+POSTGRES_HOST="127.0.0.1"
+POSTGRES_PORT=5432
+POSTGRES_USER="postgres"
+POSTGRES_PASS="pass"
+POSTGRES_DB="postgres"
+POSTGRES_SCHEMA="public"
+
 def getConnectorName(dbvendor):
     if dbvendor == "mysql":
         return "mysqlconn"
@@ -67,6 +74,8 @@ def getConnectorName(dbvendor):
         return "sqlserverconn"
     elif dbvendor == "oracle":
         return "oracleconn"
+    elif dbvendor == "postgres":
+        return "postgresconn"
     else:
         return "olrconn"
 
@@ -77,6 +86,8 @@ def getDbname(dbvendor):
         return SQLSERVER_DB
     elif dbvendor == "oracle":
         return ORACLE_DB
+    elif dbvendor == "postgres":
+        return POSTGRES_DB
     else:
         return ORA19C_DB
 
@@ -88,6 +99,8 @@ def getSchema(dbvendor):
         return SQLSERVER_SCHEMA
     elif dbvendor == "oracle":
         return ORACLE_SCHEMA
+    elif dbvendor == "postgres":
+        return POSTGRES_SCHEMA
     else:
         return ORA19C_SCHEMA
 
@@ -189,7 +202,8 @@ def run_remote_query(where, query, srcdb=None):
         "mysql": MYSQL_DB,
         "sqlserver": SQLSERVER_DB,
         "oracle": ORACLE_DB,
-        "olr": ORA19C_DB
+        "olr": ORA19C_DB,
+        "postgres": POSTGRES_DB
     }[where]
 
     try:
@@ -209,6 +223,12 @@ def run_remote_query(where, query, srcdb=None):
                 if not line or "rows affected" in line.lower():
                     continue  # skip empty lines and metadata
                 cols = line.split("\t")
+                rows.append(tuple(cols))
+        elif where == "postgres":
+            result = subprocess.check_output(["docker", "exec", "-i", "postgres", "psql", "-U", f"{POSTGRES_USER}", "-d", f"{POSTGRES_DB}", "-tA", "-c", f"{query}"], text=True , env={"LC_ALL": "C"}).strip()
+            rows = []
+            for line in result.splitlines():
+                cols = line.split("|")
                 rows.append(tuple(cols))
         else:
             sql = f"""
@@ -259,14 +279,16 @@ def create_synchdb_connector(cursor, vendor, name, srcdb=None, srcschema=None):
         "mysql": MYSQL_DB,
         "sqlserver": SQLSERVER_DB,
         "oracle": ORACLE_DB,
-        "olr": ORA19C_DB
+        "olr": ORA19C_DB,
+        "postgres": POSTGRES_DB
     }[vendor]
     
     schema = srcschema or {
         "mysql": "null",
         "sqlserver": SQLSERVER_SCHEMA,
         "oracle": ORACLE_SCHEMA,
-        "olr": ORA19C_SCHEMA
+        "olr": ORA19C_SCHEMA,
+        "postgres": POSTGRES_SCHEMA
     }[vendor]
 
     if vendor == "mysql":
@@ -287,6 +309,9 @@ def create_synchdb_connector(cursor, vendor, name, srcdb=None, srcschema=None):
 
         assert ORACLE_HOST != None
         result = run_pg_query_one(cursor, f"SELECT synchdb_add_conninfo('{name}','{ORACLE_HOST}', {ORACLE_PORT}, '{ORACLE_USER}', '{ORACLE_PASS}', '{db}', '{schema}', 'null', 'null', 'oracle');")
+    elif vendor == "postgres":
+        result = run_pg_query_one(cursor, f"SELECT synchdb_add_conninfo('{name}','{POSTGRES_HOST}', {POSTGRES_PORT}, '{POSTGRES_USER}', '{POSTGRES_PASS}', '{db}', '{schema}', 'null', 'null', 'postgres');")
+
     else:
         global ORA19C_HOST
         global OLR_HOST
@@ -328,6 +353,9 @@ def drop_default_pg_schema(cursor, vendor):
         row = run_pg_query_one(cursor, f"DROP SCHEMA IF EXISTS testdb CASCADE")
         row = run_pg_query_one(cursor, f"DROP SCHEMA IF EXISTS \"TESTDB\" CASCADE")
         row = run_pg_query_one(cursor, f"DROP SCHEMA IF EXISTS \"testDB\" CASCADE")
+    elif vendor == "postgres":
+        row = run_pg_query_one(cursor, f"DROP SCHEMA IF EXISTS postgres CASCADE")
+        row = run_pg_query_one(cursor, f"DROP SCHEMA IF EXISTS \"POSTGRES\" CASCADE")
     else:
         row = run_pg_query_one(cursor, f"DROP SCHEMA IF EXISTS free CASCADE")
         row = run_pg_query_one(cursor, f"DROP SCHEMA IF EXISTS \"FREE\" CASCADE")
@@ -345,3 +373,9 @@ def update_guc_conf(cursor, key, val, reload_conf=False):
     if reload_conf:
         cursor.execute("SELECT pg_reload_conf()")
 
+def drop_repslot_and_pub(dbvendor, name, dstdb):
+    if dbvendor != "postgres":
+        return
+
+    run_remote_query(dbvendor, f"SELECT pg_drop_replication_slot('{name}_{dstdb}_synchdb_slot')")
+    run_remote_query(dbvendor, f"DROP PUBLICATION IF EXISTS {name}_{dstdb}_synchdb_pub")

@@ -167,6 +167,9 @@ oraclecheck:
 olrcheck:
 	$(MAKE) dbcheck DB=olr
 
+postgrescheck:
+	$(MAKE) dbcheck DB=postgres
+
 mysqlcheck-benchmark:
 	$(MAKE) dbcheck-tpcc DB=mysql
 

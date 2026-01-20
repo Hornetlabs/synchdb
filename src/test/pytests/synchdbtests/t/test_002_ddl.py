@@ -1,10 +1,15 @@
 import common
 import time
-from common import run_pg_query, run_pg_query_one, run_remote_query, create_synchdb_connector, getConnectorName, getDbname, verify_default_type_mappings, create_and_start_synchdb_connector, stop_and_delete_synchdb_connector, drop_default_pg_schema
+from common import run_pg_query, run_pg_query_one, run_remote_query, create_synchdb_connector, getConnectorName, getDbname, verify_default_type_mappings, create_and_start_synchdb_connector, stop_and_delete_synchdb_connector, drop_default_pg_schema, drop_repslot_and_pub
 
 def test_CreateTable(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_ddl"
     dbname = getDbname(dbvendor).lower()
+
+    if dbvendor == "postgres":
+        # postgres in debezium snapshot needs to create tables manually
+        run_pg_query_one(pg_cursor, f"CREATE SCHEMA IF NOT EXISTS {dbname}")
+        run_pg_query_one(pg_cursor, f"CREATE TABLE {dbname}.orders (order_number int primary key, order_date timestamp without time zone, purchaser int, quantity int , product_id int)")
 
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial")
     assert result == 0
@@ -33,6 +38,14 @@ def test_CreateTable(pg_cursor, dbvendor):
             @source_name = 'create_table_test', @role_name = NULL,
             @supports_net_changes = 0;
         """
+    elif dbvendor == "postgres":
+        query = """
+        CREATE TABLE create_table_test (
+            id INT PRIMARY KEY,
+            name VARCHAR(255),
+            created_at TIMESTAMP WITHOUT TIME ZONE
+        );
+        """
     else:
         query = """
         CREATE TABLE create_table_test (
@@ -58,10 +71,16 @@ def test_CreateTable(pg_cursor, dbvendor):
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
     run_remote_query(dbvendor, "DROP TABLE create_table_test")
+    drop_repslot_and_pub(dbvendor, name, "postgres")
 
 def test_CreateTableWithSpace(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_ddl"
     dbname = getDbname(dbvendor).lower()
+
+    if dbvendor == "postgres":
+        # postgres in debezium snapshot needs to create tables manually
+        run_pg_query_one(pg_cursor, f"CREATE SCHEMA IF NOT EXISTS {dbname}")
+        run_pg_query_one(pg_cursor, f"CREATE TABLE {dbname}.orders (order_number int primary key, order_date timestamp without time zone, purchaser int, quantity int , product_id int)")
 
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial")
     assert result == 0
@@ -90,6 +109,14 @@ def test_CreateTableWithSpace(pg_cursor, dbvendor):
             @source_name = 'create table test', @role_name = NULL,
             @supports_net_changes = 0;
         """
+    elif dbvendor == "postgres":
+        query = """
+        CREATE TABLE \"create table test\" (
+            id int PRIMARY KEY,
+            name VARCHAR(255),
+            created_at TIMESTAMP WITHOUT TIME ZONE
+        );
+        """
     else:
         query = """
         CREATE TABLE "create table test" (
@@ -115,18 +142,25 @@ def test_CreateTableWithSpace(pg_cursor, dbvendor):
 
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
+    drop_repslot_and_pub(dbvendor, name, "postgres")
 
     if dbvendor == "mysql":
         run_remote_query(dbvendor, "DROP TABLE `create table test`")
     elif dbvendor == "sqlserver":
         run_remote_query(dbvendor, "DROP TABLE [create table test]")
+    elif dbvendor == "postgres":
+        run_remote_query(dbvendor, "DROP TABLE \"create table test\"")
     else:
         run_remote_query(dbvendor, "DROP TABLE \"create table test\"")
 
 def test_CreateTableWithNoPK(pg_cursor, dbvendor):
-
     name = getConnectorName(dbvendor) + "_ddl"
     dbname = getDbname(dbvendor).lower()
+
+    if dbvendor == "postgres":
+        # postgres in debezium snapshot needs to create tables manually
+        run_pg_query_one(pg_cursor, f"CREATE SCHEMA IF NOT EXISTS {dbname}")
+        run_pg_query_one(pg_cursor, f"CREATE TABLE {dbname}.orders (order_number int primary key, order_date timestamp without time zone, purchaser int, quantity int , product_id int)")
 
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial")
     assert result == 0
@@ -155,6 +189,14 @@ def test_CreateTableWithNoPK(pg_cursor, dbvendor):
             @source_name = 'create_table_nopk', @role_name = NULL,
             @supports_net_changes = 0;
         """
+    elif dbvendor == "postgres":
+        query = """
+        CREATE TABLE create_table_nopk (
+            id INT,
+            name VARCHAR(255),
+            created_at TIMESTAMP WITHOUT TIME ZONE
+        );
+        """
     else:
         query = """
         CREATE TABLE create_table_nopk (
@@ -179,12 +221,17 @@ def test_CreateTableWithNoPK(pg_cursor, dbvendor):
 
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
+    drop_repslot_and_pub(dbvendor, name, "postgres")
     run_remote_query(dbvendor, "DROP TABLE create_table_nopk")
 
 def test_CreateTableWithNotInlinePK(pg_cursor, dbvendor):
-
     name = getConnectorName(dbvendor) + "_ddl"
     dbname = getDbname(dbvendor).lower()
+
+    if dbvendor == "postgres":
+        # postgres in debezium snapshot needs to create tables manually
+        run_pg_query_one(pg_cursor, f"CREATE SCHEMA IF NOT EXISTS {dbname}")
+        run_pg_query_one(pg_cursor, f"CREATE TABLE {dbname}.orders (order_number int primary key, order_date timestamp without time zone, purchaser int, quantity int , product_id int)")
 
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial")
     assert result == 0
@@ -214,6 +261,15 @@ def test_CreateTableWithNotInlinePK(pg_cursor, dbvendor):
         EXEC sys.sp_cdc_enable_table @source_schema = 'dbo',
             @source_name = 'create_table_noinlinepk', @role_name = NULL,
             @supports_net_changes = 0;
+        """
+    elif dbvendor == "postgres":
+        query = """
+        CREATE TABLE create_table_noinlinepk (
+            id INT,
+            name VARCHAR(255),
+            created_at TIMESTAMP WITHOUT TIME ZONE,
+            CONSTRAINT pk_create_table_test PRIMARY KEY (id)
+        );
         """
     else:
         query = """
@@ -249,11 +305,17 @@ def test_CreateTableWithNotInlinePK(pg_cursor, dbvendor):
 
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
+    drop_repslot_and_pub(dbvendor, name, "postgres")
     run_remote_query(dbvendor, "DROP TABLE create_table_noinlinepk")
 
 def test_DropTable(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_ddl"
     dbname = getDbname(dbvendor).lower()
+
+    if dbvendor == "postgres":
+        # postgres in debezium snapshot needs to create tables manually
+        run_pg_query_one(pg_cursor, f"CREATE SCHEMA IF NOT EXISTS {dbname}")
+        run_pg_query_one(pg_cursor, f"CREATE TABLE {dbname}.orders (order_number int primary key, order_date timestamp without time zone, purchaser int, quantity int , product_id int)")
 
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial")
     assert result == 0
@@ -281,6 +343,14 @@ def test_DropTable(pg_cursor, dbvendor):
         EXEC sys.sp_cdc_enable_table @source_schema = 'dbo',
             @source_name = 'drop_table_test', @role_name = NULL,
             @supports_net_changes = 0;
+        """
+    elif dbvendor == "postgres":
+        query = """
+        CREATE TABLE drop_table_test (
+            id INT PRIMARY KEY,
+            name VARCHAR(255),
+            created_at TIMESTAMP WITHOUT TIME ZONE
+        );
         """
     else:
         query = """
@@ -324,10 +394,16 @@ def test_DropTable(pg_cursor, dbvendor):
 
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
+    drop_repslot_and_pub(dbvendor, name, "postgres")
 
 def test_DropTableWithSpace(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_ddl"
     dbname = getDbname(dbvendor).lower()
+    
+    if dbvendor == "postgres":
+        # postgres in debezium snapshot needs to create tables manually
+        run_pg_query_one(pg_cursor, f"CREATE SCHEMA IF NOT EXISTS {dbname}")
+        run_pg_query_one(pg_cursor, f"CREATE TABLE {dbname}.orders (order_number int primary key, order_date timestamp without time zone, purchaser int, quantity int , product_id int)")
 
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial")
     assert result == 0
@@ -356,6 +432,14 @@ def test_DropTableWithSpace(pg_cursor, dbvendor):
             @source_name = 'drop with space', @role_name = NULL,
             @supports_net_changes = 0;
         """
+    elif dbvendor == "postgres":
+        query = """
+        CREATE TABLE \"drop with space\" (
+            id INT PRIMARY KEY,
+            name VARCHAR(255),
+            created_at TIMESTAMP WITHOUT TIME ZONE
+        );
+        """
     else:
         query = """
         CREATE TABLE "drop with space" (
@@ -382,6 +466,8 @@ def test_DropTableWithSpace(pg_cursor, dbvendor):
         run_remote_query(dbvendor, "DROP TABLE `drop with space`")
     elif dbvendor == "sqlserver":
         run_remote_query(dbvendor, "DROP TABLE [drop with space]")
+    elif dbvendor == "postgres":
+        run_remote_query(dbvendor, "DROP TABLE \"drop with space\"")
     else:
         run_remote_query(dbvendor, "DROP TABLE \"drop with space\"")
 
@@ -403,10 +489,16 @@ def test_DropTableWithSpace(pg_cursor, dbvendor):
 
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
+    drop_repslot_and_pub(dbvendor, name, "postgres")
     
 def test_AlterTableAlterColumn(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_ddl"
     dbname = getDbname(dbvendor).lower()
+
+    if dbvendor == "postgres":
+        # postgres in debezium snapshot needs to create tables manually
+        run_pg_query_one(pg_cursor, f"CREATE SCHEMA IF NOT EXISTS {dbname}")
+        run_pg_query_one(pg_cursor, f"CREATE TABLE {dbname}.orders (order_number int primary key, order_date timestamp without time zone, purchaser int, quantity int , product_id int)")
 
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial")
     assert result == 0
@@ -435,6 +527,14 @@ def test_AlterTableAlterColumn(pg_cursor, dbvendor):
             @source_name = 'alter_table_alter_col', @role_name = NULL,
             @supports_net_changes = 0;
         """
+    elif dbvendor == "postgres":
+        query = """
+        CREATE TABLE alter_table_alter_col (
+            id INT PRIMARY KEY,
+            age INT,
+            created_at TIMESTAMP WITHOUT TIME ZONE
+        );
+        """
     else:
         query = """
         CREATE TABLE alter_table_alter_col (
@@ -461,6 +561,8 @@ def test_AlterTableAlterColumn(pg_cursor, dbvendor):
         run_remote_query(dbvendor, "ALTER TABLE alter_table_alter_col MODIFY COLUMN age BIGINT")
     elif dbvendor == "sqlserver":
         run_remote_query(dbvendor, "ALTER TABLE alter_table_alter_col ALTER COLUMN age BIGINT")
+    elif dbvendor == "postgres":
+        run_remote_query(dbvendor, "ALTER TABLE alter_table_alter_col ALTER COLUMN age TYPE BIGINT")
     else:
         run_remote_query(dbvendor, "ALTER TABLE alter_table_alter_col MODIFY age NUMBER(10,0)")
 
@@ -481,11 +583,17 @@ def test_AlterTableAlterColumn(pg_cursor, dbvendor):
 
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
+    drop_repslot_and_pub(dbvendor, name, "postgres")
     run_remote_query(dbvendor, "DROP TABLE alter_table_alter_col")
 
 def test_AlterTableAlterColumnAddPK(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_ddl"
     dbname = getDbname(dbvendor).lower()
+
+    if dbvendor == "postgres":
+        # postgres in debezium snapshot needs to create tables manually
+        run_pg_query_one(pg_cursor, f"CREATE SCHEMA IF NOT EXISTS {dbname}")
+        run_pg_query_one(pg_cursor, f"CREATE TABLE {dbname}.orders (order_number int primary key, order_date timestamp without time zone, purchaser int, quantity int , product_id int)")
 
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial")
     assert result == 0
@@ -514,6 +622,14 @@ def test_AlterTableAlterColumnAddPK(pg_cursor, dbvendor):
             @source_name = 'alter_table_addpk', @role_name = NULL,
             @supports_net_changes = 0,
             @capture_instance='alter_table_add_pk_1';
+        """
+    elif dbvendor == "postgres":
+        query = """
+        CREATE TABLE alter_table_addpk (
+            id INT,
+            name VARCHAR(255),
+            created_at TIMESTAMP WITHOUT TIME ZONE
+        );
         """
     else:
         query = """
@@ -556,6 +672,11 @@ def test_AlterTableAlterColumnAddPK(pg_cursor, dbvendor):
             @supports_net_changes = 0,
             @capture_instance = 'alter_table_add_pk_2';
         """)
+    elif dbvendor == "postgres":
+        run_remote_query(dbvendor, """
+            ALTER TABLE alter_table_addpk
+                ADD PRIMARY KEY (id);
+            """)
     else:
         run_remote_query(dbvendor, """
             ALTER TABLE alter_table_addpk 
@@ -579,6 +700,7 @@ def test_AlterTableAlterColumnAddPK(pg_cursor, dbvendor):
 
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
+    drop_repslot_and_pub(dbvendor, name, "postgres")
     run_remote_query(dbvendor, "DROP TABLE alter_table_addpk")
 
 
@@ -587,6 +709,11 @@ def test_AlterTableAlterColumnAddPK(pg_cursor, dbvendor):
 def test_AlterTableiAddColumn(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_ddl"
     dbname = getDbname(dbvendor).lower()
+
+    if dbvendor == "postgres":
+        # postgres in debezium snapshot needs to create tables manually
+        run_pg_query_one(pg_cursor, f"CREATE SCHEMA IF NOT EXISTS {dbname}")
+        run_pg_query_one(pg_cursor, f"CREATE TABLE {dbname}.orders (order_number int primary key, order_date timestamp without time zone, purchaser int, quantity int , product_id int)")
 
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial")
     assert result == 0
@@ -615,6 +742,14 @@ def test_AlterTableiAddColumn(pg_cursor, dbvendor):
             @source_name = 'alter_table_add_col', @role_name = NULL,
             @supports_net_changes = 0,
             @capture_instance='alter_table_add_col_1';
+        """
+    elif dbvendor == "postgres":
+        query = """
+        CREATE TABLE alter_table_add_col (
+            id INT PRIMARY KEY,
+            name VARCHAR(255),
+            created_at TIMESTAMP WITHOUT TIME ZONE
+        );
         """
     else:
         query = """
@@ -657,6 +792,8 @@ def test_AlterTableiAddColumn(pg_cursor, dbvendor):
         """)
 
         rows = run_remote_query(dbvendor, "INSERT INTO alter_table_add_col(name, created_at, age) VALUES('s', '16-JAN-2025', 35);")
+    elif dbvendor == "postgres":
+        run_remote_query(dbvendor, "ALTER TABLE alter_table_add_col ADD COLUMN age INT")
     else:
         run_remote_query(dbvendor, "ALTER TABLE alter_table_add_col ADD age NUMBER")
 
@@ -676,11 +813,17 @@ def test_AlterTableiAddColumn(pg_cursor, dbvendor):
 
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
+    drop_repslot_and_pub(dbvendor, name, "postgres")
     run_remote_query(dbvendor, "DROP TABLE alter_table_add_col")
 
 def test_AlterTableDropColumn(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_ddl"
     dbname = getDbname(dbvendor).lower()
+
+    if dbvendor == "postgres":
+        # postgres in debezium snapshot needs to create tables manually
+        run_pg_query_one(pg_cursor, f"CREATE SCHEMA IF NOT EXISTS {dbname}")
+        run_pg_query_one(pg_cursor, f"CREATE TABLE {dbname}.orders (order_number int primary key, order_date timestamp without time zone, purchaser int, quantity int , product_id int)")
 
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial")
     assert result == 0
@@ -708,6 +851,14 @@ def test_AlterTableDropColumn(pg_cursor, dbvendor):
         EXEC sys.sp_cdc_enable_table @source_schema = 'dbo',
             @source_name = 'alter_table_drop_col', @role_name = NULL,
             @supports_net_changes = 0;
+        """
+    elif dbvendor == "postgres":
+        query = """
+        CREATE TABLE alter_table_drop_col (
+            id INT PRIMARY KEY,
+            name VARCHAR(255),
+            created_at TIMESTAMP WITHOUT TIME ZONE
+        );
         """
     else:
         query = """
@@ -753,4 +904,5 @@ def test_AlterTableDropColumn(pg_cursor, dbvendor):
 
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
+    drop_repslot_and_pub(dbvendor, name, "postgres")
     run_remote_query(dbvendor, "DROP TABLE alter_table_drop_col")

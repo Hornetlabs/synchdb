@@ -6,7 +6,7 @@ import shutil
 import psycopg2
 import pytest
 
-PG_PORT = "5432"
+PG_PORT = "14141"
 PG_HOST = "127.0.0.1"
 OLRVER = "1.8.5"
 
@@ -32,6 +32,7 @@ def pg_instance(request):
         f.write("\nsynchdb.jvm_max_heap_size= 2048\n")
         f.write("\nsynchdb.olr_read_buffer_size = 128\n")
         f.write("\nlog_min_messages = debug1\n")
+        #f.write("\nsynchdb.dbz_log_level = 'info'\n")
         #f.write("\nsynchdb.olr_snapshot_engine = 'fdw'\n")
         #f.write("\nsynchdb.cdc_start_delay_ms = 15000\n")
 
@@ -128,7 +129,7 @@ def setup_remote_instance(dbvendor, request):
     
     yield
 
-    #teardown_remote_instance(dbvendor)
+    teardown_remote_instance(dbvendor)
 
 @pytest.fixture(scope="session")
 def hammerdb(dbvendor):

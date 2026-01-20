@@ -1,10 +1,15 @@
 import common
 import time
-from common import run_pg_query, run_pg_query_one, run_remote_query, create_synchdb_connector, getConnectorName, getDbname, create_and_start_synchdb_connector, stop_and_delete_synchdb_connector, drop_default_pg_schema
+from common import run_pg_query, run_pg_query_one, run_remote_query, create_synchdb_connector, getConnectorName, getDbname, create_and_start_synchdb_connector, stop_and_delete_synchdb_connector, drop_default_pg_schema, drop_repslot_and_pub
 
 def test_Insert(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_insert"
     dbname = getDbname(dbvendor).lower()
+
+    if dbvendor == "postgres":
+        # postgres in debezium snapshot needs to create tables manually
+        run_pg_query_one(pg_cursor, f"CREATE SCHEMA IF NOT EXISTS {dbname}")
+        run_pg_query_one(pg_cursor, f"CREATE TABLE {dbname}.orders (order_number int primary key, order_date timestamp without time zone, purchaser int, quantity int , product_id int)")
 
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "no_data")
     assert result == 0
@@ -23,6 +28,13 @@ def test_Insert(pg_cursor, dbvendor):
         EXEC sys.sp_cdc_enable_table @source_schema = 'dbo',
             @source_name = 'inserttable', @role_name = NULL,
             @supports_net_changes = 0;
+        """
+    elif dbvendor == "postgres":
+        time.sleep(10)
+        query = """
+        CREATE TABLE inserttable(
+            a INT PRIMARY KEY,
+            b VARCHAR(255));
         """
     else:
         query = """
@@ -57,6 +69,7 @@ def test_Insert(pg_cursor, dbvendor):
     extrows = run_remote_query(dbvendor, f"DROP TABLE inserttable")
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
+    drop_repslot_and_pub(dbvendor, name, "postgres")
 
 def test_InsertWithError(pg_cursor, dbvendor):
     assert True
@@ -64,6 +77,11 @@ def test_InsertWithError(pg_cursor, dbvendor):
 def test_Update(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_update"
     dbname = getDbname(dbvendor).lower()
+
+    if dbvendor == "postgres":
+        # postgres in debezium snapshot needs to create tables manually
+        run_pg_query_one(pg_cursor, f"CREATE SCHEMA IF NOT EXISTS {dbname}")
+        run_pg_query_one(pg_cursor, f"CREATE TABLE {dbname}.orders (order_number int primary key, order_date timestamp without time zone, purchaser int, quantity int , product_id int)")
 
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "no_data")
     assert result == 0
@@ -82,6 +100,13 @@ def test_Update(pg_cursor, dbvendor):
         EXEC sys.sp_cdc_enable_table @source_schema = 'dbo',
             @source_name = 'updatetable', @role_name = NULL,
             @supports_net_changes = 0;
+        """
+    elif dbvendor == "postgres":
+        time.sleep(10)
+        query = """
+        CREATE TABLE updatetable(
+            a INT PRIMARY KEY,
+            b VARCHAR(255));
         """
     else:
         query = """
@@ -120,6 +145,7 @@ def test_Update(pg_cursor, dbvendor):
     extrows = run_remote_query(dbvendor, f"DROP TABLE updatetable")
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
+    drop_repslot_and_pub(dbvendor, name, "postgres")
 
 def test_UpdateWithError(pg_cursor, dbvendor):
     assert True
@@ -127,6 +153,11 @@ def test_UpdateWithError(pg_cursor, dbvendor):
 def test_Delete(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_delete"
     dbname = getDbname(dbvendor).lower()
+
+    if dbvendor == "postgres":
+        # postgres in debezium snapshot needs to create tables manually
+        run_pg_query_one(pg_cursor, f"CREATE SCHEMA IF NOT EXISTS {dbname}")
+        run_pg_query_one(pg_cursor, f"CREATE TABLE {dbname}.orders (order_number int primary key, order_date timestamp without time zone, purchaser int, quantity int , product_id int)")
 
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "no_data")
     assert result == 0
@@ -145,6 +176,13 @@ def test_Delete(pg_cursor, dbvendor):
         EXEC sys.sp_cdc_enable_table @source_schema = 'dbo',
             @source_name = 'deletetable', @role_name = NULL,
             @supports_net_changes = 0;
+        """
+    elif dbvendor == "postgres":
+        time.sleep(10)
+        query = """
+        CREATE TABLE deletetable(
+            a INT PRIMARY KEY,
+            b VARCHAR(255));
         """
     else:
         query = """
@@ -199,6 +237,7 @@ def test_Delete(pg_cursor, dbvendor):
     extrows = run_remote_query(dbvendor, f"DROP TABLE deletetable")
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
+    drop_repslot_and_pub(dbvendor, name, "postgres")
 
 def test_DeleteWithError(pg_cursor, dbvendor):
     assert True

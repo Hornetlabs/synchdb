@@ -1,10 +1,13 @@
 import common
+import json
 import time
+from psycopg2.extras import NumericRange, DateRange, DateRange, DateTimeTZRange, DateTimeRange
+
 from decimal import Decimal
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date
 from binascii import unhexlify
 
-from common import run_pg_query, run_pg_query_one, run_remote_query, create_synchdb_connector, getConnectorName, getDbname, verify_default_type_mappings, create_and_start_synchdb_connector, stop_and_delete_synchdb_connector, getSchema, drop_default_pg_schema
+from common import run_pg_query, run_pg_query_one, run_remote_query, create_synchdb_connector, getConnectorName, getDbname, verify_default_type_mappings, create_and_start_synchdb_connector, stop_and_delete_synchdb_connector, getSchema, drop_default_pg_schema, drop_repslot_and_pub, update_guc_conf
 
 def parse_time_with_fraction(t):
     if '.' in t:
@@ -70,10 +73,20 @@ def parse_ora_year2month_interval(s):
     total_days = sign * (years * 365 + months * 30)
     return timedelta(days=total_days)
 
+def parse_timedelta(s: str):
+    days, _, time = s.split()
+    h, m, sec = map(int, time.split(':'))
+    return timedelta(days=int(days), hours=h, minutes=m, seconds=sec)
+
 def test_AllDefaultDataTypes(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_addt"
     dbname = getDbname(dbvendor).lower()
-    
+
+    if dbvendor == "postgres":
+        # postgres in debezium snapshot needs to create tables manually
+        run_pg_query_one(pg_cursor, f"CREATE SCHEMA IF NOT EXISTS {dbname}")
+        run_pg_query_one(pg_cursor, f"CREATE TABLE {dbname}.orders (order_number int primary key, order_date timestamp without time zone, purchaser int, quantity int , product_id int)")
+
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "no_data")
     assert result == 0
 
@@ -169,6 +182,60 @@ def test_AllDefaultDataTypes(pg_cursor, dbvendor):
         EXEC sys.sp_cdc_enable_table @source_schema = 'dbo',
             @source_name = 'mytable', @role_name = NULL,
             @supports_net_changes = 0;
+        """
+    elif dbvendor == "postgres":
+        time.sleep(20)
+        query = """
+        CREATE TABLE mytable (
+            col_smallint        SMALLINT,
+            col_integer         INTEGER,
+            col_bigint          BIGINT,
+            col_decimal         DECIMAL(10,5),
+            col_numeric         NUMERIC(20,10),
+            col_real            REAL,
+            col_double          DOUBLE PRECISION,
+            col_smallserial     SMALLSERIAL,
+            col_serial          SERIAL,
+            col_bigserial       BIGSERIAL,
+            col_money           MONEY,
+            col_char            CHAR(10),
+            col_varchar         VARCHAR(255),
+            col_text            TEXT,
+            col_bytea           BYTEA,
+            col_boolean         BOOLEAN,
+            col_date            DATE,
+            col_time            TIME,
+            col_timetz          TIME WITH TIME ZONE,
+            col_timestamp       TIMESTAMP,
+            col_timestamptz     TIMESTAMP WITH TIME ZONE,
+            col_interval        INTERVAL,
+            col_uuid            UUID,
+            col_json            JSON,
+            col_jsonb           JSONB,
+            col_xml             XML,
+            col_inet            INET,
+            col_cidr            CIDR,
+            col_macaddr         MACADDR,
+            col_macaddr8        MACADDR8,
+            col_tsvector        TSVECTOR,
+            col_tsquery         TSQUERY,
+            col_bit             BIT(8),
+            col_varbit          BIT VARYING(64),
+            col_int4range       INT4RANGE,
+            col_int8range       INT8RANGE,
+            col_numrange        NUMRANGE,
+            col_daterange       DATERANGE,
+            col_tsrange         TSRANGE,
+            col_tstzrange       TSTZRANGE,
+            col_int_array       INTEGER[],
+            col_text_array      TEXT[],
+            col_jsonb_array     JSONB[],
+            col_point           POINT,
+            col_identity        BIGINT GENERATED ALWAYS AS IDENTITY,
+            col_not_null        TEXT NOT NULL,
+            col_unique          TEXT UNIQUE,
+            col_primary_key     INTEGER PRIMARY KEY
+        )
         """
     else:
         query = """
@@ -309,6 +376,64 @@ def test_AllDefaultDataTypes(pg_cursor, dbvendor):
             '2024-08-28 14:30:00.654321',
             '2024-08-28 14:30:00.654321 +06:00');
         """
+    elif dbvendor == "postgres":
+        query = """
+        INSERT INTO mytable (
+            col_smallint, col_integer, col_bigint, col_decimal, col_numeric, col_real,
+            col_double, col_money, col_char, col_varchar, col_text, col_bytea, col_boolean,
+            col_date, col_time, col_timetz, col_timestamp, col_timestamptz, col_interval,
+            col_uuid, col_json, col_jsonb, col_xml, col_inet, col_cidr, col_macaddr,
+            col_macaddr8, col_tsvector, col_tsquery, col_bit, col_varbit, col_int4range,
+            col_int8range, col_numrange, col_daterange, col_tsrange, col_tstzrange, col_int_array,
+            col_text_array, col_jsonb_array, col_point, col_not_null, col_unique, col_primary_key
+        )
+        VALUES (
+            123,
+            1000,
+            9000000000,
+            12345.67890,
+            98765.4321000000,
+            3.14,
+            2.718281828459,
+            '$1234.56',
+            'ABC',
+            'varchar value',
+            'some long text here',
+            '\\xDEADBEEF'::bytea,
+            true,
+            DATE '2026-01-01',
+            TIME '12:34:56',
+            TIME '12:34:56+02',
+            TIMESTAMP '2026-01-01 12:34:56',
+            TIMESTAMPTZ '2026-01-01 12:34:56+02',
+            INTERVAL '3 days 4 hours',
+            gen_random_uuid(),
+            '{"a":1,"b":"text"}',
+            '{"x":[1,2,3]}'::jsonb,
+            '<root><item>value</item></root>',
+            '192.168.1.10',
+            '192.168.0.0/24',
+            '08:00:2b:01:02:03',
+            '08:00:2b:ff:fe:12:34:56',
+            to_tsvector('english', 'PostgreSQL full text search'),
+            to_tsquery('postgresql & search'),
+            B'10101010',
+            B'101010',
+            '[1,10]'::int4range,
+            '[10000000000,20000000000]'::int8range,
+            '[1.5,9.9]'::numrange,
+            '[2026-01-01,2026-01-31]'::daterange,
+            '[2026-01-01 10:00,2026-01-01 12:00]'::tsrange,
+            '[2026-01-01 10:00+00,2026-01-01 12:00+00]'::tstzrange,
+            ARRAY[1,2,3,4],
+            ARRAY['a','b','c'],
+            ARRAY['{"k":1}','{"k":2}']::jsonb[],
+            POINT(10.5, 20.25),
+            'must not be null',
+            'unique-value-1',
+            1
+        )
+        """
     else:
         query = """
         INSERT INTO mytable (
@@ -363,6 +488,19 @@ def test_AllDefaultDataTypes(pg_cursor, dbvendor):
                 SELECT a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p,
                 q, r, s, t, u, v, w, x, y, z, aa, bb, cc, dd, ee,
                 ff, gg, hh, ii, jj, kk, ll, mm FROM mytable
+                """)
+    elif dbvendor == "postgres":
+        extrows = run_remote_query(dbvendor, f"""
+                SELECT col_smallint, col_integer, col_bigint, col_decimal, col_numeric, col_real,
+                col_double, col_smallserial, col_serial, col_bigserial, col_money, col_char, 
+                col_varchar, col_text, col_bytea, col_boolean,
+                col_date, col_time, col_timetz, col_timestamp, col_timestamptz, col_interval,
+                col_uuid, col_json, col_jsonb, col_xml, col_inet, col_cidr, col_macaddr,
+                col_macaddr8, col_tsvector, col_tsquery, col_bit, col_varbit, col_int4range,
+                col_int8range, col_numrange, col_daterange, col_tsrange, col_tstzrange, col_int_array,
+                col_text_array, col_jsonb_array, col_point, col_identity, col_not_null, col_unique, 
+                col_primary_key 
+                FROM mytable
                 """)
     else:
         extrows = run_remote_query(dbvendor, f"""
@@ -459,6 +597,58 @@ def test_AllDefaultDataTypes(pg_cursor, dbvendor):
             #assert row[36] == parse_time_with_fraction(extrow[36])
             assert row[37] == parse_datetime_with_fraction(extrow[37])
             assert row[38] == parse_datetime_with_fraction_and_tz(extrow[38])
+    elif dbvendor == "postgres":
+        for row, extrow in zip(rows, extrows):
+            assert row[0] == int(extrow[0])
+            assert row[1] == int(extrow[1])
+            assert row[2] == int(extrow[2])
+            assert row[3] == Decimal(extrow[3])
+            assert row[4] == Decimal(extrow[4])
+            assert Decimal(str(row[5])) == Decimal(extrow[5])
+            assert Decimal(str(row[6])) == Decimal(extrow[6])
+            assert row[7] == int(extrow[7])
+            assert row[8] == int(extrow[8])
+            assert row[9] == int(extrow[9])
+            assert row[10] == extrow[10]
+            assert row[11] == extrow[11]
+            assert row[12] == extrow[12]
+            assert row[13] == extrow[13]
+            assert row[14].tobytes() == bytes.fromhex(extrow[14][2:])
+            assert row[15] == True and extrow[15] == "t"
+            assert row[16] == datetime.strptime(extrow[16], "%Y-%m-%d").date()
+            assert row[17] == datetime.strptime(extrow[17], "%H:%M:%S").time()
+            assert row[18] == datetime.strptime(extrow[18].replace("+00", "+0000").replace("-00", "-0000"), "%H:%M:%S%z").timetz()
+            assert row[19] == datetime.strptime(extrow[19], "%Y-%m-%d %H:%M:%S")
+            #assert row[20].astimezone(datetime.timezone.utc) == datetime.datetime.fromisoformat(extrow[20])
+            assert row[21] == parse_timedelta(extrow[21])
+            assert row[22] == extrow[22]
+            assert row[23] == json.loads(extrow[23])
+            assert row[24] == json.loads(extrow[24])
+            assert row[25] == extrow[25]
+            assert row[26] == extrow[26]
+            assert row[27] == extrow[27]
+            assert row[28] == extrow[28]
+            assert row[29] == extrow[29]
+            assert row[30] == None
+            assert row[31] == None
+            assert row[32] == extrow[32]
+            assert row[33] == extrow[33]
+            assert row[34] == NumericRange(*map(int, extrow[34][1:-1].split(',')), bounds=extrow[34][0] + extrow[34][-1])
+            assert row[35] == NumericRange(*map(int, extrow[35][1:-1].split(',')), bounds=extrow[35][0] + extrow[35][-1])
+            assert row[36] == NumericRange(*map(Decimal, extrow[36][1:-1].split(',')), bounds=extrow[36][0] + extrow[36][-1])
+            assert row[37] == DateRange(date.fromisoformat(extrow[37][1:-1].split(',',1)[0]), date.fromisoformat(extrow[37][1:-1].split(',',1)[1]),bounds=extrow[37][0] + extrow[37][-1])
+            assert row[38] == DateTimeRange(datetime.fromisoformat(extrow[38][2:-2].split('","',1)[0]), datetime.fromisoformat(extrow[38][2:-2].split('","',1)[1]), bounds=extrow[38][0] + extrow[38][-1])
+            #assert row[39] == DateTimeTZRange(*(datetime.fromisoformat(x).astimezone(timezone.utc) for x in extrow[39][2:-2].split('","')), extrow[39][0] + extrow[39][-1])
+            assert row[39] == DateTimeTZRange(*(datetime.fromisoformat((x + ':00') if (len(x) >= 3 and x[-3] in '+-' and x[-2:].isdigit()) else (x[:-2] + ':' + x[-2:] if (len(x) >= 5 and x[-5] in '+-' and x[-4:].isdigit()) else x)).astimezone(timezone.utc) for x in extrow[39][2:-2].split('","')), extrow[39][0] + extrow[39][-1])
+
+            assert row[40] == list(map(int, extrow[40].strip("{}").split(",")))
+            assert row[41] == list(map(str, extrow[41].strip("{}").split(",")))
+            assert row[42] == [json.loads(json.loads(x)) for x in extrow[42][1:-1].split(',')]
+            assert row[43] == extrow[43]
+            assert row[44] == int(extrow[44])
+            assert row[45] == extrow[45]
+            assert row[46] == extrow[46]
+            assert row[47] == int(extrow[47])
     else:
         for row, extrow in zip(rows, extrows):
             assert row[0] == int(extrow[0])
@@ -490,7 +680,7 @@ def test_AllDefaultDataTypes(pg_cursor, dbvendor):
     
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
-    
+    drop_repslot_and_pub(dbvendor, name, "postgres")
     run_remote_query(dbvendor, "DROP TABLE mytable")
     time.sleep(5)
 
@@ -521,7 +711,17 @@ def test_TableNameMapping(pg_cursor, dbvendor):
         rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_add_objmap('{name}', 'table', '{exttable_prefix}.objmap_srctable3', 'someschema.objmap_dsttable3')")
         assert rows[0] == 0
 
-   # create the tables remotely
+    if dbvendor == "postgres":
+        # postgres in debezium snapshot needs to create tables manually
+        run_pg_query_one(pg_cursor, f"CREATE SCHEMA IF NOT EXISTS {dbname}")
+        run_pg_query_one(pg_cursor, f"CREATE TABLE {dbname}.orders (order_number int primary key, order_date timestamp without time zone, purchaser int, quantity int , product_id int)")
+
+        # we need to start connector now so tables are copied via CDC, debezium does not snapshot table schemas
+        result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "no_data")
+        assert result == 0
+        time.sleep(20)
+
+    # create the tables remotely
     run_remote_query(dbvendor, "CREATE TABLE objmap_srctable1 (a INT, b varchar(50))")
     run_remote_query(dbvendor, "CREATE TABLE objmap_srctable2 (a INT, b varchar(50))")
     run_remote_query(dbvendor, "CREATE TABLE objmap_srctable3 (a INT, b varchar(50))")
@@ -542,8 +742,9 @@ def test_TableNameMapping(pg_cursor, dbvendor):
             """)
 
     # create the connector in pg and copy the tables
-    result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "no_data")
-    assert result == 0
+    if dbvendor != "postgres":
+        result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "no_data")
+        assert result == 0
     
     if dbvendor == "oracle" or dbvendor == "olr":
         time.sleep(60)
@@ -576,7 +777,8 @@ def test_TableNameMapping(pg_cursor, dbvendor):
     
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
-    
+    drop_repslot_and_pub(dbvendor, name, "postgres")
+
     run_remote_query(dbvendor, "DROP TABLE objmap_srctable1")
     run_remote_query(dbvendor, "DROP TABLE objmap_srctable2")
     run_remote_query(dbvendor, "DROP TABLE objmap_srctable3")
@@ -604,6 +806,16 @@ def test_ColumnNameMapping(pg_cursor, dbvendor):
         rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_add_objmap('{name}', 'column', '{exttable_prefix}.objmapcol_srctable1.b', 'pgtextcol')")
         assert rows[0] == 0
 
+    if dbvendor == "postgres":
+	    # postgres in debezium snapshot needs to create tables manually
+        run_pg_query_one(pg_cursor, f"CREATE SCHEMA IF NOT EXISTS {dbname}")
+        run_pg_query_one(pg_cursor, f"CREATE TABLE {dbname}.orders (order_number int primary key, order_date timestamp without time zone, purchaser int, quantity int , product_id int)")
+
+        # we need to start connector now so tables are copied via CDC, debezium does not snapshot table schemas
+        result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "no_data")
+        assert result == 0
+        time.sleep(20)
+
     # create the tables remotely
     run_remote_query(dbvendor, "CREATE TABLE objmapcol_srctable1 (a INT, b varchar(50))")
 
@@ -614,9 +826,10 @@ def test_ColumnNameMapping(pg_cursor, dbvendor):
             @source_name = 'objmapcol_srctable1', @role_name = NULL, @supports_net_changes = 0;
             """)
 
-    # create the connector in pg and copy the tables
-    result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "no_data")
-    assert result == 0
+    if dbvendor != "postgres":
+        # create the connector inpg and copy the tables
+        result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "no_data")
+        assert result == 0
     
     if dbvendor == "oracle" or dbvendor == "olr":
         time.sleep(60)
@@ -635,13 +848,18 @@ def test_ColumnNameMapping(pg_cursor, dbvendor):
 
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
-    
+    drop_repslot_and_pub(dbvendor, name, "postgres")
+
     run_remote_query(dbvendor, "DROP TABLE objmapcol_srctable1")
     time.sleep(5)
 
 def test_DataTypeMapping(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_objmap_dtm"
     dbname = getDbname(dbvendor)
+
+    if dbvendor == "postgres":
+        # for postgres connector, we need to use fdw snapshot to observe
+        update_guc_conf(pg_cursor, "synchdb.snapshot_engine", "'fdw'", True)
 
     if dbvendor == "mysql":
         exttable_prefix=dbname
@@ -675,11 +893,18 @@ def test_DataTypeMapping(pg_cursor, dbvendor):
 
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
+    drop_repslot_and_pub(dbvendor, name, "postgres")
+    if dbvendor == "postgres":
+        update_guc_conf(pg_cursor, "synchdb.snapshot_engine", "'debezium'", True)
 
 def test_TransformExpression(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_objmap_te"
     dbname = getDbname(dbvendor)
 
+    if dbvendor == "postgres":
+        # for postgres connector, we need to use fdw snapshot to observe
+        update_guc_conf(pg_cursor, "synchdb.snapshot_engine", "'fdw'", True)
+    
     if dbvendor == "mysql":
         exttable_prefix=dbname
     else:
@@ -714,10 +939,17 @@ def test_TransformExpression(pg_cursor, dbvendor):
 
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
+    drop_repslot_and_pub(dbvendor, name, "postgres")
+    if dbvendor == "postgres":
+        update_guc_conf(pg_cursor, "synchdb.snapshot_engine", "'debezium'", True)
 
 def test_ReloadObjmapEntries(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_objmap_roe"
     dbname = getDbname(dbvendor)
+
+    if dbvendor == "postgres":
+        # for postgres connector, we need to use fdw snapshot to observe
+        update_guc_conf(pg_cursor, "synchdb.snapshot_engine", "'fdw'", True)
 
     if dbvendor == "mysql":
         exttable_prefix=dbname
@@ -867,6 +1099,11 @@ def test_ReloadObjmapEntries(pg_cursor, dbvendor):
             INSERT INTO orders(order_number, order_date, purchaser, quantity, product_id) VALUES
                 (10005, TO_DATE('2025-12-12', 'YYYY-MM-DD'), 1002, 10000, 102)
             """)
+    elif dbvendor == "postgres":
+        extrows = run_remote_query(dbvendor, f"""
+            INSERT INTO orders(order_number, order_date, purchaser, quantity, product_id) VALUES
+                (10005, '2025-12-12', 1002, 10000, 102)
+            """)
     else:
         extrows = run_remote_query(dbvendor, f"""
             INSERT INTO orders(order_date, purchaser, quantity, product_id) VALUES
@@ -887,6 +1124,9 @@ def test_ReloadObjmapEntries(pg_cursor, dbvendor):
 
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
+    drop_repslot_and_pub(dbvendor, name, "postgres")
+    if dbvendor == "postgres":
+        update_guc_conf(pg_cursor, "synchdb.snapshot_engine", "'debezium'", True)
 
     run_remote_query(dbvendor, f"DELETE FROM orders WHERE order_number>=10005")
     time.sleep(5)

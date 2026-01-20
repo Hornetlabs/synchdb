@@ -513,7 +513,10 @@ BEGIN
             precision     integer OPTIONS (column_name 'numeric_precision'),
             scale         integer OPTIONS (column_name 'numeric_scale'),
             nullable      text    OPTIONS (column_name 'is_nullable'),
-            default_value text    OPTIONS (column_name 'column_default')
+            default_value text    OPTIONS (column_name 'column_default'),
+
+			udt_schema    text    OPTIONS (column_name 'udt_schema'),
+			udt_name      text    OPTIONS (column_name 'udt_name')
         )
         SERVER %2$I
         OPTIONS (
@@ -675,7 +678,76 @@ BEGIN
           AND n.nspname NOT IN ('pg_catalog', 'information_schema')
     $SQL$, v_schema);
 
-    -- options currently unused; kept for API symmetry with mysql_create_catalog
+    EXECUTE format($SQL$
+        CREATE FOREIGN TABLE IF NOT EXISTS %1$I.types (
+            oid            oid,
+            typname        name,
+            typnamespace   oid,
+            typlen         smallint,
+            typbyval       boolean,
+            typtype        "char",
+            typcategory    "char",
+            typispreferred boolean,
+            typdelim       "char",
+            typrelid       oid,
+            typelem        oid,
+            typarray       oid,
+            typinput       regproc,
+            typoutput      regproc,
+            typreceive     regproc,
+            typsend        regproc,
+            typmodin       regproc,
+            typmodout      regproc,
+            typanalyze     regproc,
+            typalign       "char",
+            typstorage     "char",
+            typnotnull     boolean,
+            typbasetype    oid,
+            typtypmod      integer,
+            typndims       integer,
+            typcollation   oid
+        )
+        SERVER %2$I
+        OPTIONS (
+            schema_name 'pg_catalog',
+            table_name  'pg_type'
+        )
+    $SQL$, v_schema, v_server);
+
+    EXECUTE format($SQL$
+        CREATE OR REPLACE VIEW %1$I.columns_resolved AS
+        SELECT
+          c.schema,
+          c.table_name,
+          c.column_name,
+          c.position,
+          c.type_name,
+          c.length,
+          c.precision,
+          c.scale,
+          c.nullable,
+          c.default_value,
+    
+          -- carry-through so downstream SQL can use them
+          c.udt_schema,
+          c.udt_name,
+    
+          CASE WHEN c.type_name = 'ARRAY' THEN ns.nspname ELSE NULL END AS array_type_schema,
+          CASE WHEN c.type_name = 'ARRAY' THEN t.typname  ELSE NULL END AS array_type_name,
+    
+          CASE WHEN c.type_name = 'ARRAY' THEN elemns.nspname ELSE NULL END AS element_type_schema,
+          CASE WHEN c.type_name = 'ARRAY' THEN elem.typname   ELSE NULL END AS element_type_name
+        FROM %1$I.columns c
+        LEFT JOIN %1$I.namespaces ns
+          ON ns.nspname = c.udt_schema
+        LEFT JOIN %1$I.types t
+          ON t.typname = c.udt_name
+         AND t.typnamespace = ns.oid
+        LEFT JOIN %1$I.types elem
+          ON elem.oid = t.typelem
+        LEFT JOIN %1$I.namespaces elemns
+          ON elemns.oid = elem.typnamespace
+    $SQL$, v_schema);	
     RETURN;
 END;
 $postgres_create_catalog$;
@@ -2125,7 +2197,7 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
     rname  text;
-    rels   text[] := ARRAY['tables','columns','keys'];  -- materialize just these
+    rels   text[] := ARRAY['tables','columns','keys','columns_resolved'];  -- materialize just these
     src_ok boolean;
     dst_ok boolean;
     rel_exists boolean;
@@ -2241,6 +2313,21 @@ BEGIN
             END IF;
         END IF;
 
+		IF rname = 'columns_resolved' THEN
+            IF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = p_dest_schema::text AND table_name='columns_resolved'
+                  AND column_name IN ('schema','table_name','position')
+                GROUP BY table_schema, table_name
+                HAVING count(*) = 3
+            ) THEN
+                EXECUTE format(
+                    'CREATE INDEX ON %I.%I(("schema"), table_name, position)',
+                    p_dest_schema, rname
+                );
+            END IF;
+        END IF;
+
         -- For keys(schema, table_name[, constraint_name])
         IF rname = 'keys' THEN
             IF EXISTS (
@@ -2268,12 +2355,32 @@ BEGIN
             END IF;
         END IF;
 
+		IF rname = 'columns_resolved' THEN
+            IF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = p_dest_schema::text AND table_name='columns_resolved'
+                  AND column_name IN ('schema','table_name','position')
+                GROUP BY table_schema, table_name
+                HAVING count(*) = 3
+            ) THEN
+                EXECUTE format('CREATE INDEX ON %I.columns_resolved(("schema"), table_name, position)', p_dest_schema);
+            END IF;
+        END IF;
+
     END LOOP;
 
     -- 4) Analyze for better local planning
     EXECUTE format('ANALYZE %I.tables',  p_dest_schema);
     EXECUTE format('ANALYZE %I.columns', p_dest_schema);
     EXECUTE format('ANALYZE %I.keys',    p_dest_schema);
+
+	IF EXISTS (
+        SELECT 1 FROM pg_class c
+        JOIN pg_namespace n ON n.oid=c.relnamespace
+        WHERE n.nspname = p_dest_schema::text AND c.relname='columns_resolved' AND c.relkind='r'
+    ) THEN
+        EXECUTE format('ANALYZE %I.columns_resolved', p_dest_schema);
+    END IF;
 
     RAISE NOTICE 'Materialization complete into schema %', p_dest_schema;
 END;
@@ -2624,6 +2731,38 @@ BEGIN
       END IF;
     END IF;
 
+	IF v_conn_type = 'postgres' THEN
+      EXECUTE format(
+        'SELECT string_agg(
+                  quote_ident(%s) || '' '' ||
+                  synchdb_translate_datatype(
+                      %L::name,
+                      CASE
+                        WHEN c.type_name = ''ARRAY'' AND c.element_type_name IS NOT NULL
+                          THEN (lower(c.element_type_name) || ''[]'')::name
+                        ELSE lower(c.type_name)::name
+                      END,
+                      COALESCE(c.length, -1)::bigint,
+                      COALESCE(c.scale, -1)::bigint,
+                      COALESCE(c.precision, -1)::bigint
+                  ) ||
+                  CASE
+                    WHEN lower(coalesce(c.nullable::text, '''')) IN (''no'', ''n'', ''0'', ''false'', ''f'')
+                      THEN '' NOT NULL''
+                    ELSE ''''
+                  END,
+                  '', '' ORDER BY c.position
+               )
+         FROM %I.columns_resolved c
+        WHERE c."schema" = %L
+          AND c.table_name = %L',
+        v_colname_expr,
+        v_conn_type,
+        p_source_schema, r.ora_owner, r.table_name
+      )
+      INTO v_cols_sql;
+
+	ELSE
     -- Build PG column list using translator, honoring case strategy
     EXECUTE format(
       'SELECT string_agg(
@@ -2642,6 +2781,8 @@ BEGIN
       p_source_schema, r.ora_owner, r.table_name
     )
     INTO v_cols_sql;
+
+	END IF;
 
     IF v_cols_sql IS NULL THEN
       RAISE NOTICE 'No columns found for %.% — skipping', r.ora_owner, r.table_name;
@@ -2710,17 +2851,73 @@ BEGIN
 		RAISE NOTICE 'Created MySQL FT %.% -> %.% on %',
 				   p_stage_schema, v_tbl_pg, p_desired_db, r.table_name, p_server_name;
 	ELSIF v_conn_type = 'postgres' THEN
-		-- Ignore p_scn; use mysql_fdw options: dbname + table_name
-        EXECUTE format(
-            'CREATE FOREIGN TABLE %I.%I (%s) SERVER %I OPTIONS (schema_name %L, table_name %L)',
-            p_stage_schema, v_tbl_pg, v_cols_sql, p_server_name,
-            p_desired_schema::text, r.table_name
-        );
+          ------------------------------------------------------------------
+      -- IMPORTANT for postgres_fdw:
+      -- If we normalize local FT column identifiers (upper/lower),
+      -- we MUST map them back to the real remote column names using
+      -- column OPTIONS (column_name 'remote_col').
+      ------------------------------------------------------------------
+      EXECUTE format($SQL$
+          SELECT string_agg(
+                   (
+                     quote_ident(
+                       CASE
+                         WHEN %L = 'lower' THEN lower(c.column_name)
+                         WHEN %L = 'upper' THEN upper(c.column_name)
+                         ELSE c.column_name
+                       END
+                     )
+                     || ' ' ||
+                     synchdb_translate_datatype(
+                         %L::name,
+                         CASE
+                           WHEN lower(c.type_name) = 'array' THEN
+                             CASE
+                               WHEN c.element_type_name IS NOT NULL
+                                 THEN (lower(c.element_type_name) || '[]')::name
+                               ELSE
+                                 lower(c.array_type_name)::name
+                             END
+                           ELSE
+                             lower(c.type_name)::name
+                         END,
+                         COALESCE(c.length, -1)::int,
+                         COALESCE(c.scale, -1)::int,
+                         COALESCE(c.precision, -1)::int
+                     )
+                     || ' OPTIONS (column_name ' || quote_literal(c.column_name) || ')'
+                     || CASE
+                          WHEN lower(coalesce(c.nullable::text,'')) IN ('no','n','0','false','f')
+                          THEN ' NOT NULL'
+                          ELSE ''
+                        END
+                   ),
+                   ', ' ORDER BY c.position
+                 )
+            FROM %I.columns_resolved c
+           WHERE c."schema"   = %L
+             AND c.table_name = %L
+        $SQL$,
+          p_case_strategy,
+          p_case_strategy,
+          v_conn_type,
+          p_source_schema,
+          r.ora_owner,
+          r.table_name
+      )
+      INTO v_cols_sql;
 
-        RAISE NOTICE 'Created Postgres FT %.% -> %.% on %',
+
+      EXECUTE format(
+        'CREATE FOREIGN TABLE %I.%I (%s) SERVER %I OPTIONS (schema_name %L, table_name %L)',
+        p_stage_schema, v_tbl_pg, v_cols_sql, p_server_name,
+        p_desired_schema::text, r.table_name
+      );
+	  
+      RAISE NOTICE 'Created Postgres FT %.% -> %.% on %',
                    p_stage_schema, v_tbl_pg, p_desired_schema, r.table_name, p_server_name;
-
-    ELSE
+	
+	ELSE
       RAISE EXCEPTION 'Unsupported connector type: %', v_conn_type;
     END IF;
 	

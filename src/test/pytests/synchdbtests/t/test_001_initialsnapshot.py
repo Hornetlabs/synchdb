@@ -1,7 +1,7 @@
 import common
 import time
 from datetime import datetime
-from common import run_pg_query, run_pg_query_one, run_remote_query, create_synchdb_connector, getConnectorName, getDbname, verify_default_type_mappings, stop_and_delete_synchdb_connector, drop_default_pg_schema, create_and_start_synchdb_connector, update_guc_conf
+from common import run_pg_query, run_pg_query_one, run_remote_query, create_synchdb_connector, getConnectorName, getDbname, verify_default_type_mappings, stop_and_delete_synchdb_connector, drop_default_pg_schema, create_and_start_synchdb_connector, update_guc_conf, getSchema, drop_repslot_and_pub
 
 def test_ConnectorCreate(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor)
@@ -61,7 +61,10 @@ def test_RemoveExtraConninfo(pg_cursor, dbvendor):
 def test_ConnectorStart(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor)
     dbname = getDbname(dbvendor).lower()
-    
+
+    if dbvendor == "postgres":
+        update_guc_conf(pg_cursor, "synchdb.snapshot_engine", "'fdw'", True)
+
     result = create_synchdb_connector(pg_cursor, dbvendor, name)
     assert result[0] == 0
 
@@ -85,10 +88,19 @@ def test_ConnectorStart(pg_cursor, dbvendor):
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
 
+    if dbvendor == "postgres":
+        update_guc_conf(pg_cursor, "synchdb.snapshot_engine", "'debezium'", True)
+
 def test_InitialSnapshotDBZ(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_dbzsnap"
     dbname = getDbname(dbvendor).lower()
+    schema = getSchema(dbvendor)
     
+    if dbvendor == "postgres":
+        # postgres in debezium snapshot needs to create tables manually
+        run_pg_query_one(pg_cursor, f"CREATE SCHEMA IF NOT EXISTS {dbname}")
+        run_pg_query_one(pg_cursor, f"CREATE TABLE {dbname}.orders (order_number int primary key, order_date timestamp without time zone, purchaser int, quantity int , product_id int)")
+
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial")
     assert result == 0
 
@@ -103,6 +115,8 @@ def test_InitialSnapshotDBZ(pg_cursor, dbvendor):
         exttblcount = run_remote_query(dbvendor, f"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE()")
     elif dbvendor == "sqlserver":
         exttblcount = run_remote_query(dbvendor, f"SELECT COUNT(*) FROM information_schema.tables WHERE TABLE_CATALOG=DB_NAME() AND TABLE_SCHEMA=schema_name() AND TABLE_NAME NOT LIKE 'systranschemas%'")
+    elif dbvendor == "postgres":
+        exttblcount = run_remote_query(dbvendor, f"SELECT count(*) FROM information_schema.tables where table_schema='{schema}' and table_type = 'BASE TABLE'")
     else:
         exttblcount = run_remote_query(dbvendor, f"SELECT COUNT(*) FROM user_tables WHERE table_name NOT LIKE 'LOG_MINING%'")
     assert int(pgtblcount[0]) == int(exttblcount[0][0])
@@ -112,27 +126,27 @@ def test_InitialSnapshotDBZ(pg_cursor, dbvendor):
     extrowcount = run_remote_query(dbvendor, f"SELECT count(*) FROM orders")
     assert int(pgrowcount[0]) == int(extrowcount[0][0])
 
-    # check table name mappings
-    rows = run_pg_query(pg_cursor, f"SELECT ext_tbname, pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
-    assert len(rows) > 0
-    for row in rows:
-        id = row[0].split(".")
-        if len(id) == 3:
-            assert id[0].lower() + "." + id[2].lower() == row[1]
-        else:
+    if dbvendor != "postgres":
+        # check table name mappings
+        rows = run_pg_query(pg_cursor, f"SELECT ext_tbname, pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+        assert len(rows) > 0
+        for row in rows:
+            id = row[0].split(".")
+            if len(id) == 3:
+                assert id[0].lower() + "." + id[2].lower() == row[1]
+            else:
+                assert row[0].lower() == row[1]
+        # check attname mappings
+        rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+        assert len(rows) > 0
+        for row in rows:
             assert row[0].lower() == row[1]
-    
-    # check attname mappings
-    rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
-    assert len(rows) > 0
-    for row in rows:
-        assert row[0].lower() == row[1]
 
-    # check data type mappings
-    rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
-    assert len(rows) > 0
-    for row in rows:
-        assert verify_default_type_mappings(row[0], row[1], dbvendor) == True
+        # check data type mappings
+        rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+        assert len(rows) > 0
+        for row in rows:
+            assert verify_default_type_mappings(row[0], row[1], dbvendor) == True
 
     # check data consistency of orders table
     pgrow = run_pg_query_one(pg_cursor, f"SELECT order_number, order_date, purchaser, quantity, product_id FROM {dbname}.orders WHERE order_number = 10003")
@@ -140,6 +154,8 @@ def test_InitialSnapshotDBZ(pg_cursor, dbvendor):
     assert int(pgrow[0]) == int(extrow[0][0])
     if dbvendor == "oracle" or dbvendor == "olr":
         assert pgrow[1] == datetime.strptime(extrow[0][1], '%d-%b-%y')
+    elif dbvendor == "postgres":
+        assert pgrow[1] == datetime.strptime(extrow[0][1], '%Y-%m-%d %H:%M:%S')
     else:
         assert pgrow[1] == datetime.strptime(extrow[0][1], '%Y-%m-%d').date()
     assert int(pgrow[2]) == int(extrow[0][2])
@@ -148,17 +164,28 @@ def test_InitialSnapshotDBZ(pg_cursor, dbvendor):
 
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
+    drop_repslot_and_pub(dbvendor, name, "postgres")
 
 def test_InitialSnapshotFDW(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_fdwsnap"
     dbname = getDbname(dbvendor).lower()
+    schema = getSchema(dbvendor)
 
     if dbvendor == "mysql":
-        assert True
-        return
+        isfdw = run_pg_query_one(pg_cursor, f"SELECT EXISTS ( SELECT 1 FROM pg_available_extensions WHERE name = 'mysql_fdw' ) AS mysql_fdw_available")
+        if isfdw[0] == False:
+            print ("test_InitialSnapshotFDW skipped - mysql_fdw not available for install")
+            assert True
+            return
     elif dbvendor == "sqlserver":
         assert True
         return
+    elif dbvendor == "postgres":
+        isfdw = run_pg_query_one(pg_cursor, f"SELECT EXISTS ( SELECT 1 FROM pg_available_extensions WHERE name = 'postgres_fdw' ) AS postgres_fdw_available")
+        if isfdw[0] == False:
+            print ("test_InitialSnapshotFDW skipped - postgres_fdw not available for install")
+            assert True
+            return
     else:
         isfdw = run_pg_query_one(pg_cursor, f"SELECT EXISTS ( SELECT 1 FROM pg_available_extensions WHERE name = 'oracle_fdw' ) AS oracle_fdw_available")
         if isfdw[0] == False:
@@ -182,6 +209,8 @@ def test_InitialSnapshotFDW(pg_cursor, dbvendor):
         exttblcount = run_remote_query(dbvendor, f"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE()")
     elif dbvendor == "sqlserver":
         exttblcount = run_remote_query(dbvendor, f"SELECT COUNT(*) FROM information_schema.tables WHERE TABLE_CATALOG=DB_NAME() AND TABLE_SCHEMA=schema_name() AND TABLE_NAME NOT LIKE 'systranschemas%'")
+    elif dbvendor == "postgres":
+        exttblcount = run_remote_query(dbvendor, f"SELECT count(*) FROM information_schema.tables where table_schema='{schema}' and table_type = 'BASE TABLE'")
     else:
         exttblcount = run_remote_query(dbvendor, f"SELECT COUNT(*) FROM user_tables WHERE table_name NOT LIKE 'LOG_MINING%'")
     assert int(pgtblcount[0]) == int(exttblcount[0][0])
@@ -219,6 +248,8 @@ def test_InitialSnapshotFDW(pg_cursor, dbvendor):
     assert int(pgrow[0]) == int(extrow[0][0])
     if dbvendor == "oracle" or dbvendor == "olr":
         assert pgrow[1] == datetime.strptime(extrow[0][1], '%d-%b-%y')
+    elif dbvendor == "postgres":
+        assert pgrow[1] == datetime.strptime(extrow[0][1], '%Y-%m-%d %H:%M:%S')
     else:
         assert pgrow[1] == datetime.strptime(extrow[0][1], '%Y-%m-%d').date()
     assert int(pgrow[2]) == int(extrow[0][2])
@@ -226,11 +257,17 @@ def test_InitialSnapshotFDW(pg_cursor, dbvendor):
     assert int(pgrow[4]) == int(extrow[0][4])
 
     # test cdc now
-    query = """
-        INSERT INTO orders(order_number, order_date, purchaser, quantity,
-        product_id) VALUES (10005, TO_DATE('2025-12-12', 'YYYY-MM-DD'),
-        1002, 10000, 102);
-    """
+    if dbvendor == "postgres" or dbvendor == "mysql":
+        query = """
+            INSERT INTO orders(order_number, order_date, purchaser, quantity,
+            product_id) VALUES (10005, '2025-12-12', 1002, 10000, 102);
+        """
+    else:
+        query = """
+            INSERT INTO orders(order_number, order_date, purchaser, quantity,
+            product_id) VALUES (10005, TO_DATE('2025-12-12', 'YYYY-MM-DD'),
+            1002, 10000, 102);
+        """
     
     run_remote_query(dbvendor, query)
     if dbvendor == "oracle" or dbvendor == "olr":
@@ -246,13 +283,20 @@ def test_InitialSnapshotFDW(pg_cursor, dbvendor):
     drop_default_pg_schema(pg_cursor, dbvendor)
     run_remote_query(dbvendor, f"DELETE FROM orders WHERE order_number > 10004")
     update_guc_conf(pg_cursor, "synchdb.snapshot_engine", "'debezium'", True)
+    drop_repslot_and_pub(dbvendor, name, "postgres")
     time.sleep(10)
 
 def test_InitialSnapshotDBZ_uppercase(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_dbzsnap_upper"
     dbname = getDbname(dbvendor).upper()
+    schema = getSchema(dbvendor)
 
     update_guc_conf(pg_cursor, "synchdb.letter_casing_strategy", "'uppercase'", True)
+
+    if dbvendor == "postgres":
+        # postgres in debezium snapshot needs to create tables manually
+        run_pg_query_one(pg_cursor, f"CREATE SCHEMA IF NOT EXISTS \"{dbname}\"")
+        run_pg_query_one(pg_cursor, f"CREATE TABLE \"{dbname}\".\"ORDERS\" (\"ORDER_NUMBER\" int primary key, \"ORDER_DATE\" timestamp without time zone, \"PURCHASER\" int, \"QUANTITY\" int , \"PRODUCT_ID\" int)")
 
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial")
     assert result == 0
@@ -268,6 +312,8 @@ def test_InitialSnapshotDBZ_uppercase(pg_cursor, dbvendor):
         exttblcount = run_remote_query(dbvendor, f"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE()")
     elif dbvendor == "sqlserver":
         exttblcount = run_remote_query(dbvendor, f"SELECT COUNT(*) FROM information_schema.tables WHERE TABLE_CATALOG=DB_NAME() AND TABLE_SCHEMA=schema_name() AND TABLE_NAME NOT LIKE 'systranschemas%'")
+    elif dbvendor == "postgres":
+        exttblcount = run_remote_query(dbvendor, f"SELECT count(*) FROM information_schema.tables where table_schema='{schema}' and table_type = 'BASE TABLE'")
     else:
         exttblcount = run_remote_query(dbvendor, f"SELECT COUNT(*) FROM user_tables WHERE table_name NOT LIKE 'LOG_MINING%'")
     assert int(pgtblcount[0]) == int(exttblcount[0][0])
@@ -277,27 +323,28 @@ def test_InitialSnapshotDBZ_uppercase(pg_cursor, dbvendor):
     extrowcount = run_remote_query(dbvendor, f"SELECT count(*) FROM orders")
     assert int(pgrowcount[0]) == int(extrowcount[0][0])
 
-    # check table name mappings
-    rows = run_pg_query(pg_cursor, f"SELECT ext_tbname, pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
-    assert len(rows) > 0
-    for row in rows:
-        id = row[0].split(".")
-        if len(id) == 3:
-            assert id[0].upper() + "." + id[2].upper() == row[1]
-        else:
+    if dbvendor != "postgres":
+        # check table name mappings
+        rows = run_pg_query(pg_cursor, f"SELECT ext_tbname, pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+        assert len(rows) > 0
+        for row in rows:
+            id = row[0].split(".")
+            if len(id) == 3:
+                assert id[0].upper() + "." + id[2].upper() == row[1]
+            else:
+                assert row[0].upper() == row[1]
+
+        # check attname mappings
+        rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+        assert len(rows) > 0
+        for row in rows:
             assert row[0].upper() == row[1]
 
-    # check attname mappings
-    rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
-    assert len(rows) > 0
-    for row in rows:
-        assert row[0].upper() == row[1]
-
-    # check data type mappings
-    rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
-    assert len(rows) > 0
-    for row in rows:
-        assert verify_default_type_mappings(row[0], row[1], dbvendor) == True
+        # check data type mappings
+        rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+        assert len(rows) > 0
+        for row in rows:
+            assert verify_default_type_mappings(row[0], row[1], dbvendor) == True
 
     # check data consistency of orders table
     pgrow = run_pg_query_one(pg_cursor, f"SELECT \"ORDER_NUMBER\", \"ORDER_DATE\", \"PURCHASER\", \"QUANTITY\", \"PRODUCT_ID\" FROM \"{dbname}\".\"ORDERS\" WHERE \"ORDER_NUMBER\" = 10003")
@@ -305,6 +352,8 @@ def test_InitialSnapshotDBZ_uppercase(pg_cursor, dbvendor):
     assert int(pgrow[0]) == int(extrow[0][0])
     if dbvendor == "oracle" or dbvendor == "olr":
         assert pgrow[1] == datetime.strptime(extrow[0][1], '%d-%b-%y')
+    elif dbvendor == "postgres":
+        assert pgrow[1] == datetime.strptime(extrow[0][1], '%Y-%m-%d %H:%M:%S')
     else:
         assert pgrow[1] == datetime.strptime(extrow[0][1], '%Y-%m-%d').date()
     assert int(pgrow[2]) == int(extrow[0][2])
@@ -322,6 +371,11 @@ def test_InitialSnapshotDBZ_uppercase(pg_cursor, dbvendor):
             INSERT INTO orders(order_date, purchaser, quantity, product_id) VALUES
             ("2025-12-12", 1002, 10000, 102)
         """
+    elif dbvendor == "postgres":
+	    query = """
+		    INSERT INTO orders(order_number, order_date, purchaser, quantity,
+    		product_id) VALUES (10005, '2025-12-12', 1002, 10000, 102);
+	    """
     else:
         query = """
             INSERT INTO orders(order_number, order_date, purchaser, quantity,
@@ -343,18 +397,29 @@ def test_InitialSnapshotDBZ_uppercase(pg_cursor, dbvendor):
     drop_default_pg_schema(pg_cursor, dbvendor)
     run_remote_query(dbvendor, f"DELETE FROM orders WHERE order_number > 10004")
     update_guc_conf(pg_cursor, "synchdb.letter_casing_strategy", "'lowercase'", True)
+    drop_repslot_and_pub(dbvendor, name, "postgres")
     time.sleep(10)
 
 def test_InitialSnapshotFDW_uppercase(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_fdwsnap_upper"
     dbname = getDbname(dbvendor).upper()
+    schema = getSchema(dbvendor)
 
     if dbvendor == "mysql":
-        assert True
-        return
+        isfdw = run_pg_query_one(pg_cursor, f"SELECT EXISTS ( SELECT 1 FROM pg_available_extensions WHERE name = 'mysql_fdw' ) AS mysql_fdw_available")
+        if isfdw[0] == False:
+            print ("test_InitialSnapshotFDW_uppercase skipped - mysql_fdw not available for install")
+            assert True
+            return
     elif dbvendor == "sqlserver":
         assert True
         return
+    elif dbvendor == "postgres":
+        isfdw = run_pg_query_one(pg_cursor, f"SELECT EXISTS ( SELECT 1 FROM pg_available_extensions WHERE name = 'postgres_fdw' ) AS postgres_fdw_available")
+        if isfdw[0] == False:
+            print ("test_InitialSnapshotFDW_uppercase skipped - postgres_fdw not available for install")
+            assert True
+            return
     else:
         isfdw = run_pg_query_one(pg_cursor, f"SELECT EXISTS ( SELECT 1 FROM pg_available_extensions WHERE name = 'oracle_fdw' ) AS oracle_fdw_available")
         if isfdw[0] == False:
@@ -379,6 +444,8 @@ def test_InitialSnapshotFDW_uppercase(pg_cursor, dbvendor):
         exttblcount = run_remote_query(dbvendor, f"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE()")
     elif dbvendor == "sqlserver":
         exttblcount = run_remote_query(dbvendor, f"SELECT COUNT(*) FROM information_schema.tables WHERE TABLE_CATALOG=DB_NAME() AND TABLE_SCHEMA=schema_name() AND TABLE_NAME NOT LIKE 'systranschemas%'")
+    elif dbvendor == "postgres":
+        exttblcount = run_remote_query(dbvendor, f"SELECT count(*) FROM information_schema.tables where table_schema='{schema}' and table_type = 'BASE TABLE'")
     else:
         exttblcount = run_remote_query(dbvendor, f"SELECT COUNT(*) FROM user_tables WHERE table_name NOT LIKE 'LOG_MINING%'")
     assert int(pgtblcount[0]) == int(exttblcount[0][0])
@@ -416,6 +483,8 @@ def test_InitialSnapshotFDW_uppercase(pg_cursor, dbvendor):
     assert int(pgrow[0]) == int(extrow[0][0])
     if dbvendor == "oracle" or dbvendor == "olr":
         assert pgrow[1] == datetime.strptime(extrow[0][1], '%d-%b-%y')
+    elif dbvendor == "postgres":
+        assert pgrow[1] == datetime.strptime(extrow[0][1], '%Y-%m-%d %H:%M:%S')
     else:
         assert pgrow[1] == datetime.strptime(extrow[0][1], '%Y-%m-%d').date()
     assert int(pgrow[2]) == int(extrow[0][2])
@@ -433,6 +502,11 @@ def test_InitialSnapshotFDW_uppercase(pg_cursor, dbvendor):
             INSERT INTO orders(order_date, purchaser, quantity, product_id) VALUES
             ("2025-12-12", 1002, 10000, 102)
         """
+    elif dbvendor == "postgres":
+	    query = """
+    		INSERT INTO orders(order_number, order_date, purchaser, quantity,
+		    product_id) VALUES (10005, '2025-12-12', 1002, 10000, 102);
+	    """
     else:
         query = """
             INSERT INTO orders(order_number, order_date, purchaser, quantity,
@@ -455,11 +529,18 @@ def test_InitialSnapshotFDW_uppercase(pg_cursor, dbvendor):
     run_remote_query(dbvendor, f"DELETE FROM orders WHERE order_number > 10004")
     update_guc_conf(pg_cursor, "synchdb.snapshot_engine", "'debezium'", True)
     update_guc_conf(pg_cursor, "synchdb.letter_casing_strategy", "'lowercase'", True)
+    drop_repslot_and_pub(dbvendor, name, "postgres")
     time.sleep(10)
 
 def test_InitialSnapshotDBZ_asis(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_dbzsnap_asis"
     dbname = getDbname(dbvendor)
+    schema = getSchema(dbvendor)
+
+    if dbvendor == "postgres":
+        # postgres in debezium snapshot needs to create tables manually
+        run_pg_query_one(pg_cursor, f"CREATE SCHEMA IF NOT EXISTS {dbname}")
+        run_pg_query_one(pg_cursor, f"CREATE TABLE {dbname}.orders (order_number int primary key, order_date timestamp without time zone, purchaser int, quantity int , product_id int)")
 
     update_guc_conf(pg_cursor, "synchdb.letter_casing_strategy", "'asis'", True)
 
@@ -477,6 +558,8 @@ def test_InitialSnapshotDBZ_asis(pg_cursor, dbvendor):
         exttblcount = run_remote_query(dbvendor, f"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE()")
     elif dbvendor == "sqlserver":
         exttblcount = run_remote_query(dbvendor, f"SELECT COUNT(*) FROM information_schema.tables WHERE TABLE_CATALOG=DB_NAME() AND TABLE_SCHEMA=schema_name() AND TABLE_NAME NOT LIKE 'systranschemas%'")
+    elif dbvendor == "postgres":
+        exttblcount = run_remote_query(dbvendor, f"SELECT count(*) FROM information_schema.tables where table_schema='{schema}' and table_type = 'BASE TABLE'")
     else:
         exttblcount = run_remote_query(dbvendor, f"SELECT COUNT(*) FROM user_tables WHERE table_name NOT LIKE 'LOG_MINING%'")
     assert int(pgtblcount[0]) == int(exttblcount[0][0])
@@ -489,27 +572,28 @@ def test_InitialSnapshotDBZ_asis(pg_cursor, dbvendor):
     extrowcount = run_remote_query(dbvendor, f"SELECT count(*) FROM orders")
     assert int(pgrowcount[0]) == int(extrowcount[0][0])
 
-    # check table name mappings
-    rows = run_pg_query(pg_cursor, f"SELECT ext_tbname, pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
-    assert len(rows) > 0
-    for row in rows:
-        id = row[0].split(".")
-        if len(id) == 3:
-            assert id[0] + "." + id[2] == row[1]
-        else:
+    if dbvendor != "postgres":
+        # check table name mappings
+        rows = run_pg_query(pg_cursor, f"SELECT ext_tbname, pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+        assert len(rows) > 0
+        for row in rows:
+            id = row[0].split(".")
+            if len(id) == 3:
+                assert id[0] + "." + id[2] == row[1]
+            else:
+                assert row[0] == row[1]
+
+        # check attname mappings
+        rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+        assert len(rows) > 0
+        for row in rows:
             assert row[0] == row[1]
 
-    # check attname mappings
-    rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
-    assert len(rows) > 0
-    for row in rows:
-        assert row[0] == row[1]
-
-    # check data type mappings
-    rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
-    assert len(rows) > 0
-    for row in rows:
-        assert verify_default_type_mappings(row[0], row[1], dbvendor) == True
+        # check data type mappings
+        rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+        assert len(rows) > 0
+        for row in rows:
+            assert verify_default_type_mappings(row[0], row[1], dbvendor) == True
 
     # check data consistency of orders table
     if dbvendor == "oracle" or dbvendor == "olr":
@@ -520,6 +604,8 @@ def test_InitialSnapshotDBZ_asis(pg_cursor, dbvendor):
     assert int(pgrow[0]) == int(extrow[0][0])
     if dbvendor == "oracle" or dbvendor == "olr":
         assert pgrow[1] == datetime.strptime(extrow[0][1], '%d-%b-%y')
+    elif dbvendor == "postgres":
+        assert pgrow[1] == datetime.strptime(extrow[0][1], '%Y-%m-%d %H:%M:%S')
     else:
         assert pgrow[1] == datetime.strptime(extrow[0][1], '%Y-%m-%d').date()
     assert int(pgrow[2]) == int(extrow[0][2])
@@ -537,6 +623,11 @@ def test_InitialSnapshotDBZ_asis(pg_cursor, dbvendor):
             INSERT INTO orders(order_date, purchaser, quantity, product_id) VALUES
             ("2025-12-12", 1002, 10000, 102)
         """
+    elif dbvendor == "postgres":
+    	query = """
+	    	INSERT INTO orders(order_number, order_date, purchaser, quantity,
+		    product_id) VALUES (10005, '2025-12-12', 1002, 10000, 102);
+    	"""
     else:
         query = """
             INSERT INTO orders(order_number, order_date, purchaser, quantity,
@@ -561,18 +652,29 @@ def test_InitialSnapshotDBZ_asis(pg_cursor, dbvendor):
     drop_default_pg_schema(pg_cursor, dbvendor)
     run_remote_query(dbvendor, f"DELETE FROM orders WHERE order_number > 10004")
     update_guc_conf(pg_cursor, "synchdb.letter_casing_strategy", "'lowercase'", True)
+    drop_repslot_and_pub(dbvendor, name, "postgres")
     time.sleep(10)
 
 def test_InitialSnapshotFDW_asis(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_fdwsnap_asis"
     dbname = getDbname(dbvendor)
+    schema = getSchema(dbvendor)
 
     if dbvendor == "mysql":
-        assert True
-        return
+        isfdw = run_pg_query_one(pg_cursor, f"SELECT EXISTS ( SELECT 1 FROM pg_available_extensions WHERE name = 'mysql_fdw' ) AS mysql_fdw_available")
+        if isfdw[0] == False:
+            print ("test_InitialSnapshotFDW_asis skipped - mysql_fdw not available for install")
+            assert True
+            return
     elif dbvendor == "sqlserver":
         assert True
         return
+    elif dbvendor == "postgres":
+        isfdw = run_pg_query_one(pg_cursor, f"SELECT EXISTS ( SELECT 1 FROM pg_available_extensions WHERE name = 'postgres_fdw' ) AS postgres_fdw_available")
+        if isfdw[0] == False:
+            print ("test_InitialSnapshotFDW_asis skipped - postgres_fdw not available for install")
+            assert True
+            return
     else:
         isfdw = run_pg_query_one(pg_cursor, f"SELECT EXISTS ( SELECT 1 FROM pg_available_extensions WHERE name = 'oracle_fdw' ) AS oracle_fdw_available")
         if isfdw[0] == False:
@@ -597,6 +699,8 @@ def test_InitialSnapshotFDW_asis(pg_cursor, dbvendor):
         exttblcount = run_remote_query(dbvendor, f"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE()")
     elif dbvendor == "sqlserver":
         exttblcount = run_remote_query(dbvendor, f"SELECT COUNT(*) FROM information_schema.tables WHERE TABLE_CATALOG=DB_NAME() AND TABLE_SCHEMA=schema_name() AND TABLE_NAME NOT LIKE 'systranschemas%'")
+    elif dbvendor == "postgres":
+        exttblcount = run_remote_query(dbvendor, f"SELECT count(*) FROM information_schema.tables where table_schema='{schema}' and table_type = 'BASE TABLE'")
     else:
         exttblcount = run_remote_query(dbvendor, f"SELECT COUNT(*) FROM user_tables WHERE table_name NOT LIKE 'LOG_MINING%'")
     assert int(pgtblcount[0]) == int(exttblcount[0][0])
@@ -640,6 +744,8 @@ def test_InitialSnapshotFDW_asis(pg_cursor, dbvendor):
     assert int(pgrow[0]) == int(extrow[0][0])
     if dbvendor == "oracle" or dbvendor == "olr":
         assert pgrow[1] == datetime.strptime(extrow[0][1], '%d-%b-%y')
+    elif dbvendor == "postgres":
+        assert pgrow[1] == datetime.strptime(extrow[0][1], '%Y-%m-%d %H:%M:%S')
     else:
         assert pgrow[1] == datetime.strptime(extrow[0][1], '%Y-%m-%d').date()
     assert int(pgrow[2]) == int(extrow[0][2])
@@ -658,6 +764,11 @@ def test_InitialSnapshotFDW_asis(pg_cursor, dbvendor):
             INSERT INTO orders(order_date, purchaser, quantity, product_id) VALUES
             ("2025-12-12", 1002, 10000, 102)
         """
+    elif dbvendor == "postgres":
+    	query = """
+		    INSERT INTO orders(order_number, order_date, purchaser, quantity,
+		    product_id) VALUES (10005, '2025-12-12', 1002, 10000, 102);
+	    """
     else:
         query = """
             INSERT INTO orders(order_number, order_date, purchaser, quantity,
@@ -683,11 +794,18 @@ def test_InitialSnapshotFDW_asis(pg_cursor, dbvendor):
     run_remote_query(dbvendor, f"DELETE FROM orders WHERE order_number > 10004")
     update_guc_conf(pg_cursor, "synchdb.snapshot_engine", "'debezium'", True)
     update_guc_conf(pg_cursor, "synchdb.letter_casing_strategy", "'lowercase'", True)
+    drop_repslot_and_pub(dbvendor, name, "postgres")
     time.sleep(10)
 
 def test_ConnectorStartSchemaSyncModeDBZ(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_dbz_schemasync"
     dbname = getDbname(dbvendor).lower()
+    schema = getSchema(dbvendor)
+
+    if dbvendor == "postgres":
+        # postgres in debezium snapshot needs to create tables manually
+        run_pg_query_one(pg_cursor, f"CREATE SCHEMA IF NOT EXISTS {dbname}")
+        run_pg_query_one(pg_cursor, f"CREATE TABLE {dbname}.orders (order_number int primary key, order_date timestamp without time zone, purchaser int, quantity int , product_id int)")
 
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "schemasync")
     assert result == 0
@@ -703,31 +821,34 @@ def test_ConnectorStartSchemaSyncModeDBZ(pg_cursor, dbvendor):
         exttblcount = run_remote_query(dbvendor, f"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE()")
     elif dbvendor == "sqlserver":
         exttblcount = run_remote_query(dbvendor, f"SELECT COUNT(*) FROM information_schema.tables WHERE TABLE_CATALOG=DB_NAME() AND TABLE_SCHEMA=schema_name() AND TABLE_NAME NOT LIKE 'systranschemas%'")
+    elif dbvendor == "postgres":
+        exttblcount = run_remote_query(dbvendor, f"SELECT count(*) FROM information_schema.tables where table_schema='{schema}' and table_type = 'BASE TABLE'")
     else:
         exttblcount = run_remote_query(dbvendor, f"SELECT COUNT(*) FROM user_tables WHERE table_name NOT LIKE 'LOG_MINING%'")
     assert int(pgtblcount[0]) == int(exttblcount[0][0])
 
-    # check table name mappings
-    rows = run_pg_query(pg_cursor, f"SELECT ext_tbname, pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
-    assert len(rows) > 0
-    for row in rows:
-        id = row[0].split(".")
-        if len(id) == 3:
-            assert id[0].lower() + "." + id[2].lower() == row[1]
-        else:
+    if dbvendor != "postgres":
+        # check table name mappings
+        rows = run_pg_query(pg_cursor, f"SELECT ext_tbname, pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+        assert len(rows) > 0
+        for row in rows:
+            id = row[0].split(".")
+            if len(id) == 3:
+                assert id[0].lower() + "." + id[2].lower() == row[1]
+            else:
+                assert row[0].lower() == row[1]
+
+        # check attname mappings
+        rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+        assert len(rows) > 0
+        for row in rows:
             assert row[0].lower() == row[1]
 
-    # check attname mappings
-    rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
-    assert len(rows) > 0
-    for row in rows:
-        assert row[0].lower() == row[1]
-
-    # check data type mappings
-    rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
-    assert len(rows) > 0
-    for row in rows:
-        assert verify_default_type_mappings(row[0], row[1], dbvendor) == True
+        # check data type mappings
+        rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+        assert len(rows) > 0
+        for row in rows:
+            assert verify_default_type_mappings(row[0], row[1], dbvendor) == True
 
     # check data consistency of orders table
     pgrow = run_pg_query_one(pg_cursor, f"SELECT count(*) FROM {dbname}.orders;")
@@ -757,6 +878,11 @@ def test_ConnectorStartSchemaSyncModeDBZ(pg_cursor, dbvendor):
             product_id) VALUES ('12-DEC-2025',
             1002, 10000, 102);
         """
+    elif dbvendor == "postgres":
+	    query = """
+    		INSERT INTO orders(order_number, order_date, purchaser, quantity,
+		    product_id) VALUES (10005, '2025-12-12', 1002, 10000, 102);
+	    """
     else:
         query = """
             INSERT INTO orders(order_number, order_date, purchaser, quantity,
@@ -776,18 +902,29 @@ def test_ConnectorStartSchemaSyncModeDBZ(pg_cursor, dbvendor):
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
     run_remote_query(dbvendor, f"DELETE FROM orders WHERE order_number > 10004")
+    drop_repslot_and_pub(dbvendor, name, "postgres")
     time.sleep(10)
 
 def test_ConnectorStartSchemaSyncModeFDW(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_fdw_schemasync"
     dbname = getDbname(dbvendor).lower()
+    schema = getSchema(dbvendor)
 
     if dbvendor == "mysql":
-        assert True
-        return
+        isfdw = run_pg_query_one(pg_cursor, f"SELECT EXISTS ( SELECT 1 FROM pg_available_extensions WHERE name = 'mysql_fdw' ) AS mysql_fdw_available")
+        if isfdw[0] == False:
+            print ("test_ConnectorStartSchemaSyncModeFDW skipped - mysql_fdw not available for install")
+            assert True
+            return
     elif dbvendor == "sqlserver":
         assert True
         return
+    elif dbvendor == "postgres":
+        isfdw = run_pg_query_one(pg_cursor, f"SELECT EXISTS ( SELECT 1 FROM pg_available_extensions WHERE name = 'postgres_fdw' ) AS postgres_fdw_available")
+        if isfdw[0] == False:
+            print ("test_ConnectorStartSchemaSyncModeFDW skipped - postgres_fdw not available for install")
+            assert True
+            return
     else:
         isfdw = run_pg_query_one(pg_cursor, f"SELECT EXISTS ( SELECT 1 FROM pg_available_extensions WHERE name = 'oracle_fdw' ) AS oracle_fdw_available")
         if isfdw[0] == False:
@@ -811,6 +948,8 @@ def test_ConnectorStartSchemaSyncModeFDW(pg_cursor, dbvendor):
         exttblcount = run_remote_query(dbvendor, f"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE()")
     elif dbvendor == "sqlserver":
         exttblcount = run_remote_query(dbvendor, f"SELECT COUNT(*) FROM information_schema.tables WHERE TABLE_CATALOG=DB_NAME() AND TABLE_SCHEMA=schema_name() AND TABLE_NAME NOT LIKE 'systranschemas%'")
+    elif dbvendor == "postgres":
+        exttblcount = run_remote_query(dbvendor, f"SELECT count(*) FROM information_schema.tables where table_schema='{schema}' and table_type = 'BASE TABLE'")
     else:
         exttblcount = run_remote_query(dbvendor, f"SELECT COUNT(*) FROM user_tables WHERE table_name NOT LIKE 'LOG_MINING%'")
     assert int(pgtblcount[0]) == int(exttblcount[0][0])
@@ -852,12 +991,19 @@ def test_ConnectorStartSchemaSyncModeFDW(pg_cursor, dbvendor):
 
     run_pg_query_one(pg_cursor, f"SELECT synchdb_resume_engine('{name}')")
 
+    time.sleep(10)
     # test a bit of cdc
-    query = """
-        INSERT INTO orders(order_number, order_date, purchaser, quantity,
-        product_id) VALUES (10005, TO_DATE('2025-12-12', 'YYYY-MM-DD'),
-        1002, 10000, 102);
-    """
+    if dbvendor == "postgres" or dbvendor == "mysql":
+        query = """
+			INSERT INTO orders(order_number, order_date, purchaser, quantity,
+			product_id) VALUES (10005, '2025-12-12', 1002, 10000, 102);
+		"""
+    else:
+        query = """
+            INSERT INTO orders(order_number, order_date, purchaser, quantity,
+            product_id) VALUES (10005, TO_DATE('2025-12-12', 'YYYY-MM-DD'),
+            1002, 10000, 102);
+        """
 
     run_remote_query(dbvendor, query)
     if dbvendor == "oracle" or dbvendor == "olr":
@@ -872,11 +1018,18 @@ def test_ConnectorStartSchemaSyncModeFDW(pg_cursor, dbvendor):
     drop_default_pg_schema(pg_cursor, dbvendor)
     run_remote_query(dbvendor, f"DELETE FROM orders WHERE order_number > 10004")
     update_guc_conf(pg_cursor, "synchdb.snapshot_engine", "'debezium'", True)
+    drop_repslot_and_pub(dbvendor, name, "postgres")
     time.sleep(10)
 
 def test_ConnectorStartAlwaysModeDBZ(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_dbz_always"
     dbname = getDbname(dbvendor).lower()
+    schema = getSchema(dbvendor)
+
+    if dbvendor == "postgres":
+        # postgres in debezium snapshot needs to create tables manually
+        run_pg_query_one(pg_cursor, f"CREATE SCHEMA IF NOT EXISTS {dbname}")
+        run_pg_query_one(pg_cursor, f"CREATE TABLE {dbname}.orders (order_number int primary key, order_date timestamp without time zone, purchaser int, quantity int , product_id int)")
 
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "always")
     assert result == 0
@@ -892,31 +1045,34 @@ def test_ConnectorStartAlwaysModeDBZ(pg_cursor, dbvendor):
         exttblcount = run_remote_query(dbvendor, f"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE()")
     elif dbvendor == "sqlserver":
         exttblcount = run_remote_query(dbvendor, f"SELECT COUNT(*) FROM information_schema.tables WHERE TABLE_CATALOG=DB_NAME() AND TABLE_SCHEMA=schema_name() AND TABLE_NAME NOT LIKE 'systranschemas%'")
+    elif dbvendor == "postgres":
+        exttblcount = run_remote_query(dbvendor, f"SELECT count(*) FROM information_schema.tables where table_schema='{schema}' and table_type = 'BASE TABLE'")
     else:
         exttblcount = run_remote_query(dbvendor, f"SELECT COUNT(*) FROM user_tables WHERE table_name NOT LIKE 'LOG_MINING%'")
     assert int(pgtblcount[0]) == int(exttblcount[0][0])
 
-    # check table name mappings
-    rows = run_pg_query(pg_cursor, f"SELECT ext_tbname, pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
-    assert len(rows) > 0
-    for row in rows:
-        id = row[0].split(".")
-        if len(id) == 3:
-            assert id[0].lower() + "." + id[2].lower() == row[1]
-        else:
+    if dbvendor != "postgres":
+        # check table name mappings
+        rows = run_pg_query(pg_cursor, f"SELECT ext_tbname, pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+        assert len(rows) > 0
+        for row in rows:
+            id = row[0].split(".")
+            if len(id) == 3:
+                assert id[0].lower() + "." + id[2].lower() == row[1]
+            else:
+                assert row[0].lower() == row[1]
+
+        # check attname mappings
+        rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+        assert len(rows) > 0
+        for row in rows:
             assert row[0].lower() == row[1]
 
-    # check attname mappings
-    rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
-    assert len(rows) > 0
-    for row in rows:
-        assert row[0].lower() == row[1]
-
-    # check data type mappings
-    rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
-    assert len(rows) > 0
-    for row in rows:
-        assert verify_default_type_mappings(row[0], row[1], dbvendor) == True
+        # check data type mappings
+        rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+        assert len(rows) > 0
+        for row in rows:
+            assert verify_default_type_mappings(row[0], row[1], dbvendor) == True
 
     # check data consistency of orders table
     pgrow = run_pg_query_one(pg_cursor, f"SELECT count(*) FROM {dbname}.orders;")
@@ -932,17 +1088,28 @@ def test_ConnectorStartAlwaysModeDBZ(pg_cursor, dbvendor):
 
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
+    drop_repslot_and_pub(dbvendor, name, "postgres")
 
 def test_ConnectorStartAlwaysModeFDW(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_dbz_always"
     dbname = getDbname(dbvendor).lower()
+    schema = getSchema(dbvendor)
 
     if dbvendor == "mysql":
-        assert True
-        return
+        isfdw = run_pg_query_one(pg_cursor, f"SELECT EXISTS ( SELECT 1 FROM pg_available_extensions WHERE name = 'mysql_fdw' ) AS mysql_fdw_available")
+        if isfdw[0] == False:
+            print ("test_InitialSnapshotFDW_asis skipped - mysql_fdw not available for install")
+            assert True
+            return
     elif dbvendor == "sqlserver":
         assert True
         return
+    elif dbvendor == "postgres":
+        isfdw = run_pg_query_one(pg_cursor, f"SELECT EXISTS ( SELECT 1 FROM pg_available_extensions WHERE name = 'postgres_fdw' ) AS postgres_fdw_available")
+        if isfdw[0] == False:
+            print ("test_InitialSnapshotFDW_asis skipped - postgres_fdw not available for install")
+            assert True
+            return
     else:
         isfdw = run_pg_query_one(pg_cursor, f"SELECT EXISTS ( SELECT 1 FROM pg_available_extensions WHERE name = 'oracle_fdw' ) AS oracle_fdw_available")
         if isfdw[0] == False:
@@ -966,6 +1133,8 @@ def test_ConnectorStartAlwaysModeFDW(pg_cursor, dbvendor):
         exttblcount = run_remote_query(dbvendor, f"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE()")
     elif dbvendor == "sqlserver":
         exttblcount = run_remote_query(dbvendor, f"SELECT COUNT(*) FROM information_schema.tables WHERE TABLE_CATALOG=DB_NAME() AND TABLE_SCHEMA=schema_name() AND TABLE_NAME NOT LIKE 'systranschemas%'")
+    elif dbvendor == "postgres":
+        exttblcount = run_remote_query(dbvendor, f"SELECT count(*) FROM information_schema.tables where table_schema='{schema}' and table_type = 'BASE TABLE'")
     else:
         exttblcount = run_remote_query(dbvendor, f"SELECT COUNT(*) FROM user_tables WHERE table_name NOT LIKE 'LOG_MINING%'")
     assert int(pgtblcount[0]) == int(exttblcount[0][0])
@@ -1007,10 +1176,17 @@ def test_ConnectorStartAlwaysModeFDW(pg_cursor, dbvendor):
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
     update_guc_conf(pg_cursor, "synchdb.snapshot_engine", "'debezium'", True)
+    drop_repslot_and_pub(dbvendor, name, "postgres")
 
 def test_ConnectorStartNodataModeDBZ(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_dbz_nodata"
     dbname = getDbname(dbvendor).lower()
+    schema = getSchema(dbvendor)
+
+    if dbvendor == "postgres":
+        # postgres in debezium snapshot needs to create tables manually
+        run_pg_query_one(pg_cursor, f"CREATE SCHEMA IF NOT EXISTS {dbname}")
+        run_pg_query_one(pg_cursor, f"CREATE TABLE {dbname}.orders (order_number int primary key, order_date timestamp without time zone, purchaser int, quantity int , product_id int)")
 
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "no_data")
     assert result == 0
@@ -1026,31 +1202,34 @@ def test_ConnectorStartNodataModeDBZ(pg_cursor, dbvendor):
         exttblcount = run_remote_query(dbvendor, f"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE()")
     elif dbvendor == "sqlserver":
         exttblcount = run_remote_query(dbvendor, f"SELECT COUNT(*) FROM information_schema.tables WHERE TABLE_CATALOG=DB_NAME() AND TABLE_SCHEMA=schema_name() AND TABLE_NAME NOT LIKE 'systranschemas%'")
+    elif dbvendor == "postgres":
+        exttblcount = run_remote_query(dbvendor, f"SELECT count(*) FROM information_schema.tables where table_schema='{schema}' and table_type = 'BASE TABLE'")
     else:
         exttblcount = run_remote_query(dbvendor, f"SELECT COUNT(*) FROM user_tables WHERE table_name NOT LIKE 'LOG_MINING%'")
     assert int(pgtblcount[0]) == int(exttblcount[0][0])
 
-    # check table name mappings
-    rows = run_pg_query(pg_cursor, f"SELECT ext_tbname, pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
-    assert len(rows) > 0
-    for row in rows:
-        id = row[0].split(".")
-        if len(id) == 3:
-            assert id[0].lower() + "." + id[2].lower() == row[1]
-        else:
+    if dbvendor != "postgres":
+        # check table name mappings
+        rows = run_pg_query(pg_cursor, f"SELECT ext_tbname, pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+        assert len(rows) > 0
+        for row in rows:
+            id = row[0].split(".")
+            if len(id) == 3:
+                assert id[0].lower() + "." + id[2].lower() == row[1]
+            else:
+                assert row[0].lower() == row[1]
+
+        # check attname mappings
+        rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+        assert len(rows) > 0
+        for row in rows:
             assert row[0].lower() == row[1]
 
-    # check attname mappings
-    rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
-    assert len(rows) > 0
-    for row in rows:
-        assert row[0].lower() == row[1]
-
-    # check data type mappings
-    rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
-    assert len(rows) > 0
-    for row in rows:
-        assert verify_default_type_mappings(row[0], row[1], dbvendor) == True
+        # check data type mappings
+        rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+        assert len(rows) > 0
+        for row in rows:
+            assert verify_default_type_mappings(row[0], row[1], dbvendor) == True
 
     # check data consistency of orders table
     pgrow = run_pg_query_one(pg_cursor, f"SELECT count(*) FROM {dbname}.orders;")
@@ -1066,17 +1245,28 @@ def test_ConnectorStartNodataModeDBZ(pg_cursor, dbvendor):
 
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
+    drop_repslot_and_pub(dbvendor, name, "postgres")
 
 def test_ConnectorStartNodataModeFDW(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_dbz_nodata"
     dbname = getDbname(dbvendor).lower()
+    schema = getSchema(dbvendor)
 
     if dbvendor == "mysql":
-        assert True
-        return
+        isfdw = run_pg_query_one(pg_cursor, f"SELECT EXISTS ( SELECT 1 FROM pg_available_extensions WHERE name = 'mysql_fdw' ) AS mysql_fdw_available")
+        if isfdw[0] == False:
+            print ("test_ConnectorStartNodataModeFDW skipped - mysql_fdw not available for install")
+            assert True
+            return
     elif dbvendor == "sqlserver":
         assert True
         return
+    elif dbvendor == "postgres":
+        isfdw = run_pg_query_one(pg_cursor, f"SELECT EXISTS ( SELECT 1 FROM pg_available_extensions WHERE name = 'postgres_fdw' ) AS postgres_fdw_available")
+        if isfdw[0] == False:
+            print ("test_ConnectorStartNodataModeFDW skipped - postgres_fdw not available for install")
+            assert True
+            return
     else:
         isfdw = run_pg_query_one(pg_cursor, f"SELECT EXISTS ( SELECT 1 FROM pg_available_extensions WHERE name = 'oracle_fdw' ) AS oracle_fdw_available")
         if isfdw[0] == False:
@@ -1100,6 +1290,8 @@ def test_ConnectorStartNodataModeFDW(pg_cursor, dbvendor):
         exttblcount = run_remote_query(dbvendor, f"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE()")
     elif dbvendor == "sqlserver":
         exttblcount = run_remote_query(dbvendor, f"SELECT COUNT(*) FROM information_schema.tables WHERE TABLE_CATALOG=DB_NAME() AND TABLE_SCHEMA=schema_name() AND TABLE_NAME NOT LIKE 'systranschemas%'")
+    elif dbvendor == "postgres":
+        exttblcount = run_remote_query(dbvendor, f"SELECT count(*) FROM information_schema.tables where table_schema='{schema}' and table_type = 'BASE TABLE'")
     else:
         exttblcount = run_remote_query(dbvendor, f"SELECT COUNT(*) FROM user_tables WHERE table_name NOT LIKE 'LOG_MINING%'")
     assert int(pgtblcount[0]) == int(exttblcount[0][0])
@@ -1141,10 +1333,16 @@ def test_ConnectorStartNodataModeFDW(pg_cursor, dbvendor):
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
     update_guc_conf(pg_cursor, "synchdb.snapshot_engine", "'debezium'", True)
+    drop_repslot_and_pub(dbvendor, name, "postgres")
 
 def test_ConnectorRestart(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor)
     dbname = getDbname(dbvendor).lower()
+
+    if dbvendor == "postgres":
+        # postgres in debezium snapshot needs to create tables manually
+        run_pg_query_one(pg_cursor, f"CREATE SCHEMA IF NOT EXISTS {dbname}")
+        run_pg_query_one(pg_cursor, f"CREATE TABLE {dbname}.orders (order_number int primary key, order_date timestamp without time zone, purchaser int, quantity int , product_id int)")
 
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "no_data")
     assert result == 0
@@ -1185,10 +1383,16 @@ def test_ConnectorRestart(pg_cursor, dbvendor):
 
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
+    drop_repslot_and_pub(dbvendor, name, "postgres")
 
 def test_ConnectorStop(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor)
     dbname = getDbname(dbvendor).lower()
+    
+    if dbvendor == "postgres":
+        # postgres in debezium snapshot needs to create tables manually
+        run_pg_query_one(pg_cursor, f"CREATE SCHEMA IF NOT EXISTS {dbname}")
+        run_pg_query_one(pg_cursor, f"CREATE TABLE {dbname}.orders (order_number int primary key, order_date timestamp without time zone, purchaser int, quantity int , product_id int)")
 
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "no_data")
     assert result == 0
@@ -1210,6 +1414,7 @@ def test_ConnectorStop(pg_cursor, dbvendor):
 
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
+    drop_repslot_and_pub(dbvendor, name, "postgres")
 
 def test_ConnectorDelete(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor)
