@@ -10,6 +10,37 @@
   to = "/index.html"
   status = 200
 
+[[redirects]]
+  from = "/architecture/*"
+  to = "/1.3/architecture/:splat"
+  status = 301
+
+[[redirects]]
+  from = "/getting-started/*"
+  to = "/1.3/getting-started/:splat"
+  status = 301
+
+[[redirects]]
+  from = "/monitoring/*"
+  to = "/1.3/monitoring/:splat"
+  status = 301
+
+[[redirects]]
+  from = "/tutorial/*"
+  to = "/1.3/tutorial/:splat"
+  status = 301
+
+[[redirects]]
+  from = "/user-guide/*"
+  to = "/1.3/user-guide/:splat"
+  status = 301
+
+[[redirects]]
+  from = "/changelog/*"
+  to = "/1.3/changelog/:splat"
+  status = 301
+
+
 [context.production.environment]
   MKDOCS_ENV = "production"
 
