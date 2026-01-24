@@ -1176,7 +1176,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 							colval->typname = pstrdup(entry->typname);
 						}
 						else
-							elog(ERROR, "cannot find data type for column %s. None-existent column?", colval->name);
+							elog(ERROR, "cannot find data type for column %s. Non-existent column?", colval->name);
 
 						/* jsonpos hash must be looked up using lower case names - todo */
 						colname_lower = pstrdup(colval->remoteColumnName);
@@ -1369,7 +1369,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 							colval->typname = pstrdup(entry->typname);
 						}
 						else
-							elog(ERROR, "cannot find data type for column %s. None-existent column?", colval->name);
+							elog(ERROR, "cannot find data type for column %s. Non-existent column?", colval->name);
 
 						/* jsonpos hash must be looked up using lower case names - todo */
 						colname_lower = pstrdup(colval->remoteColumnName);
@@ -1596,7 +1596,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 								colval->typname = pstrdup(entry->typname);
 							}
 							else
-								elog(ERROR, "cannot find data type for column %s. None-existent column?", colval->name);
+								elog(ERROR, "cannot find data type for column %s. Non-existent column?", colval->name);
 
 							/* jsonpos hash must be looked up using lower case names - todo */
 							colname_lower = pstrdup(colval->remoteColumnName);
