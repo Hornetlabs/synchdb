@@ -1791,7 +1791,7 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 							colval->typname = pstrdup(entry->typname);
 						}
 						else
-							elog(ERROR, "cannot find data type for column %s. None-existent column?", colval->name);
+							elog(ERROR, "cannot find data type for column %s. Non-existent column?", colval->name);
 
 						colname_lower = pstrdup(colval->remoteColumnName);
 						fc_normalize_name(LCS_NORMALIZE_LOWERCASE, colname_lower, strlen(colname_lower));
@@ -1961,7 +1961,7 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 								colval->typname = pstrdup(entry->typname);
 							}
 							else
-								elog(ERROR, "cannot find data type for column %s. None-existent column?", colval->name);
+								elog(ERROR, "cannot find data type for column %s. Non-existent column?", colval->name);
 
 							colname_lower = pstrdup(colval->remoteColumnName);
 							fc_normalize_name(LCS_NORMALIZE_LOWERCASE, colname_lower, strlen(colname_lower));
@@ -2125,7 +2125,7 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 							colval->typname = pstrdup(entry->typname);
 						}
 						else
-							elog(ERROR, "cannot find data type for column %s. None-existent column?", colval->name);
+							elog(ERROR, "cannot find data type for column %s. Non-existent column?", colval->name);
 
 						colname_lower = pstrdup(colval->remoteColumnName);
 						fc_normalize_name(LCS_NORMALIZE_LOWERCASE, colname_lower, strlen(colname_lower));

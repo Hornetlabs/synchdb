@@ -277,7 +277,7 @@ DatatypeHashEntry postgres_defaultTypeMappings[] =
 	{{"cidr", false}, "cidr", 0},
 	{{"circle", false}, "circle", 0},
 	{{"date", false}, "date", 0},
-	{{"decimal", false}, "dedcimal", -1},
+	{{"decimal", false}, "decimal", -1},
 	{{"double precision", false}, "double precision", 0},
 	{{"float", false}, "float", 0},
 	{{"float4", false}, "float4", 0},
@@ -503,7 +503,7 @@ derive_decimal_string_from_byte(const unsigned char *bytes, int len)
 	unsigned char *mag;
 	int offset;
 	int maglen;
-	char digits[128];     /* enough for DECIMAL(38) and more */
+	char *digits;
 	int nd;
 	int i;                /* declare once and reuse */
 	int outlen;
@@ -540,9 +540,16 @@ derive_decimal_string_from_byte(const unsigned char *bytes, int len)
 	if (maglen == 0)
 	{
 		out = pstrdup("0");
+		pfree(mag - offset);
 		return out;
 	}
 
+	/*
+	 * Allocate enough space for digits.
+	 * 1 byte is at most 3 digits (255), closer to 2.41 digits (log10(256)).
+	 * len * 3 is a safe upper bound.
+	 */
+	digits = (char *) palloc(len * 3 + 1);
 	nd = 0;
 
 	/* working copy */
@@ -583,6 +590,9 @@ derive_decimal_string_from_byte(const unsigned char *bytes, int len)
 		*p++ = digits[i];
 
 	*p = '\0';  /* fixed misleading indentation */
+
+	pfree(digits);
+	pfree(mag - offset);
 
 	return out;
 }
@@ -1021,9 +1031,9 @@ init_sqlserver(void)
 }
 
 /*
- * init_sqlserver
+ * init_postgres
  *
- * initialize data type hash table for sqlserver database
+ * initialize data type hash table for postgres database
  */
 static void
 init_postgres(void)
@@ -1943,6 +1953,9 @@ handle_base64_to_numeric_with_scale(const char * in, int scale)
 	}
 	else
 		snprintf(buffer, sizeof(buffer), "%s", value);
+
+	pfree(value);
+
 	if (scale > 0)
 	{
 		if (strlen(buffer) > scale)
