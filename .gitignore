@@ -1,6 +1,9 @@
-dbz-engine/target/
+# Generated binaries
 *.o
 *.so
+*.bc
+
+dbz-engine/target/
 testenv/olr/oradata/
 testenv/olr/checkpoint/
 testenv/olr/olrswap/
