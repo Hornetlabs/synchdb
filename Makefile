@@ -182,3 +182,11 @@ oraclecheck-benchmark:
 olrcheck-benchmark:
 	$(MAKE) dbcheck-tpcc DB=olr
 
+.PHONY: clean_bc
+clean_bc:
+	rm -rf $(patsubst %.o,%.bc, $(OBJS))
+
+clean: clean_bc clean_dbz
+ifeq ($(WITH_OLR), 1)
+clean: clean_oracle_parser
+endif
