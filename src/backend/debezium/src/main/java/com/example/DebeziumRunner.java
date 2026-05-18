@@ -1300,6 +1300,25 @@ public class DebeziumRunner {
 	{
 		checkMemoryStatus();
 	}
+
+	public void changeLogLevel(int level)
+	{
+      switch (level)
+      {
+          case LOG_LEVEL_ALL:   logger.setLevel(Level.ALL);   break;
+          case LOG_LEVEL_DEBUG: logger.setLevel(Level.DEBUG); break;
+          case LOG_LEVEL_INFO:  logger.setLevel(Level.INFO);  break;
+          case LOG_LEVEL_ERROR: logger.setLevel(Level.ERROR); break;
+          case LOG_LEVEL_FATAL: logger.setLevel(Level.FATAL); break;
+          case LOG_LEVEL_OFF:   logger.setLevel(Level.OFF);   break;
+          case LOG_LEVEL_TRACE: logger.setLevel(Level.TRACE); break;
+          default:
+          case LOG_LEVEL_UNDEF:
+          case LOG_LEVEL_WARN:  logger.setLevel(Level.WARN);  break;
+      }
+      logger.warn("DBZ log level changed to " + logger.getLevel());
+	}
+
 	public static void main(String[] args)
 	{
 		/* testing code can be put here */

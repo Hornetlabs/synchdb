@@ -68,7 +68,7 @@
  */
 
 #define SYNCHDB_METADATA_DIR "pg_synchdb"
-#define DBZ_ENGINE_JAR_FILE "dbz-engine-1.0.0.jar"
+#define DBZ_ENGINE_JAR_FILE "dbz-engine-1.1.0.jar"
 #define ORACLE_RAW_PARSER_LIB "libsynchdb_oracle_parser.so"
 #define MAX_PATH_LENGTH 1024
 #define MAX_JAVA_OPTION_LENGTH 256
@@ -119,8 +119,9 @@ typedef enum _connectorState
 	STATE_OFFSET_UPDATE,/* in this state when user requests offset update */
 	STATE_RESTARTING,	/* connector is restarting with new snapshot mode */
 	STATE_MEMDUMP,		/* connector is dumping jvm heap memory info */
-	STATE_SCHEMA_SYNC_DONE, /* connect has completed schema sync as requested */
-	STATE_RELOAD_OBJMAP, /* connect is reloading object mapping */
+	STATE_SCHEMA_SYNC_DONE, /* connector has completed schema sync as requested */
+	STATE_RELOAD_OBJMAP, /* connector is reloading object mapping */
+	STATE_DBZ_LOGLEVEL_UPDATE, /* connector is updating debezium log4j log level */
 } ConnectorState;
 
 /**

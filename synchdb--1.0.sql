@@ -43,6 +43,10 @@ CREATE OR REPLACE FUNCTION synchdb_log_jvm_meminfo(name) RETURNS int
 AS '$libdir/synchdb'
 LANGUAGE C IMMUTABLE STRICT;
 
+CREATE OR REPLACE FUNCTION synchdb_set_dbz_loglevel(name, text) RETURNS int
+AS '$libdir/synchdb'
+LANGUAGE C IMMUTABLE STRICT;
+
 CREATE OR REPLACE FUNCTION synchdb_get_stats() RETURNS SETOF record
 AS '$libdir/synchdb'
 LANGUAGE C IMMUTABLE STRICT;

@@ -86,6 +86,7 @@ PG_FUNCTION_INFO_V1(synchdb_add_infinispan);
 PG_FUNCTION_INFO_V1(synchdb_del_infinispan);
 PG_FUNCTION_INFO_V1(synchdb_translate_datatype);
 PG_FUNCTION_INFO_V1(synchdb_set_snapstats);
+PG_FUNCTION_INFO_V1(synchdb_set_dbz_loglevel);
 
 /* Global variables */
 SynchdbSharedState *sdb_state = NULL; /* Pointer to shared-memory state. */
@@ -1244,6 +1245,38 @@ dbz_engine_memory_dump(void)
 	(*env)->CallVoidMethod(env, obj, jvmMemDump);
 }
 
+/**
+ * dbz_engine_set_loglevel - Set Debezium log level
+ *
+ * This function set Debezium runner's log level during run time
+ */
+static int
+dbz_engine_set_loglevel(int level)
+{
+	jmethodID changeLogLevel;
+
+	if (!jvm)
+	{
+		elog(WARNING, "jvm not initialized");
+		return -1;
+	}
+	if (!env)
+	{
+		elog(WARNING, "jvm env not initialized");
+		return -1;
+	}
+
+	changeLogLevel = (*env)->GetMethodID(env, cls, "changeLogLevel", "(I)V");
+	if (changeLogLevel == NULL)
+	{
+		elog(WARNING, "Failed to find changeLogLevel method");
+		return -1;
+	}
+
+	(*env)->CallVoidMethod(env, obj, changeLogLevel, level);
+	return 0;
+}
+
 /*
  * synchdb_state_tupdesc - Create a TupleDesc for SynchDB state information
  *
@@ -1476,6 +1509,8 @@ connectorStateAsString(ConnectorState state)
 		return "schema sync";
 	case STATE_RELOAD_OBJMAP:
 		return "reloading objmap";
+	case STATE_DBZ_LOGLEVEL_UPDATE:
+		return "updating dbz log level";
 	}
 	return "UNKNOWN";
 }
@@ -1841,6 +1876,16 @@ processRequestInterrupt(ConnectionInfo *connInfo, ConnectorType type, int connec
 		elog(LOG, "Reloading objmap for %s connector", connInfo->name);
 		set_shm_connector_state(connectorId, STATE_RELOAD_OBJMAP);
 		fc_load_objmap(connInfo->name, type);
+		set_shm_connector_state(connectorId, oldstate);
+	}
+	else if (reqcopy->reqstate == STATE_DBZ_LOGLEVEL_UPDATE)
+	{
+		ConnectorState oldstate = get_shm_connector_state_enum(connectorId);
+		int level = atoi(reqcopy->reqdata);
+
+		elog(LOG, "Updating log level for %s connector to %d", connInfo->name, level);
+		set_shm_connector_state(connectorId, STATE_DBZ_LOGLEVEL_UPDATE);
+		dbz_engine_set_loglevel(level);
 		set_shm_connector_state(connectorId, oldstate);
 	}
 	else
@@ -6557,4 +6602,82 @@ synchdb_set_snapstats(PG_FUNCTION_ARGS)
 	set_shm_connector_snapshot_statistics(connectorId, &mysnapstats);
 
 	PG_RETURN_VOID();
+}
+
+/*
+* synchdb_set_dbz_loglevel
+*
+* This function dynamically changes the Debezium log4j log level at runtime
+* for the specified connector without requiring a restart.
+*/
+Datum
+synchdb_set_dbz_loglevel(PG_FUNCTION_ARGS)
+{
+	int connectorId = -1;
+	pid_t pid;
+	SynchdbRequest *req;
+	int level;
+	text *level_text;
+	char *level_str;
+
+	Name name = PG_GETARG_NAME(0);
+	level_text = PG_GETARG_TEXT_PP(1);
+	level_str = text_to_cstring(level_text);
+
+	/* Convert level string to integer */
+	if (pg_strcasecmp(level_str, "all") == 0)
+		level = LOG_LEVEL_ALL;
+	else if (pg_strcasecmp(level_str, "debug") == 0)
+		level = LOG_LEVEL_DEBUG;
+	else if (pg_strcasecmp(level_str, "info") == 0)
+		level = LOG_LEVEL_INFO;
+	else if (pg_strcasecmp(level_str, "warn") == 0)
+		level = LOG_LEVEL_WARN;
+	else if (pg_strcasecmp(level_str, "error") == 0)
+		level = LOG_LEVEL_ERROR;
+	else if (pg_strcasecmp(level_str, "fatal") == 0)
+		level = LOG_LEVEL_FATAL;
+	else if (pg_strcasecmp(level_str, "off") == 0)
+		level = LOG_LEVEL_OFF;
+	else if (pg_strcasecmp(level_str, "trace") == 0)
+		level = LOG_LEVEL_TRACE;
+	else
+		ereport(ERROR,
+				(errmsg("invalid log level \"%s\"", level_str),
+				errhint("Valid levels: all, trace, debug, info, warn, error, fatal, off")));
+
+	synchdb_init_shmem();
+	if (!sdb_state)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				errmsg("failed to init or attach to synchdb shared memory")));
+
+	connectorId = get_shm_connector_id_by_name(NameStr(*name), get_database_name(MyDatabaseId));
+	if (connectorId < 0)
+		ereport(ERROR,
+				(errmsg("dbz connector (%s) does not have connector ID assigned",
+						NameStr(*name)),
+				errhint("use synchdb_start_engine_bgw() to assign one first")));
+
+	pid = get_shm_connector_pid(connectorId);
+	if (pid == InvalidPid)
+		ereport(ERROR,
+				(errmsg("dbz connector (%s) is not running", NameStr(*name)),
+				errhint("use synchdb_start_engine_bgw() to start a worker first")));
+
+	req = &(sdb_state->connectors[connectorId].req);
+	if (req->reqstate != STATE_UNDEF)
+		ereport(ERROR,
+				(errmsg("an active request is currently active for connector %s",
+						NameStr(*name)),
+				errhint("wait for it to finish and try again later")));
+
+	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
+	req->reqstate = STATE_DBZ_LOGLEVEL_UPDATE;
+	snprintf(req->reqdata, SYNCHDB_ERRMSG_SIZE, "%d", level);
+	LWLockRelease(&sdb_state->lock);
+
+	elog(WARNING, "sent loglevel update request to dbz connector (%s): %s",
+		NameStr(*name), level_str);
+	PG_RETURN_INT32(0);
 }
