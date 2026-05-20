@@ -3,7 +3,7 @@ weight: 40
 ---
 # SynchDB Configuration
 
-SynchDB supports the following GUC variables in postgresql.conf. These are common parameters that apply the all connectors managed by SynchDB:
+SynchDB supports the following GUC variables in postgresql.conf. These are common parameters that apply to all connectors managed by SynchDB:
 
 | GUC Variable| Type | Default Value | Description |
 |-|-|-|-|
@@ -14,7 +14,7 @@ SynchDB supports the following GUC variables in postgresql.conf. These are commo
 | synchdb.dbz_queue_size | integer | 8192 | The maximum size (measured in number of change events) of Debezium embedded engine's change event queue. It should be set at least twice of `synchdb.dbz_batch_size` |
 | synchdb.dbz_connect_timeout_ms | integer | 30000 | The timeout value in milliseconds for Debezium embedded engine to established an initial connection to a remote database |
 | synchdb.dbz_query_timeout_ms | integer | 600000 | The timeout value in milliseconds for Debezium embedded engine to execute a query on a remote database |
-| synchdb.dbz_skipped_oeprations | string | "t" | A comma-separated list of operations Debezium shall skip when processing change events. "c" is for inserts, "u" is for updates, "d" is for deletes, "t" is for truncates |
+| synchdb.dbz_skipped_operations | string | "t" | A comma-separated list of operations Debezium shall skip when processing change events. "c" is for inserts, "u" is for updates, "d" is for deletes, "t" is for truncates |
 | synchdb.jvm_max_heap_size | integer | 1024 | The maximum heap size in MB to be allocated to Java Virtual Machine (JVM) when starting a connector. |
 | synchdb.dbz_snapshot_thread_num | integer | 2 | The number of threads Debezium embedded connector should spawn during initial snapshot. Please note that according to Debezium, multi-threaded snapshot is an `incubating feature` |
 | synchdb.dbz_snapshot_fetch_size | integer | 0 | The number of rows Debezium embedded connector should fetch at a time during initial snapshot. Set it to 0 to let the engine choose automatically |
@@ -30,7 +30,7 @@ SynchDB supports the following GUC variables in postgresql.conf. These are commo
 | synchdb.jvm_max_direct_buffer_size | integer | 1024 | The maximum direct buffer size in MB to be allocated to hold JSON change events |
 | synchdb.dbz_logminer_stream_mode | enum | "uncommitted" | The streaming mode for Debezium based Oracle connector. The default is uncommitted, which means all the changes streamed from Oracle via Debezium is uncommitted. This indicates Debezium has to do some work to ensure the integrity of transactions and all associated changes. Setting to "committed" shifts this work on Oralce side |
 | synchdb.olr_connect_timeout_ms | integer | 5000 | (affects OLR connector only) the connect timeout in milliseconds when connecting to openlog replicator service |
-| synchdb.olr_read_timeout_m | integer | 5000 | (affects OLR connector only) the read timeout in milliseconds when reading from a socket |
+| synchdb.olr_read_timeout_ms | integer | 5000 | (affects OLR connector only) the read timeout in milliseconds when reading from a socket |
 | synchdb.olr_snapshot_engine | enum | "debezium" | the underlining engine to complete the initial snapshot process. Could be "debezium" or "fdw". If "fdw" is selected, you need to ensure the corresponding FDW is installed prior. For example, for Oracle connector, ensure "oracle_fdw" is preinstalled. |
 | synchdb.cdc_start_delay_ms | integer | 0 | a delay waited after initial snapshot completes and before CDC streaming begins. |
 | synchdb.fdw_migrate_with_subtx | boolean | true | option to use sub transactions to migrate a table during FDW based snapshot |

@@ -28,7 +28,7 @@ SELECT synchdb_add_objmap('mysqlconn','table','inventory.customers','schema1.peo
 * `source object` represents the column in fully-qualified name in remote database
 * `destination object` represents the column name in PostgreSQL. No need to format it as fully-qualified column name.
 
-This example maps `inventory.customers.emaiL` column in the source table to `contact` in PostgreSQL.
+This example maps `inventory.customers.email` column in the source table to `contact` in PostgreSQL.
 ```sql
 SELECT synchdb_add_objmap('mysqlconn','column','inventory.customers.email','contact');
 ```

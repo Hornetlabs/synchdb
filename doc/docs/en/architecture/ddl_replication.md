@@ -85,7 +85,7 @@ Supported modifications:
 
 Other properties that can be specified during ALTER TABLE ALTER COLUMN  are not supported at the moment.
 
-Please note that SynchDB only supports basic data type change on an existing column. For example, `INT` → `BIGINT` or `VARCHAR` → `TEXT`. Complex data type changes such as  `TEXT` → `INT` or `INT` → `TIMESTAMP` are not currently supported. This is because PostgreSQL requires the user to additioanlly supply a type casting function to perform the type casting as the result of complex data type change. SynchDB currently has to knowledge what type casting functions to use for specific type conversion. In the future, We may allow user to supply his or her own casting functions to use for specific type conversions via the rule file, but for now, it is not supported.
+Please note that SynchDB only supports basic data type change on an existing column. For example, `INT` → `BIGINT` or `VARCHAR` → `TEXT`. Complex data type changes such as  `TEXT` → `INT` or `INT` → `TIMESTAMP` are not currently supported. This is because PostgreSQL requires the user to additionally supply a type casting function to perform the type casting as the result of complex data type change. SynchDB currently has limited knowledge what type casting functions to use for specific type conversion. In the future, We may allow user to supply his or her own casting functions to use for specific type conversions via the rule file, but for now, it is not supported.
 
 ## **Database-Specific Behavior**
 

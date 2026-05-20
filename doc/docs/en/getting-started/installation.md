@@ -206,7 +206,7 @@ JDK_LIB_PATH=${JDK_HOME_PATH}/lib
 echo $JDK_LIB_PATH
 echo $JDK_LIB_PATH/server
 
-sudo echo "$JDK_LIB_PATH" ｜ sudo tee -a /etc/ld.so.conf.d/x86_64-linux-gnu.conf
+sudo echo "$JDK_LIB_PATH" | sudo tee -a /etc/ld.so.conf.d/x86_64-linux-gnu.conf
 sudo echo "$JDK_LIB_PATH/server" | sudo tee -a /etc/ld.so.conf.d/x86_64-linux-gnu.conf
 ```
 Note, for mac with M1/M2 chips, the linker file is located in /etc/ld.so.conf.d/aarch64-linux-gnu.conf

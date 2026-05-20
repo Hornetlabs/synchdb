@@ -18,7 +18,7 @@ SELECT
 ## **Initial Snapshot**
 "Initial snapshot" (or table snapshot) in SynchDB means to copy table schema plus initial data for all designated tables. This is similar to the term "table sync" in PostgreSQL logical replication. When a connector is started using the default `initial` mode, it will automatically perform the initial snapshot before going to Change Data Capture (CDC) stage. This can be partially omitted with mode `no_data`. See [here](../../user-guide/start_stop_connector/) for all snapshot options.
 
-Once the initial snapshot is completed, the connector will not do it again upon subsequent restarts and will just resume with CDC since the last incomplete offset. This behavior is controled by the metadata files managed by Debezium engine. See [here](../../architecture/metadata_files/) for more about metadata files.
+Once the initial snapshot is completed, the connector will not do it again upon subsequent restarts and will just resume with CDC since the last incomplete offset. This behavior is controlled by the metadata files managed by Debezium engine. See [here](../../architecture/metadata_files/) for more about metadata files.
 
 PostgreSQL connector's initial snapshot is a little different. Debezium engine does not build the initial table schema like other connectors do. This is because PostgreSQL does not explicitly emits DDL WAL events. PostgreSQL's native logical replication also behaves the same. The user must pre-create the table schema at the destination before launching logical replication. So, when launching the Debezium based PostgreSQL connector for the first time, it assumes you have already created the designated table schemas and their initial data, and would enter CDC streaming mode immediately, without actually doing initial snapshot.
 
@@ -114,7 +114,7 @@ SELECT synchdb_start_engine_bgw('pgconn', 'no_data');
 
 Restarting the connector in `no_data` mode will not rebuild the schema again, and it will resume CDC since the last successful point.
 
-### **Always do Initial Snapahot + CDC**
+### **Always do Initial Snapshot + CDC**
 
 **with synchdb.olr_snapshot_engine = 'debezium':**
 
@@ -131,7 +131,7 @@ SELECT synchdb_start_engine_bgw('pgconn', 'always');
 
 However, it is possible to select partial tables to redo the initial snapshot by using the `snapshottable` option of the connector. Tables matching the criteria in `snapshottable` will redo the inital snapshot, if not, their initial snapshot will be skipped. If `snapshottable` is null or empty, by default, all the tables specified in `table` option of the connector will redo the initial snapshot under `always` mode.
 
-This example makes the connector only redo the initial snapshot of `inventory.customers` table. All other tables will have their snapshot skipped.
+This example makes the connector only redo the initial snapshot of `public.customers` table. All other tables will have their snapshot skipped.
 ```sql
 UPDATE synchdb_conninfo 
 SET data = jsonb_set(data, '{snapshottable}', '"public.customers"') 
@@ -338,16 +338,16 @@ Once the snapshot is complete, the connector will continue capturing subsequent 
 
 ### **Add More Tables to Replicate During Run Time.**
 
-The `mysqlconn` from previous section has already completed the initial snapshot and obtained the table schemas of the selected table. If we would like to add more tables to replicate from, we will need to notify the Debezium engine about the updated table section and perform the initial snapshot again. Here's how it is done:
+The `pgconn` from previous section has already completed the initial snapshot and obtained the table schemas of the selected table. If we would like to add more tables to replicate from, we will need to notify the Debezium engine about the updated table section and perform the initial snapshot again. Here's how it is done:
 
 1. Update the `synchdb_conninfo` table to include additional tables.
-2. In this example, we add the `inventory.customers` table to the sync list:
+2. In this example, we add the `public.customers` table to the sync list:
 ```sql
 UPDATE synchdb_conninfo 
 SET data = jsonb_set(data, '{table}', '"public.orders,public.customers"') 
 WHERE name = 'pgconn';
 ```
-3. Configure the snapshot table parameter to include only the new table `inventory.customers` to that SynchDB does not try to rebuild the 2 tables that have already finished the snapshot.
+3. Configure the snapshot table parameter to include only the new table `public.customers` to that SynchDB does not try to rebuild the 2 tables that have already finished the snapshot.
 ```sql
 UPDATE synchdb_conninfo 
 SET data = jsonb_set(data, '{snapshottable}', '"public.customers"') 
@@ -364,12 +364,12 @@ SELECT synchdb_start_engine_bgw('pgconn', 'always');
 
 Now, we can examine our tables again:
 ```sql
-postgres=# \dt inventory.*
+postgres=# \dt public.*
              List of tables
   Schema   |   Name    | Type  | Owner
 -----------+-----------+-------+--------
- inventory | customers | table | ubuntu
- inventory | orders    | table | ubuntu
- inventory | products  | table | ubuntu
+ public    | customers | table | ubuntu
+ public    | orders    | table | ubuntu
+ public    | products  | table | ubuntu
 
 ```

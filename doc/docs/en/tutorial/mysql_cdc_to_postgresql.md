@@ -16,7 +16,7 @@ SELECT synchdb_add_conninfo(
 ## **Initial Snapshot**
 "Initial snapshot" (or table snapshot) in SynchDB means to copy table schema plus initial data for all designated tables. This is similar to the term "table sync" in PostgreSQL logical replication. When a connector is started using the default `initial` mode, it will automatically perform the initial snapshot before going to Change Data Capture (CDC) stage. This can be omitted entirely with mode `never` or partially omitted with mode `no_data`. See [here](../../user-guide/start_stop_connector/) for all snapshot options.
 
-Once the initial snapshot is completed, the connector will not do it again upon subsequent restarts and will just resume with CDC since the last incomplete offset. This behavior is controled by the metadata files managed by Debezium engine. See [here](../../architecture/metadata_files/) for more about metadata files.
+Once the initial snapshot is completed, the connector will not do it again upon subsequent restarts and will just resume with CDC since the last incomplete offset. This behavior is controlled by the metadata files managed by Debezium engine. See [here](../../architecture/metadata_files/) for more about metadata files.
 
 ## **Different Connector Launch Modes**
 
@@ -122,7 +122,7 @@ SELECT synchdb_start_engine_bgw('mysqlconn', 'never');
 
 Restarting the connector in `never` mode will resume CDC since the last successful point.
 
-### **Always do Initial Snapahot + CDC**
+### **Always do Initial Snapshot + CDC**
 
 Start the connector using `always` mode will always capture the schemas of capture tables, always redo the initial snapshot and then go to CDC. This is similar to a reset button because everything will be rebuilt using this mode. Use it with caution especially when you have large number of tables being captured, which could take a long time to finish. After the rebuild, CDC resumes as normal.
 

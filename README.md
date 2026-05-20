@@ -28,12 +28,12 @@ SynchDB extension consists of these major components:
 
 ## Build Requirement
 The following software is required to build and run SynchDB. The versions listed are the versions tested during development. Older versions may still work.
+* Unix based operating system like Ubuntu 22.04 or MacOS
 * Java Development Kit 17 or later. Download [here](https://www.oracle.com/ca-en/java/technologies/downloads/)
 * Apache Maven 3.6.3 or later. Download [here](https://maven.apache.org/download.cgi)
 * PostgreSQL source or build environment. Git clone [here](https://github.com/postgres/postgres). Refer to this [wiki](https://wiki.postgresql.org/wiki/Compile_and_Install_from_source_code) to build PostgreSQL from source or this [page](https://www.postgresql.org/download/linux/) to install PostgreSQL via packages
+    * If PostgreSQL is installed via a package manager, the corresponding devel package needs to be installed as well.
 * Docker compose 2.28.1 (for testing). Refer to [here](https://docs.docker.com/compose/install/linux/)
-* Unix based operating system like Ubuntu 22.04 or MacOS
-
 **The following is required if Openlog Replicator Connector is enabled in build**
 
 * libprotobuf-c v1.5.2. Refer to [here](https://github.com/protobuf-c/protobuf-c.git) to build from source.
@@ -50,6 +50,9 @@ If you already have PostgreSQL installed, you can build and install Default Sync
 
 ``` BASH
 USE_PGXS=1 make PG_CONFIG=$(which pg_config)
+
+# Using Maven to build Debezium
+export PATH=${YOUR_MAVEN_PATH}/bin/:$PATH
 USE_PGXS=1 make build_dbz PG_CONFIG=$(which pg_config)
 
 sudo USE_PGXS=1 make PG_CONFIG=$(which pg_config) install
