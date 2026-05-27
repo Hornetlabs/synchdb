@@ -495,7 +495,17 @@ public class DebeziumRunner {
                     logger.warn("database is null - skip setting database.include.list property");
                 else
                 {
-                    props.setProperty("database.dbname", myParameters.database);
+                    /* srcdb may be in "CDB/PDB" format; split if a slash is present */
+                    int slashIdx = myParameters.database.indexOf('/');
+                    if(slashIdx > 0){
+                        String cdb = myParameters.database.substring(0, slashIdx);
+                        String pdb = myParameters.database.substring(slashIdx + 1);
+                        props.setProperty("database.dbname", cdb);
+                        props.setProperty("database.pdb.name", pdb);
+                        logger.info("Oracle CDB/PDB mode: dbname=" + cdb + " pdb.name=" + pdb);
+                    }else{
+                        props.setProperty("database.dbname", myParameters.database);
+                    }
                 }
 				/* limit to this Oracle user's schema for now so we do not replicate tables from other schemas */
 				props.setProperty("schema.include.list", myParameters.srcschema);
@@ -639,7 +649,17 @@ public class DebeziumRunner {
                     logger.warn("database is null - skip setting database.include.list property");
                 else
                 {
-                    props.setProperty("database.dbname", myParameters.database);
+                    /* srcdb may be in "CDB/PDB" format; split if a slash is present */
+                    int slashIdx = myParameters.database.indexOf('/');
+                    if(slashIdx > 0){
+                        String cdb = myParameters.database.substring(0, slashIdx);
+                        String pdb = myParameters.database.substring(slashIdx + 1);
+                        props.setProperty("database.dbname", cdb);
+                        props.setProperty("database.pdb.name", pdb);
+                        logger.info("Oracle CDB/PDB mode: dbname=" + cdb + " pdb.name=" + pdb);
+                    }else{
+                        props.setProperty("database.dbname", myParameters.database);
+                    }
                 }
                 /* limit to this Oracle user's schema for now so we do not replicate tables from other schemas */
                 props.setProperty("schema.include.list", myParameters.srcschema);
