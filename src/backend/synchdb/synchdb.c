@@ -1457,8 +1457,8 @@ prepare_bgw(BackgroundWorker *worker, const ConnectionInfo *connInfo, const char
 	snprintf(worker->bgw_type, BGW_MAXLEN, "synchdb engine: %s", connector);
 
 	/* append destination database to worker->bgw_name for clarity */
-	strcat(worker->bgw_name, " -> ");
-	strcat(worker->bgw_name, connInfo->dstdb);
+	strlcat(worker->bgw_name, " -> ", BGW_MAXLEN);
+	strlcat(worker->bgw_name, connInfo->dstdb, BGW_MAXLEN);
 
 	/* [ivorysql] check if we are running under ivorysql's oracle compatible mode */
 	val = GetConfigOption("ivorysql.compatible_mode", true, false);
@@ -3500,7 +3500,7 @@ olr_set_offset_from_raw(char * offsetdata)
 	}
 	if (c_idx_pos)
 	{
-		sscanf(c_scn_pos, "\"c_idx\":%llu", &c_idx);
+		sscanf(c_idx_pos, "\"c_idx\":%llu", &c_idx);
 	}
 	else
 	{
