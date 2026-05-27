@@ -435,10 +435,19 @@ synchdb_handle_insert(List * colval, Oid tableoid, ConnectorType type, int natts
 
 		if (synchdb_error_strategy == STRAT_SKIP_ON_ERROR)
 		{
-			ExecCloseIndices(resultRelInfo);
-			table_close(rel, AccessShareLock);
-			ExecResetTupleTable(estate->es_tupleTable, false);
-			FreeExecutorState(estate);
+			if(resultRelInfo)
+			{
+				ExecCloseIndices(resultRelInfo);
+			}
+			if(rel)
+			{
+				table_close(rel, AccessShareLock);
+			}
+			if(estate)
+			{
+				ExecResetTupleTable(estate->es_tupleTable, false);
+				FreeExecutorState(estate);
+			}
 			FlushErrorState();
 			return -1;
 		}
@@ -628,11 +637,20 @@ synchdb_handle_update(List * colvalbefore, List * colvalafter, Oid tableoid, Con
 
 		if (synchdb_error_strategy == STRAT_SKIP_ON_ERROR)
 		{
-			ExecCloseIndices(resultRelInfo);
+			if(resultRelInfo)
+			{
+				ExecCloseIndices(resultRelInfo);
+			}
 			EvalPlanQualEnd(&epqstate);
-			ExecResetTupleTable(estate->es_tupleTable, false);
-			FreeExecutorState(estate);
-			table_close(rel, AccessShareLock);
+			if(estate)
+			{
+				ExecResetTupleTable(estate->es_tupleTable, false);
+				FreeExecutorState(estate);
+			}
+			if(rel)
+			{
+				table_close(rel, AccessShareLock);
+			}
 			FlushErrorState();
 			return -1;
 		}
