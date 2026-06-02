@@ -242,6 +242,56 @@ INSERT INTO orders(order_number, order_date, purchaser, quantity, product_id) VA
 commit;
 exit;
 EOF
+
+	# setup FREEPDB1
+	docker exec -i oracle sqlplus sys/oracle@//localhost:1521/FREEPDB1 as sysdba <<'EOF'
+ALTER DATABASE ADD SUPPLEMENTAL LOG DATA;
+ALTER PROFILE DEFAULT LIMIT FAILED_LOGIN_ATTEMPTS UNLIMITED;
+CREATE USER DBZUSER IDENTIFIED BY your_password
+DEFAULT TABLESPACE USERS
+TEMPORARY TABLESPACE TEMP;
+GRANT CREATE SESSION          TO DBZUSER;
+GRANT SELECT ANY TABLE        TO DBZUSER;
+GRANT SELECT ANY TRANSACTION  TO DBZUSER;
+GRANT SELECT_CATALOG_ROLE     TO DBZUSER;
+GRANT EXECUTE_CATALOG_ROLE    TO DBZUSER;
+GRANT FLASHBACK ANY TABLE     TO DBZUSER;
+GRANT LOGMINING               TO DBZUSER;
+GRANT LOCK ANY TABLE          TO DBZUSER;
+GRANT SELECT ON V_$DATABASE          TO DBZUSER;
+GRANT SELECT ON V_$LOG               TO DBZUSER;
+GRANT SELECT ON V_$LOGFILE           TO DBZUSER;
+GRANT SELECT ON V_$ARCHIVED_LOG      TO DBZUSER;
+GRANT SELECT ON V_$ARCHIVE_DEST      TO DBZUSER;
+GRANT SELECT ON V_$TRANSACTION       TO DBZUSER;
+GRANT SELECT ON V_$INSTANCE          TO DBZUSER;
+GRANT SELECT ON V_$LOG_HISTORY       TO DBZUSER;
+GRANT SELECT ON V_$PARAMETER         TO DBZUSER;
+GRANT CREATE TABLE TO DBZUSER;
+ALTER USER DBZUSER QUOTA UNLIMITED ON USERS;
+exit;
+EOF
+	docker exec -i oracle sqlplus 'DBZUSER/your_password@//localhost:1521/FREEPDB1' <<EOF
+CREATE TABLE pdb_orders (
+order_number NUMBER PRIMARY KEY,
+order_date DATE,
+purchaser NUMBER,
+quantity NUMBER,
+product_id NUMBER);
+commit;
+ALTER TABLE pdb_orders ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS;
+exit;
+EOF
+
+	docker exec -i oracle sqlplus 'DBZUSER/your_password@//localhost:1521/FREEPDB1' <<EOF
+INSERT INTO pdb_orders(order_number, order_date, purchaser, quantity, product_id) VALUES (10001, TO_DATE('2024-01-01', 'YYYY-MM-DD'), 1003, 2, 107);
+INSERT INTO pdb_orders(order_number, order_date, purchaser, quantity, product_id) VALUES (10002, TO_DATE('2024-01-01', 'YYYY-MM-DD'), 1003, 2, 107);
+INSERT INTO pdb_orders(order_number, order_date, purchaser, quantity, product_id) VALUES (10003, TO_DATE('2024-01-01', 'YYYY-MM-DD'), 1003, 2, 107);
+INSERT INTO pdb_orders(order_number, order_date, purchaser, quantity, product_id) VALUES (10004, TO_DATE('2024-01-01', 'YYYY-MM-DD'), 1003, 2, 107);
+commit;
+exit;
+EOF
+
 	exit 0
 }
 
