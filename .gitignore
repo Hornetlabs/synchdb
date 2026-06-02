@@ -8,3 +8,6 @@ src/test/pytests/synchdbtests/__pycache__/
 src/test/pytests/synchdbtests/t/__pycache__/
 src/backend/debezium/target/
 synchdb_testdir/
+
+# When PG is configured with --enable-llvm, .bc files will be generated.
+*.bc
