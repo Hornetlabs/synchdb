@@ -1442,7 +1442,19 @@ ra_run_orafdw_initial_snapshot_spi(ConnectorType connType, ConnectionInfo * conn
 	if (IsTransactionOrTransactionBlock())
 		skiptx = true;
 
-	strlcpy(dstdb, conninfo->srcdb, SYNCHDB_CONNINFO_DB_NAME_SIZE);
+	/*
+	 * For Oracle CDB/PDB format ("CDB/PDB"), use only the PDB part for
+	 * schema naming and lookup so that it matches what Debezium CDC
+	 * reports as the database identifier in change events.
+	 */
+	{
+		const char *slash = strchr(conninfo->srcdb, '/');
+		if (slash)
+			strlcpy(dstdb, slash + 1, SYNCHDB_CONNINFO_DB_NAME_SIZE);
+		else
+			strlcpy(dstdb, conninfo->srcdb, SYNCHDB_CONNINFO_DB_NAME_SIZE);
+	}
+
 	fc_normalize_name(letter_casing_strategy, dstdb, strlen(dstdb));
 
 	PG_TRY();
@@ -1460,11 +1472,11 @@ ra_run_orafdw_initial_snapshot_spi(ConnectorType connType, ConnectionInfo * conn
 		values[2]  = DirectFunctionCall1(namein,   CStringGetDatum("ora_obj"));
 		values[3]  = DirectFunctionCall1(namein,   CStringGetDatum("ora_stage"));
 		values[4]  = DirectFunctionCall1(namein,   CStringGetDatum(dstdb));
-		values[5]  = CStringGetTextDatum(conninfo->srcdb);
+		values[5]  = CStringGetTextDatum(dstdb);
 
 		/* we srcschema is not available, we put srcdb -> in the case of MySQL */
 		if (strlen(conninfo->srcschema) == 0 || !strcmp(conninfo->srcschema, "null"))
-			values[6]  = DirectFunctionCall1(namein,   CStringGetDatum(conninfo->srcdb));
+			values[6]  = DirectFunctionCall1(namein,   CStringGetDatum(dstdb));
 		else
 			values[6]  = DirectFunctionCall1(namein,   CStringGetDatum(conninfo->srcschema));
 
