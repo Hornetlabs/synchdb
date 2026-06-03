@@ -1476,7 +1476,7 @@ ra_run_orafdw_initial_snapshot_spi(ConnectorType connType, ConnectionInfo * conn
 
 		/* we srcschema is not available, we put srcdb -> in the case of MySQL */
 		if (strlen(conninfo->srcschema) == 0 || !strcmp(conninfo->srcschema, "null"))
-			values[6]  = DirectFunctionCall1(namein,   CStringGetDatum(dstdb));
+			values[6]  = DirectFunctionCall1(namein,   CStringGetDatum(conninfo->srcdb));
 		else
 			values[6]  = DirectFunctionCall1(namein,   CStringGetDatum(conninfo->srcschema));
 
