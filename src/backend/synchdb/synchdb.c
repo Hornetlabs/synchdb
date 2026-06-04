@@ -751,6 +751,7 @@ dbz_engine_stop(void)
 	{
 		(*env)->ExceptionDescribe(env);
 		(*env)->ExceptionClear(env);
+		(*env)->DeleteLocalRef(env, exception);
 		elog(WARNING, "Exception occurred while stopping Debezium engine");
 		return -1;
 	}
@@ -997,29 +998,31 @@ static int
 dbz_engine_start(const ConnectionInfo *connInfo, ConnectorType connectorType, const char * snapshotMode)
 {
 	jmethodID mid, paramConstruct;
-	jstring jHostname, jUser, jPassword, jDatabase, jTable, jSnapshotTable, jName, jSnapshot, jdstdb, jsrcschema;
-	jthrowable exception;
-	jclass myParametersClass;
-	jobject myParametersObj;
+	jstring jHostname = NULL, jUser = NULL, jPassword = NULL, jDatabase = NULL, jTable = NULL;
+	jstring jSnapshotTable = NULL, jName = NULL, jSnapshot = NULL, jdstdb = NULL, jsrcschema = NULL;
+	jthrowable exception = NULL;
+	jclass myParametersClass = NULL;
+	jobject myParametersObj = NULL;
+	int ret = -1;
 
 	elog(LOG, "dbz_engine_start: Starting dbz engine %s:%d ", connInfo->hostname, connInfo->port);
 	if (!jvm)
 	{
 		elog(WARNING, "jvm not initialized");
-		return -1;
+		goto cleanup;
 	}
 
 	if (!env)
 	{
 		elog(WARNING, "jvm env not initialized");
-		return -1;
+		goto cleanup;
 	}
 
 	myParametersClass = (*env)->FindClass(env, "com/example/DebeziumRunner$MyParameters");
 	if (!myParametersClass)
 	{
 		elog(WARNING, "failed to find MyParameters class");
-		return -1;
+		goto cleanup;
 	}
 
 	paramConstruct = (*env)->GetMethodID(env, myParametersClass, "<init>",
@@ -1029,7 +1032,7 @@ dbz_engine_start(const ConnectionInfo *connInfo, ConnectorType connectorType, co
 	if (paramConstruct == NULL)
 	{
 		elog(WARNING, "failed to find myParameters Constructor");
-		return -1;
+		goto cleanup;
 	}
 
 	/* prepare required parameters */
@@ -1050,7 +1053,7 @@ dbz_engine_start(const ConnectionInfo *connInfo, ConnectorType connectorType, co
 	if (!myParametersObj)
 	{
 		elog(WARNING, "failed to create MyParameters object");
-		return -1;
+		goto cleanup;
 	}
 
 	/* set extra parameters */
@@ -1062,7 +1065,7 @@ dbz_engine_start(const ConnectionInfo *connInfo, ConnectorType connectorType, co
 	if (mid == NULL)
 	{
 		elog(WARNING, "Failed to find startEngine method");
-		return -1;
+		goto cleanup;
 	}
 
 	/* Call the Java method */
@@ -1074,6 +1077,7 @@ dbz_engine_start(const ConnectionInfo *connInfo, ConnectorType connectorType, co
 	{
 		(*env)->ExceptionDescribe(env);
 		(*env)->ExceptionClear(env);
+		(*env)->DeleteLocalRef(env, exception);
 		elog(WARNING, "Exception occurred while starting Debezium engine");
 		goto cleanup;
 	}
@@ -1092,6 +1096,8 @@ cleanup:
 		(*env)->DeleteLocalRef(env, jDatabase);
 	if (jTable)
 		(*env)->DeleteLocalRef(env, jTable);
+	if (jSnapshotTable)
+		(*env)->DeleteLocalRef(env, jSnapshotTable);
 	if (jName)
 		(*env)->DeleteLocalRef(env, jName);
 	if (jSnapshot)
@@ -1100,6 +1106,10 @@ cleanup:
 		(*env)->DeleteLocalRef(env, jdstdb);
 	if (jsrcschema)
 		(*env)->DeleteLocalRef(env, jsrcschema);
+	if (myParametersObj)
+		(*env)->DeleteLocalRef(env, myParametersObj);
+	if (myParametersClass)
+		(*env)->DeleteLocalRef(env, myParametersClass);
 
 	return exception ? -1 : 0;
 }
@@ -1187,6 +1197,7 @@ dbz_engine_get_offset(int connectorId)
 	{
 		(*env)->ExceptionDescribe(env);
 		(*env)->ExceptionClear(env);
+		(*env)->DeleteLocalRef(env, exception);
 		elog(WARNING, "Exception occurred while getting connector offset");
 		(*env)->DeleteLocalRef(env, jdb);
 		(*env)->DeleteLocalRef(env, jName);
@@ -1563,19 +1574,22 @@ static int
 dbz_engine_set_offset(ConnectorType connectorType, char *db, char *offset, char *file)
 {
 	jmethodID setoffsets;
-	jstring joffsetstr, jdb, jfile;
-	jthrowable exception;
+	jstring joffsetstr = NULL, jdb = NULL, jfile = NULL;
+	jthrowable exception = NULL;
+	int ret = 0;
 
 	if (!jvm)
 	{
 		elog(WARNING, "jvm not initialized");
-		return -1;
+		ret = -1;
+		goto cleanup;
 	}
 
 	if (!env)
 	{
 		elog(WARNING, "jvm env not initialized");
-		return -1;
+		ret = -1;
+		goto cleanup;
 	}
 
 	/* Find the setConnectorOffset method */
@@ -1584,7 +1598,8 @@ dbz_engine_set_offset(ConnectorType connectorType, char *db, char *offset, char 
 	if (setoffsets == NULL)
 	{
 		elog(WARNING, "Failed to find setConnectorOffset method");
-		return -1;
+		ret = -1;
+		goto cleanup;
 	}
 
 	/* Create Java strings from C strings */
@@ -1601,17 +1616,25 @@ dbz_engine_set_offset(ConnectorType connectorType, char *db, char *offset, char 
 	{
 		(*env)->ExceptionDescribe(env);
 		(*env)->ExceptionClear(env);
+		(*env)->DeleteLocalRef(env, exception);
 		elog(WARNING, "Exception occurred while setting connector offset");
-		return -1;
+		ret = -1;
+		goto cleanup;
 	}
 
+cleanup:
 	/* Clean up local references */
-	(*env)->DeleteLocalRef(env, joffsetstr);
-	(*env)->DeleteLocalRef(env, jdb);
-	(*env)->DeleteLocalRef(env, jfile);
+	if (joffsetstr)
+		(*env)->DeleteLocalRef(env, joffsetstr);
+	if (jdb)
+		(*env)->DeleteLocalRef(env, jdb);
+	if (jfile)
+		(*env)->DeleteLocalRef(env, jfile);
 
-	elog(LOG, "Successfully set offset for %s connector", connectorTypeToString(connectorType));
-	return 0;
+	if(ret == 0)
+		elog(LOG, "Successfully set offset for %s connector", connectorTypeToString(connectorType));
+
+	return ret;
 }
 
 /*
@@ -2145,8 +2168,8 @@ populate_debezium_metadata(ConnectionInfo * connInfo, ConnectorType connectorTyp
 	int ret = -1;
 	jmethodID createoffsets;
 	char * offsetstr = NULL;
-	jstring joffsetstr, jdb, jfile;
-	jthrowable exception;
+	jstring joffsetstr = NULL, jdb = NULL, jfile = NULL;
+	jthrowable exception = NULL;
 	char * sql = NULL;
 	char * offsetfile = psprintf(SYNCHDB_OFFSET_FILE_PATTERN,
 			get_shm_connector_name(connectorType), connInfo->name, dstdb);
@@ -2207,6 +2230,7 @@ populate_debezium_metadata(ConnectionInfo * connInfo, ConnectorType connectorTyp
 	{
 		(*env)->ExceptionDescribe(env);
 		(*env)->ExceptionClear(env);
+		(*env)->DeleteLocalRef(env, exception);
 		elog(WARNING, "Exception occurred while creating connector offset");
 		goto end;
 	}
@@ -2217,7 +2241,7 @@ populate_debezium_metadata(ConnectionInfo * connInfo, ConnectorType connectorTyp
 	{
 		elog(WARNING, "Failed to populate schema history file %s",
 				schemahistoryfile);
-		return -1;
+		goto end;
 	}
 
 	/* after schema history file is populated we can drop the source schema history table */
@@ -2229,14 +2253,16 @@ populate_debezium_metadata(ConnectionInfo * connInfo, ConnectorType connectorTyp
 end:
 	if (offsetfile)
 		pfree(offsetfile);
-
 	if (schemahistoryfile)
 		pfree(schemahistoryfile);
-
-	pfree(offsetstr);
-	(*env)->DeleteLocalRef(env, joffsetstr);
-	(*env)->DeleteLocalRef(env, jdb);
-	(*env)->DeleteLocalRef(env, jfile);
+	if (offsetstr)
+		pfree(offsetstr);
+	if (joffsetstr)
+		(*env)->DeleteLocalRef(env, joffsetstr);
+	if (jdb)
+		(*env)->DeleteLocalRef(env, jdb);
+	if (jfile)
+		(*env)->DeleteLocalRef(env, jfile);
 
 	return ret;
 }
@@ -2967,6 +2993,7 @@ dbz_mark_batch_complete(int batchid)
 	{
 		(*env)->ExceptionDescribe(env);
 		(*env)->ExceptionClear(env);
+		(*env)->DeleteLocalRef(env, exception);
 		elog(WARNING, "Exception occurred while calling markBatchComplete");
 		return -1;
 	}
