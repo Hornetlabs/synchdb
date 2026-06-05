@@ -324,7 +324,8 @@ DECLARE
 	v_connector  text;      -- 'oracle' | 'olr' | 'mysql' (lowercased)
     v_hostname   text;
     v_port       int;
-    v_service    text;   -- from data->>'srcdb'
+    v_srcdb      text;   -- from data->>'srcdb'
+    v_service    text;   -- v_srcdb or Oracle PDB name
     v_user       text;
     v_pwd        text;   -- decrypted password
     v_server     text;
@@ -392,7 +393,7 @@ BEGIN
         lower(data->>'srcdb'),          -- service/SID
         data->>'user',
         pgp_sym_decrypt((data->>'pwd')::bytea, v_key)
-    INTO v_hostname, v_port, v_service, v_user, v_pwd
+    INTO v_hostname, v_port, v_srcdb, v_user, v_pwd
     FROM synchdb_conninfo
     WHERE name = p_connector_name;
 
@@ -403,9 +404,22 @@ BEGIN
     IF v_hostname IS NULL OR v_hostname = '' THEN
         RAISE EXCEPTION 'synchdb_conninfo[%]: data.hostname is missing', p_connector_name;
     END IF;
-    IF v_service IS NULL OR v_service = '' THEN
+    IF v_srcdb IS NULL OR v_srcdb = '' THEN
         RAISE EXCEPTION 'synchdb_conninfo[%]: data.srcdb (service/SID) is missing', p_connector_name;
     END IF;
+    -- Parse CDB/PDB format: "CDB/PDB"
+    -- If srcdb contains a slash, the left part is the CDB service (used by Debezium in C code),
+    -- and the right part is the PDB service used for the FDW connection here.
+    IF position('/' IN v_srcdb) > 0 THEN
+        v_service := split_part(v_srcdb, '/', 2);
+        IF v_service = '' THEN
+            RAISE EXCEPTION 'synchdb_conninfo[%]: data.srcdb has a trailing slash but no PDB service name (format: CDB/PDB)', p_connector_name;
+        END IF;
+        RAISE NOTICE 'CDB/PDB mode: srcdb=%, FDW will connect to PDB service "%"', v_srcdb, v_service;
+    ELSE
+        v_service := v_srcdb;
+    END IF;
+
     IF v_user IS NULL OR v_user = '' THEN
         RAISE EXCEPTION 'synchdb_conninfo[%]: data.user is missing', p_connector_name;
     END IF;
@@ -423,7 +437,6 @@ BEGIN
     EXECUTE format('DROP SERVER IF EXISTS %I CASCADE', v_server);
 
 	IF v_connector IN ('oracle','olr') THEN
-	
 	    v_dbserver := format('//%s:%s/%s', v_hostname, v_port, v_service);
 		EXECUTE format(
 			'CREATE SERVER %I FOREIGN DATA WRAPPER oracle_fdw OPTIONS (dbserver %L)',
@@ -449,7 +462,7 @@ BEGIN
 	ELSIF v_connector = 'postgres' THEN
 		EXECUTE format(
             'CREATE SERVER %I FOREIGN DATA WRAPPER postgres_fdw OPTIONS (host %L, dbname %L, port %L)',
-            v_server, v_hostname, v_service, v_port::text
+            v_server, v_hostname, v_srcdb, v_port::text
         );
 
         EXECUTE format(
