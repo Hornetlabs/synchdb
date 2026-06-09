@@ -119,12 +119,12 @@ def setup_remote_instance(dbvendor, request):
     env["WHICH"] = "n/a"
     env["OLRVER"] = OLRVER
 
-    if dbvendor == "ora19c":
+    if dbvendor in ("ora19c", "oracle23ai"):
         env["INTERNAL"] = "1"
     else:
         env["INTERNAL"] = "0"
 
-    #print(f"[setup] setting up heterogeneous database {dbvendor}...")
+    print(f"[setup] setting up heterogeneous database {dbvendor}...")
     subprocess.run(["bash", "./ci/setup-remotedbs.sh"], check=True, env=env, stdout=subprocess.DEVNULL)
     
     yield

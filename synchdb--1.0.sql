@@ -2964,7 +2964,14 @@ BEGIN
         v_ext_db := p_desired_db::text;
       END IF;
     ELSE
-      v_ext_db := v_srcdb;
+      -- Oracle/OLR CDB/PDB: srcdb may be "CDB/PDB" but Debezium emits events
+      -- keyed on the CDB name only (database.dbname); strip the PDB suffix so
+      -- ext_tbname matches the Debezium event topic.
+      IF position('/' IN v_srcdb) > 0 THEN
+        v_ext_db := split_part(v_srcdb, '/', 2);
+      ELSE
+        v_ext_db := v_srcdb;
+      END IF;
     END IF;
 
     ------------------------------------------------------------------

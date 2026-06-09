@@ -88,6 +88,7 @@ jobs:
         dbtypes:
           - mysql
           - oracle
+          - oracle23ai
           - sqlserver
           - olr
           - postgres

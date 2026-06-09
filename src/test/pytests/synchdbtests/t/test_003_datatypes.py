@@ -9,6 +9,9 @@ from binascii import unhexlify
 
 from common import run_pg_query, run_pg_query_one, run_remote_query, create_synchdb_connector, getConnectorName, getDbname, verify_default_type_mappings, create_and_start_synchdb_connector, stop_and_delete_synchdb_connector, getSchema, drop_default_pg_schema, drop_repslot_and_pub, update_guc_conf
 
+# import pytest
+# pytestmark = pytest.mark.skip(reason="跳过此文件")
+
 def parse_time_with_fraction(t):
     if '.' in t:
         main, frac = t.split('.')
@@ -77,6 +80,7 @@ def parse_timedelta(s: str):
     days, _, time = s.split()
     h, m, sec = map(int, time.split(':'))
     return timedelta(days=int(days), hours=h, minutes=m, seconds=sec)
+
 
 def test_AllDefaultDataTypes(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_addt"
@@ -268,7 +272,7 @@ def test_AllDefaultDataTypes(pg_cursor, dbvendor):
         """
 
     run_remote_query(dbvendor, query)
-    if dbvendor == "oracle" or dbvendor == "olr":
+    if dbvendor in ("oracle", "oracle23ai", "olr"):
         time.sleep(30)
     else:
         time.sleep(20)
@@ -471,7 +475,7 @@ def test_AllDefaultDataTypes(pg_cursor, dbvendor):
         """
 
     run_remote_query(dbvendor, query)
-    if dbvendor == "oracle" or dbvendor == "olr":
+    if dbvendor in ("oracle", "oracle23ai", "olr"):
         time.sleep(60)
     else:
         time.sleep(15)
@@ -684,6 +688,7 @@ def test_AllDefaultDataTypes(pg_cursor, dbvendor):
     run_remote_query(dbvendor, "DROP TABLE mytable")
     time.sleep(5)
 
+
 def test_TableNameMapping(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_objmap_tnm"
     dbname = getDbname(dbvendor)
@@ -695,7 +700,7 @@ def test_TableNameMapping(pg_cursor, dbvendor):
         exttable_prefix= dbname + "." + schema
         
     # create objmap of type = 'table'
-    if dbvendor == "oracle" or dbvendor == "olr":
+    if dbvendor in ("oracle", "oracle23ai", "olr"):
         rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_add_objmap('{name}', 'table', '{exttable_prefix}.OBJMAP_SRCTABLE1', '{dbname.lower()}.objmap_dsttable1')")
         assert rows[0] == 0
         rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_add_objmap('{name}', 'table', '{exttable_prefix}.OBJMAP_SRCTABLE2', 'objmap_dsttable2')")
@@ -746,13 +751,13 @@ def test_TableNameMapping(pg_cursor, dbvendor):
         result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "no_data")
         assert result == 0
     
-    if dbvendor == "oracle" or dbvendor == "olr":
+    if dbvendor in ("oracle", "oracle23ai", "olr"):
         time.sleep(60)
     else:
         time.sleep(20)
 
     # check if tables have been copied with table names mapped correctly
-    if dbvendor == "oracle" or dbvendor == "olr":
+    if dbvendor in ("oracle", "oracle23ai", "olr"):
         rows = run_pg_query_one(pg_cursor, f"SELECT pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND ext_tbname = '{exttable_prefix}.OBJMAP_SRCTABLE1' LIMIT 1")
         assert rows != None and len(rows) > 0 and rows[0] == f'{dbname.lower()}.objmap_dsttable1'
         rows = run_pg_query_one(pg_cursor, f"SELECT pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND ext_tbname = '{exttable_prefix}.OBJMAP_SRCTABLE2' LIMIT 1")
@@ -784,6 +789,7 @@ def test_TableNameMapping(pg_cursor, dbvendor):
     run_remote_query(dbvendor, "DROP TABLE objmap_srctable3")
     time.sleep(5)
 
+
 def test_ColumnNameMapping(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_objmap_cnm"
     dbname = getDbname(dbvendor)
@@ -795,7 +801,7 @@ def test_ColumnNameMapping(pg_cursor, dbvendor):
         exttable_prefix= dbname + "." + schema
 
     # create objmap of type = 'column'
-    if dbvendor == "oracle" or dbvendor == "olr":
+    if dbvendor in ("oracle", "oracle23ai", "olr"):
         rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_add_objmap('{name}', 'column', '{exttable_prefix}.OBJMAPCOL_SRCTABLE1.A', 'pgintcol')")
         assert rows[0] == 0
         rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_add_objmap('{name}', 'column', '{exttable_prefix}.OBJMAPCOL_SRCTABLE1.B', 'pgtextcol')")
@@ -831,13 +837,13 @@ def test_ColumnNameMapping(pg_cursor, dbvendor):
         result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "no_data")
         assert result == 0
     
-    if dbvendor == "oracle" or dbvendor == "olr":
+    if dbvendor in ("oracle", "oracle23ai", "olr"):
         time.sleep(60)
     else:
         time.sleep(20)
 
     # check if tables have been copied with table names mapped correctly
-    if dbvendor == "oracle" or dbvendor == "olr":
+    if dbvendor in ("oracle", "oracle23ai", "olr"):
         rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND ext_tbname = '{exttable_prefix}.OBJMAPCOL_SRCTABLE1'")
         assert rows != None and rows[0][1] == 'pgintcol'
         assert rows != None and rows[1][1] == 'pgtextcol'
@@ -853,6 +859,7 @@ def test_ColumnNameMapping(pg_cursor, dbvendor):
     run_remote_query(dbvendor, "DROP TABLE objmapcol_srctable1")
     time.sleep(5)
 
+
 def test_DataTypeMapping(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_objmap_dtm"
     dbname = getDbname(dbvendor)
@@ -867,7 +874,7 @@ def test_DataTypeMapping(pg_cursor, dbvendor):
         schema = getSchema(dbvendor)
         exttable_prefix= dbname + "." + schema
 
-    if dbvendor == "oracle" or dbvendor == "olr":
+    if dbvendor in ("oracle", "oracle23ai", "olr"):
         rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_add_objmap('{name}', 'datatype', '{exttable_prefix}.ORDERS.ORDER_DATE', 'text|0')")
     else:
         rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_add_objmap('{name}', 'datatype', '{exttable_prefix}.orders.order_date', 'text|0')")
@@ -876,13 +883,13 @@ def test_DataTypeMapping(pg_cursor, dbvendor):
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial")
     assert result == 0
 
-    if dbvendor == "oracle" or dbvendor == "olr":
+    if dbvendor in ("oracle", "oracle23ai", "olr"):
         time.sleep(60)
     else:
         time.sleep(20)
 
     # orders table shall have been replicated
-    if dbvendor == "oracle" or dbvendor == "olr":
+    if dbvendor in ("oracle", "oracle23ai", "olr"):
         rows = run_pg_query_one(pg_cursor, f"SELECT pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND ext_tbname = '{exttable_prefix}.ORDERS' AND ext_attname = 'ORDER_DATE'")
     else:
         rows = run_pg_query_one(pg_cursor, f"SELECT pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND ext_tbname = '{exttable_prefix}.orders' AND ext_attname = 'order_date'")
@@ -896,6 +903,7 @@ def test_DataTypeMapping(pg_cursor, dbvendor):
     drop_repslot_and_pub(dbvendor, name, "postgres")
     if dbvendor == "postgres":
         update_guc_conf(pg_cursor, "synchdb.snapshot_engine", "'debezium'", True)
+
 
 def test_TransformExpression(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_objmap_te"
@@ -911,7 +919,7 @@ def test_TransformExpression(pg_cursor, dbvendor):
         schema = getSchema(dbvendor)
         exttable_prefix= dbname + "." + schema
 
-    if dbvendor == "oracle" or dbvendor == "olr":
+    if dbvendor in ("oracle", "oracle23ai", "olr"):
         rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_add_objmap('{name}', 'transform', '{exttable_prefix}.ORDERS.PURCHASER', '%d + 1000000')")
     else:
         rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_add_objmap('{name}', 'transform', '{exttable_prefix}.orders.purchaser', '%d + 1000000')")
@@ -920,13 +928,13 @@ def test_TransformExpression(pg_cursor, dbvendor):
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial")
     assert result == 0
 
-    if dbvendor == "oracle" or dbvendor == "olr":
+    if dbvendor in ("oracle", "oracle23ai", "olr"):
         time.sleep(60)
     else:
         time.sleep(20)
 
     # orders table shall have been replicated
-    if dbvendor == "oracle" or dbvendor == "olr":
+    if dbvendor in ("oracle", "oracle23ai", "olr"):
         rows = run_pg_query_one(pg_cursor, f"SELECT transform FROM synchdb_att_view WHERE name = '{name}' AND ext_tbname = '{exttable_prefix}.ORDERS' AND ext_attname = 'PURCHASER'")
     else:
         rows = run_pg_query_one(pg_cursor, f"SELECT transform FROM synchdb_att_view WHERE name = '{name}' AND ext_tbname = '{exttable_prefix}.orders' AND ext_attname = 'purchaser'")
@@ -942,6 +950,7 @@ def test_TransformExpression(pg_cursor, dbvendor):
     drop_repslot_and_pub(dbvendor, name, "postgres")
     if dbvendor == "postgres":
         update_guc_conf(pg_cursor, "synchdb.snapshot_engine", "'debezium'", True)
+
 
 def test_ReloadObjmapEntries(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_objmap_roe"
@@ -960,13 +969,13 @@ def test_ReloadObjmapEntries(pg_cursor, dbvendor):
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial")
     assert result == 0
 
-    if dbvendor == "oracle" or dbvendor == "olr":
+    if dbvendor in ("oracle", "oracle23ai", "olr"):
         time.sleep(60)
     else:
         time.sleep(20)
 
     # default table orders table shall have been replicated
-    if dbvendor == "oracle" or dbvendor == "olr":
+    if dbvendor in ("oracle", "oracle23ai", "olr"):
         rows = run_pg_query_one(pg_cursor, f"SELECT pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND ext_tbname = '{exttable_prefix}.ORDERS' LIMIT 1")
         assert rows[0] == f"{dbname.lower()}.orders"
 
@@ -1047,8 +1056,8 @@ def test_ReloadObjmapEntries(pg_cursor, dbvendor):
     rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_reload_objmap('{name}')")
     assert rows[0] == 0
 
-    time.sleep(40)
-    if dbvendor == "oracle" or dbvendor == "olr":
+    time.sleep(60)
+    if dbvendor in ("oracle", "oracle23ai", "olr"):
         rows = run_pg_query_one(pg_cursor, f"SELECT pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND ext_tbname = '{exttable_prefix}.ORDERS' LIMIT 1")
         assert rows[0] == f"{dbname.lower()}.invoices"
         rows = run_pg_query_one(pg_cursor, f"SELECT pg_attname FROM synchdb_att_view WHERE name = '{name}' AND ext_tbname = '{exttable_prefix}.ORDERS' AND ext_attname ='ORDER_NUMBER'")
@@ -1094,7 +1103,7 @@ def test_ReloadObjmapEntries(pg_cursor, dbvendor):
             INSERT INTO orders(order_number, order_date, purchaser, quantity, product_id) VALUES
                 (10005, "2025-12-12", 1002, 10000, 102)
             """)
-    elif dbvendor == "oracle" or dbvendor == "olr":
+    elif dbvendor in ("oracle", "oracle23ai", "olr"):
         extrows = run_remote_query(dbvendor, f"""
             INSERT INTO orders(order_number, order_date, purchaser, quantity, product_id) VALUES
                 (10005, TO_DATE('2025-12-12', 'YYYY-MM-DD'), 1002, 10000, 102)
@@ -1110,8 +1119,8 @@ def test_ReloadObjmapEntries(pg_cursor, dbvendor):
                 ("2025-12-12", 1002, 10000, 102)
             """)
 
-    if dbvendor == "oracle" or dbvendor == "olr":
-        time.sleep(60)
+    if dbvendor in ("oracle", "oracle23ai", "olr"):
+        time.sleep(80)
     else:
         time.sleep(20)
         

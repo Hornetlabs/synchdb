@@ -91,6 +91,187 @@ function setup_sqlserver()
 	exit 0
 }
 
+function setup_oracle23ai(){
+	needsetup=0
+	CONTAINER_NAME="eztest_oracle23ai"
+
+	set +e
+	echo "setting up ${CONTAINER_NAME}..."
+	if ! docker ps -a --format '{{.Names}}' | grep -q ${CONTAINER_NAME}; then
+        # container has not run before. Run a new one
+		if [ $INTERNAL -eq 1 ]; then
+        	docker_compose -f testenv/oracle/synchdb-oracle23ai-test-internal.yaml up -d
+		else
+			docker_compose -f testenv/oracle/synchdb-oracle23ai-test.yaml up -d
+		fi
+		wait_for_container_ready ${CONTAINER_NAME} "DATABASE IS READY TO USE"
+        needsetup=1
+    else
+		state=$(docker inspect -f '{{.State.Status}}' ${CONTAINER_NAME} 2>/dev/null || echo unknown)
+		if [ $state == "running" ]; then
+            echo "${CONTAINER_NAME} is already running..."
+        elif [ $state == "exited" ]; then
+            echo "${CONTAINER_NAME} exited, starting it again..."
+            docker start ${CONTAINER_NAME} >/dev/null 2>&1
+			wait_for_container_ready ${CONTAINER_NAME} "DATABASE IS READY TO USE"
+        else
+            echo "${CONTAINER_NAME} in unknown state. Remove it and try again..."
+        fi
+		return
+    fi
+
+	if [ $needsetup -ne 1 ]; then
+        echo "skip setting up ${CONTAINER_NAME}, assuming it done..."
+		return
+    fi
+    set -e
+
+	# check if oracle has been initialized
+	isinit=$(docker exec ${CONTAINER_NAME} sh -c '[ -d /opt/oracle/oradata/recovery_area ]' && echo exists || echo missing)
+	if [ "$isinit" == "exists" ]; then
+		echo "${CONTAINER_NAME} has been setup already. Skip setup..."
+		return
+	fi
+	docker exec -i ${CONTAINER_NAME} mkdir /opt/oracle/oradata/recovery_area
+	docker exec -i ${CONTAINER_NAME} sqlplus / as sysdba <<EOF
+Alter user sys identified by oracle;
+exit;
+EOF
+	sleep 1
+	docker exec -i ${CONTAINER_NAME} sqlplus /nolog <<EOF
+CONNECT sys/oracle as sysdba;
+alter system set db_recovery_file_dest_size = 40G;
+alter system set db_recovery_file_dest = '/opt/oracle/oradata/recovery_area' scope=spfile;
+shutdown immediate;
+startup mount;
+alter database archivelog;
+alter database open;
+archive log list;
+exit;
+EOF
+	sleep 1
+	docker exec -i ${CONTAINER_NAME} sqlplus sys/oracle@//localhost:1521/FREE as sysdba <<EOF
+ALTER DATABASE ADD SUPPLEMENTAL LOG DATA;
+ALTER PROFILE DEFAULT LIMIT FAILED_LOGIN_ATTEMPTS UNLIMITED;
+exit;
+EOF
+	docker exec -i ${CONTAINER_NAME} sqlplus sys/oracle@//localhost:1521/FREE as sysdba <<EOF
+CREATE TABLESPACE LOGMINER_TBS DATAFILE '/opt/oracle/oradata/FREE/logminer_tbs.dbf' SIZE 25M REUSE AUTOEXTEND ON MAXSIZE UNLIMITED;
+exit;
+EOF
+	docker exec -i ${CONTAINER_NAME} sqlplus sys/oracle@//localhost:1521/FREEPDB1 as sysdba <<EOF
+CREATE TABLESPACE LOGMINER_TBS DATAFILE '/opt/oracle/oradata/FREE/FREEPDB1/logminer_tbs.dbf' SIZE 25M REUSE AUTOEXTEND ON MAXSIZE UNLIMITED;
+exit;
+EOF
+	docker exec -i ${CONTAINER_NAME} sqlplus sys/oracle@//localhost:1521/FREE as sysdba <<'EOF'
+CREATE USER c##dbzuser IDENTIFIED BY dbz DEFAULT TABLESPACE LOGMINER_TBS QUOTA UNLIMITED ON LOGMINER_TBS CONTAINER=ALL;
+GRANT CREATE SESSION TO c##dbzuser CONTAINER=ALL;
+GRANT SET CONTAINER TO c##dbzuser CONTAINER=ALL;
+GRANT SELECT ON V_$DATABASE TO c##dbzuser CONTAINER=ALL;
+GRANT FLASHBACK ANY TABLE TO c##dbzuser CONTAINER=ALL;
+GRANT SELECT ANY TABLE TO c##dbzuser CONTAINER=ALL;
+GRANT SELECT_CATALOG_ROLE TO c##dbzuser CONTAINER=ALL;
+GRANT EXECUTE_CATALOG_ROLE TO c##dbzuser CONTAINER=ALL;
+GRANT SELECT ANY TRANSACTION TO c##dbzuser CONTAINER=ALL;
+GRANT LOGMINING TO c##dbzuser CONTAINER=ALL;
+GRANT SELECT ANY DICTIONARY TO c##dbzuser CONTAINER=ALL;
+GRANT CREATE TABLE TO c##dbzuser CONTAINER=ALL;
+GRANT LOCK ANY TABLE TO c##dbzuser CONTAINER=ALL;
+GRANT CREATE SEQUENCE TO c##dbzuser CONTAINER=ALL;
+GRANT EXECUTE ON DBMS_LOGMNR TO c##dbzuser CONTAINER=ALL;
+GRANT EXECUTE ON DBMS_LOGMNR_D TO c##dbzuser CONTAINER=ALL;
+GRANT SELECT ON V_$LOG TO c##dbzuser CONTAINER=ALL;
+GRANT SELECT ON V_$LOG_HISTORY TO c##dbzuser CONTAINER=ALL;
+GRANT SELECT ON V_$LOGMNR_LOGS TO c##dbzuser CONTAINER=ALL;
+GRANT SELECT ON V_$LOGMNR_CONTENTS TO c##dbzuser CONTAINER=ALL;
+GRANT SELECT ON V_$LOGMNR_PARAMETERS TO c##dbzuser CONTAINER=ALL;
+GRANT SELECT ON V_$LOGFILE TO c##dbzuser CONTAINER=ALL;
+GRANT SELECT ON V_$ARCHIVED_LOG TO c##dbzuser CONTAINER=ALL;
+GRANT SELECT ON V_$ARCHIVE_DEST_STATUS TO c##dbzuser CONTAINER=ALL;
+GRANT SELECT ON V_$TRANSACTION TO c##dbzuser CONTAINER=ALL; 
+GRANT SELECT ON V_$MYSTAT TO c##dbzuser CONTAINER=ALL;
+GRANT SELECT ON V_$STATNAME TO c##dbzuser CONTAINER=ALL; 
+GRANT EXECUTE ON DBMS_WORKLOAD_REPOSITORY TO C##DBZUSER;
+GRANT SELECT ON DBA_HIST_SNAPSHOT TO C##DBZUSER;
+GRANT EXECUTE ON DBMS_WORKLOAD_REPOSITORY TO PUBLIC;
+ALTER DATABASE ADD LOGFILE GROUP 4 ('/opt/oracle/oradata/FREE/redo04.log') SIZE 512M;
+ALTER DATABASE ADD LOGFILE GROUP 5 ('/opt/oracle/oradata/FREE/redo05.log') SIZE 512M;
+ALTER DATABASE ADD LOGFILE GROUP 6 ('/opt/oracle/oradata/FREE/redo06.log') SIZE 512M;
+GRANT CONNECT, RESOURCE TO C##DBZUSER;
+GRANT CREATE SESSION TO C##DBZUSER;
+GRANT CREATE TABLE TO C##DBZUSER;
+GRANT CREATE VIEW TO C##DBZUSER;
+GRANT CREATE PROCEDURE TO C##DBZUSER;
+GRANT CREATE SEQUENCE TO C##DBZUSER;
+GRANT CREATE TRIGGER TO C##DBZUSER;
+GRANT CREATE ANY INDEX TO C##DBZUSER;
+GRANT CREATE ANY TABLE TO C##DBZUSER;
+GRANT CREATE ANY PROCEDURE TO C##DBZUSER;
+GRANT ALTER ANY TABLE TO C##DBZUSER;
+GRANT EXECUTE ANY PROCEDURE TO C##DBZUSER;
+GRANT DROP ANY TABLE TO C##DBZUSER;
+GRANT DROP ANY INDEX TO C##DBZUSER;
+GRANT DROP ANY SEQUENCE TO C##DBZUSER;
+GRANT DROP ANY PROCEDURE TO C##DBZUSER;
+GRANT DROP ANY VIEW TO C##DBZUSER;
+GRANT DROP ANY TRIGGER TO C##DBZUSER;
+GRANT DROP ANY SYNONYM TO C##DBZUSER;
+GRANT DROP ANY MATERIALIZED VIEW TO C##DBZUSER;
+exit;
+EOF
+
+	# setup FREEPDB1
+	docker exec -i ${CONTAINER_NAME} sqlplus sys/oracle@//localhost:1521/FREEPDB1 as sysdba <<'EOF'
+ALTER DATABASE ADD SUPPLEMENTAL LOG DATA;
+ALTER PROFILE DEFAULT LIMIT FAILED_LOGIN_ATTEMPTS UNLIMITED;
+CREATE USER DBZUSER IDENTIFIED BY dbz
+DEFAULT TABLESPACE USERS
+TEMPORARY TABLESPACE TEMP;
+GRANT CREATE SESSION          TO DBZUSER;
+GRANT SELECT ANY TABLE        TO DBZUSER;
+GRANT SELECT ANY TRANSACTION  TO DBZUSER;
+GRANT SELECT_CATALOG_ROLE     TO DBZUSER;
+GRANT EXECUTE_CATALOG_ROLE    TO DBZUSER;
+GRANT FLASHBACK ANY TABLE     TO DBZUSER;
+GRANT LOGMINING               TO DBZUSER;
+GRANT LOCK ANY TABLE          TO DBZUSER;
+GRANT SELECT ON V_$DATABASE          TO DBZUSER;
+GRANT SELECT ON V_$LOG               TO DBZUSER;
+GRANT SELECT ON V_$LOGFILE           TO DBZUSER;
+GRANT SELECT ON V_$ARCHIVED_LOG      TO DBZUSER;
+GRANT SELECT ON V_$ARCHIVE_DEST      TO DBZUSER;
+GRANT SELECT ON V_$TRANSACTION       TO DBZUSER;
+GRANT SELECT ON V_$INSTANCE          TO DBZUSER;
+GRANT SELECT ON V_$LOG_HISTORY       TO DBZUSER;
+GRANT SELECT ON V_$PARAMETER         TO DBZUSER;
+GRANT CREATE TABLE TO DBZUSER;
+ALTER USER DBZUSER QUOTA UNLIMITED ON USERS;
+exit;
+EOF
+	docker exec -i ${CONTAINER_NAME} sqlplus 'DBZUSER/dbz@//localhost:1521/FREEPDB1' <<EOF
+CREATE TABLE orders (
+order_number NUMBER PRIMARY KEY,
+order_date DATE,
+purchaser NUMBER,
+quantity NUMBER,
+product_id NUMBER);
+commit;
+ALTER TABLE orders ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS;
+exit;
+EOF
+
+	docker exec -i ${CONTAINER_NAME} sqlplus 'DBZUSER/dbz@//localhost:1521/FREEPDB1' <<EOF
+INSERT INTO orders(order_number, order_date, purchaser, quantity, product_id) VALUES (10001, TO_DATE('2024-01-01', 'YYYY-MM-DD'), 1003, 2, 107);
+INSERT INTO orders(order_number, order_date, purchaser, quantity, product_id) VALUES (10002, TO_DATE('2024-01-01', 'YYYY-MM-DD'), 1003, 2, 107);
+INSERT INTO orders(order_number, order_date, purchaser, quantity, product_id) VALUES (10003, TO_DATE('2024-01-01', 'YYYY-MM-DD'), 1003, 2, 107);
+INSERT INTO orders(order_number, order_date, purchaser, quantity, product_id) VALUES (10004, TO_DATE('2024-01-01', 'YYYY-MM-DD'), 1003, 2, 107);
+commit;
+exit;
+EOF
+
+	exit 0
+}
+
 function setup_oracle()
 {
 	needsetup=0
@@ -239,55 +420,6 @@ INSERT INTO orders(order_number, order_date, purchaser, quantity, product_id) VA
 INSERT INTO orders(order_number, order_date, purchaser, quantity, product_id) VALUES (10002, TO_DATE('2024-01-01', 'YYYY-MM-DD'), 1003, 2, 107);
 INSERT INTO orders(order_number, order_date, purchaser, quantity, product_id) VALUES (10003, TO_DATE('2024-01-01', 'YYYY-MM-DD'), 1003, 2, 107);
 INSERT INTO orders(order_number, order_date, purchaser, quantity, product_id) VALUES (10004, TO_DATE('2024-01-01', 'YYYY-MM-DD'), 1003, 2, 107);
-commit;
-exit;
-EOF
-
-	# setup FREEPDB1
-	docker exec -i oracle sqlplus sys/oracle@//localhost:1521/FREEPDB1 as sysdba <<'EOF'
-ALTER DATABASE ADD SUPPLEMENTAL LOG DATA;
-ALTER PROFILE DEFAULT LIMIT FAILED_LOGIN_ATTEMPTS UNLIMITED;
-CREATE USER DBZUSER IDENTIFIED BY your_password
-DEFAULT TABLESPACE USERS
-TEMPORARY TABLESPACE TEMP;
-GRANT CREATE SESSION          TO DBZUSER;
-GRANT SELECT ANY TABLE        TO DBZUSER;
-GRANT SELECT ANY TRANSACTION  TO DBZUSER;
-GRANT SELECT_CATALOG_ROLE     TO DBZUSER;
-GRANT EXECUTE_CATALOG_ROLE    TO DBZUSER;
-GRANT FLASHBACK ANY TABLE     TO DBZUSER;
-GRANT LOGMINING               TO DBZUSER;
-GRANT LOCK ANY TABLE          TO DBZUSER;
-GRANT SELECT ON V_$DATABASE          TO DBZUSER;
-GRANT SELECT ON V_$LOG               TO DBZUSER;
-GRANT SELECT ON V_$LOGFILE           TO DBZUSER;
-GRANT SELECT ON V_$ARCHIVED_LOG      TO DBZUSER;
-GRANT SELECT ON V_$ARCHIVE_DEST      TO DBZUSER;
-GRANT SELECT ON V_$TRANSACTION       TO DBZUSER;
-GRANT SELECT ON V_$INSTANCE          TO DBZUSER;
-GRANT SELECT ON V_$LOG_HISTORY       TO DBZUSER;
-GRANT SELECT ON V_$PARAMETER         TO DBZUSER;
-GRANT CREATE TABLE TO DBZUSER;
-ALTER USER DBZUSER QUOTA UNLIMITED ON USERS;
-exit;
-EOF
-	docker exec -i oracle sqlplus 'DBZUSER/your_password@//localhost:1521/FREEPDB1' <<EOF
-CREATE TABLE pdb_orders (
-order_number NUMBER PRIMARY KEY,
-order_date DATE,
-purchaser NUMBER,
-quantity NUMBER,
-product_id NUMBER);
-commit;
-ALTER TABLE pdb_orders ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS;
-exit;
-EOF
-
-	docker exec -i oracle sqlplus 'DBZUSER/your_password@//localhost:1521/FREEPDB1' <<EOF
-INSERT INTO pdb_orders(order_number, order_date, purchaser, quantity, product_id) VALUES (10001, TO_DATE('2024-01-01', 'YYYY-MM-DD'), 1003, 2, 107);
-INSERT INTO pdb_orders(order_number, order_date, purchaser, quantity, product_id) VALUES (10002, TO_DATE('2024-01-01', 'YYYY-MM-DD'), 1003, 2, 107);
-INSERT INTO pdb_orders(order_number, order_date, purchaser, quantity, product_id) VALUES (10003, TO_DATE('2024-01-01', 'YYYY-MM-DD'), 1003, 2, 107);
-INSERT INTO pdb_orders(order_number, order_date, purchaser, quantity, product_id) VALUES (10004, TO_DATE('2024-01-01', 'YYYY-MM-DD'), 1003, 2, 107);
 commit;
 exit;
 EOF
@@ -589,6 +721,9 @@ function setup_remotedb()
 			;;
 		"oracle")
 			setup_oracle
+			;;
+		"oracle23ai")
+			setup_oracle23ai
 			;;
 		"ora19c")
 			setup_ora19c "notolr"

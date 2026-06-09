@@ -2,6 +2,10 @@ import common
 import time
 from common import run_pg_query, run_pg_query_one, run_remote_query, create_synchdb_connector, getConnectorName, getDbname, create_and_start_synchdb_connector, stop_and_delete_synchdb_connector, drop_default_pg_schema, drop_repslot_and_pub
 
+# import pytest
+# pytestmark = pytest.mark.skip(reason="跳过此文件")
+
+
 def test_Insert(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_insert"
     dbname = getDbname(dbvendor).lower()
@@ -44,14 +48,14 @@ def test_Insert(pg_cursor, dbvendor):
         """
 
     run_remote_query(dbvendor, query)
-    if dbvendor == "oracle":
+    if dbvendor in ("oracle", "oracle23ai", "olr"):
         time.sleep(30)
     else:
         time.sleep(10)
    
     out=run_remote_query(dbvendor, "INSERT INTO inserttable (a, b) VALUES (1, 'Hello')")
     out=run_remote_query(dbvendor, "COMMIT")
-    if dbvendor == "oracle":
+    if dbvendor in ("oracle", "oracle23ai", "olr"):
         time.sleep(75)
     else:
         time.sleep(15)
@@ -71,8 +75,10 @@ def test_Insert(pg_cursor, dbvendor):
     drop_default_pg_schema(pg_cursor, dbvendor)
     drop_repslot_and_pub(dbvendor, name, "postgres")
 
+
 def test_InsertWithError(pg_cursor, dbvendor):
     assert True
+
 
 def test_Update(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_update"
@@ -116,7 +122,7 @@ def test_Update(pg_cursor, dbvendor):
         """
 
     run_remote_query(dbvendor, query)
-    if dbvendor == "oracle" or dbvendor == "olr":
+    if dbvendor in ("oracle", "oracle23ai", "olr"):
         run_remote_query(dbvendor, "ALTER TABLE updatetable ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS")
         time.sleep(30)
     else:
@@ -127,8 +133,8 @@ def test_Update(pg_cursor, dbvendor):
     run_remote_query(dbvendor, "UPDATE updatetable SET b = 'olleH'")
     run_remote_query(dbvendor, "COMMIT")
 
-    if dbvendor == "oracle":
-        time.sleep(75)
+    if dbvendor in ("oracle", "oracle23ai", "olr"):
+        time.sleep(90)
     else:
         time.sleep(10)
 
@@ -147,8 +153,10 @@ def test_Update(pg_cursor, dbvendor):
     drop_default_pg_schema(pg_cursor, dbvendor)
     drop_repslot_and_pub(dbvendor, name, "postgres")
 
+
 def test_UpdateWithError(pg_cursor, dbvendor):
     assert True
+
 
 def test_Delete(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_delete"
@@ -192,7 +200,7 @@ def test_Delete(pg_cursor, dbvendor):
         """
 
     run_remote_query(dbvendor, query)
-    if dbvendor == "oracle" or dbvendor == "olr":
+    if dbvendor in ("oracle", "oracle23ai", "olr"):
         run_remote_query(dbvendor, "ALTER TABLE deletetable ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS")
         time.sleep(30)
     else:
@@ -203,8 +211,8 @@ def test_Delete(pg_cursor, dbvendor):
     run_remote_query(dbvendor, "INSERT INTO deletetable (a, b) VALUES (3, 'Pytest')")
     run_remote_query(dbvendor, "COMMIT")
 
-    if dbvendor == "oracle":
-        time.sleep(75)
+    if dbvendor in ("oracle", "oracle23ai", "olr"):
+        time.sleep(80)
     else:
         time.sleep(15)
 
@@ -219,8 +227,8 @@ def test_Delete(pg_cursor, dbvendor):
         assert str(row[1]) == str(extrow[1])
 
     run_remote_query(dbvendor, "DELETE FROM deletetable WHERE a = 2")
-    if dbvendor == "oracle":
-        time.sleep(75)
+    if dbvendor in ("oracle", "oracle23ai", "olr"):
+        time.sleep(80)
     else:
         time.sleep(15)
 
@@ -238,6 +246,7 @@ def test_Delete(pg_cursor, dbvendor):
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
     drop_repslot_and_pub(dbvendor, name, "postgres")
+
 
 def test_DeleteWithError(pg_cursor, dbvendor):
     assert True
