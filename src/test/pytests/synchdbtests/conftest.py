@@ -16,8 +16,6 @@ def pg_instance(request):
     temp_dir = "synchdb_testdir"
     data_dir = os.path.join(temp_dir, "data")
     log_file = os.path.join(temp_dir, "logfile")
-
-    subprocess.run(["pg_ctl", "-D", data_dir, "stop", "-m", "immediate"], check=False, stdout=subprocess.DEVNULL)
     
     # remove dir if exists
     if os.path.isdir(temp_dir):
@@ -70,7 +68,7 @@ def pg_instance(request):
     # do not remove postgresql server dir if failed
     if request.session.testsfailed > 0:
         print(f"test failed: postgresql server dir and log retained at {data_dir} and {log_file}")
-        # subprocess.run(["pg_ctl", "-D", data_dir, "stop", "-m", "immediate"], check=True, stdout=subprocess.DEVNULL)
+        subprocess.run(["pg_ctl", "-D", data_dir, "stop", "-m", "immediate"], check=True, stdout=subprocess.DEVNULL)
     else:
         subprocess.run(["pg_ctl", "-D", data_dir, "stop", "-m", "immediate"], check=True, stdout=subprocess.DEVNULL)
         shutil.rmtree(temp_dir)
@@ -126,7 +124,7 @@ def setup_remote_instance(dbvendor, request):
     else:
         env["INTERNAL"] = "0"
 
-    print(f"[setup] setting up heterogeneous database {dbvendor}...")
+    #print(f"[setup] setting up heterogeneous database {dbvendor}...")
     subprocess.run(["bash", "./ci/setup-remotedbs.sh"], check=True, env=env, stdout=subprocess.DEVNULL)
     
     yield

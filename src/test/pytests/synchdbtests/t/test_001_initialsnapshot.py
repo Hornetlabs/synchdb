@@ -322,7 +322,10 @@ def test_InitialSnapshotFDW(pg_cursor, dbvendor):
 
 
 def test_InitialSnapshotDBZ_uppercase(pg_cursor, dbvendor):
-    restart_remote_db(dbvendor)
+    
+    if dbvendor == "oracle23ai":
+        restart_remote_db(dbvendor)
+
     name = getConnectorName(dbvendor) + "_dbzsnap_upper"
     dbname = getDbname(dbvendor).upper()
     schema = getSchema(dbvendor)
@@ -589,7 +592,9 @@ def test_InitialSnapshotFDW_uppercase(pg_cursor, dbvendor):
 
 
 def test_InitialSnapshotDBZ_asis(pg_cursor, dbvendor):
-    restart_remote_db(dbvendor)
+    
+    if dbvendor == "oracle23ai":
+        restart_remote_db(dbvendor)
     
     name = getConnectorName(dbvendor) + "_dbzsnap_asis"
     dbname = getDbname(dbvendor)
@@ -703,8 +708,10 @@ def test_InitialSnapshotDBZ_asis(pg_cursor, dbvendor):
         """
 
     run_remote_query(dbvendor, query)
-    if dbvendor in ("oracle", "oracle23ai", "olr"):
+    if dbvendor in ("oracle", "olr"):
         time.sleep(50)
+    elif dbvendor == "oracle23ai":
+        time.sleep(100)
     else:
         time.sleep(10)
 
@@ -724,6 +731,10 @@ def test_InitialSnapshotDBZ_asis(pg_cursor, dbvendor):
 
 
 def test_InitialSnapshotFDW_asis(pg_cursor, dbvendor):
+
+    if dbvendor == "oracle23ai":
+        restart_remote_db(dbvendor)
+    
     name = getConnectorName(dbvendor) + "_fdwsnap_asis"
     dbname = getDbname(dbvendor)
     schema = getSchema(dbvendor)
@@ -854,8 +865,10 @@ def test_InitialSnapshotFDW_asis(pg_cursor, dbvendor):
         """
 
     run_remote_query(dbvendor, query)
-    if dbvendor in ("oracle", "oracle23ai", "olr"):
-        time.sleep(60)
+    if dbvendor in ("oracle", "olr"):
+        time.sleep(50)
+    elif dbvendor == "oracle23ai":
+        time.sleep(100)
     else:
         time.sleep(10)
 
@@ -980,8 +993,10 @@ def test_ConnectorStartSchemaSyncModeDBZ(pg_cursor, dbvendor):
         """
 
     run_remote_query(dbvendor, query)
-    if dbvendor in ("oracle", "oracle23ai", "olr"):
-        time.sleep(60)
+    if dbvendor in ("oracle", "olr"):
+        time.sleep(50)
+    elif dbvendor == "oracle23ai":
+        time.sleep(100)
     else:
         time.sleep(10)
 
@@ -1107,8 +1122,10 @@ def test_ConnectorStartSchemaSyncModeFDW(pg_cursor, dbvendor):
         """
 
     run_remote_query(dbvendor, query)
-    if dbvendor in ("oracle", "oracle23ai", "olr"):
-        time.sleep(30)
+    if dbvendor in ("oracle", "olr"):
+        time.sleep(50)
+    elif dbvendor == "oracle23ai":
+        time.sleep(100)
     else:
         time.sleep(10)
 
