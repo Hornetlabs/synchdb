@@ -5,7 +5,6 @@ from common import run_pg_query, run_pg_query_one, run_remote_query, create_sync
 # import pytest
 # pytestmark = pytest.mark.skip(reason="跳过此文件")
 
-
 def test_CreateTable(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_ddl"
     dbname = getDbname(dbvendor).lower()
@@ -78,7 +77,6 @@ def test_CreateTable(pg_cursor, dbvendor):
     drop_default_pg_schema(pg_cursor, dbvendor)
     run_remote_query(dbvendor, "DROP TABLE create_table_test")
     drop_repslot_and_pub(dbvendor, name, "postgres")
-
 
 def test_CreateTableWithSpace(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_ddl"
@@ -162,7 +160,6 @@ def test_CreateTableWithSpace(pg_cursor, dbvendor):
     else:
         run_remote_query(dbvendor, "DROP TABLE \"create table test\"")
 
-
 def test_CreateTableWithNoPK(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_ddl"
     dbname = getDbname(dbvendor).lower()
@@ -234,7 +231,6 @@ def test_CreateTableWithNoPK(pg_cursor, dbvendor):
     drop_default_pg_schema(pg_cursor, dbvendor)
     drop_repslot_and_pub(dbvendor, name, "postgres")
     run_remote_query(dbvendor, "DROP TABLE create_table_nopk")
-
 
 def test_CreateTableWithNotInlinePK(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_ddl"
@@ -320,7 +316,6 @@ def test_CreateTableWithNotInlinePK(pg_cursor, dbvendor):
     drop_default_pg_schema(pg_cursor, dbvendor)
     drop_repslot_and_pub(dbvendor, name, "postgres")
     run_remote_query(dbvendor, "DROP TABLE create_table_noinlinepk")
-
 
 def test_DropTable(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_ddl"
@@ -411,7 +406,6 @@ def test_DropTable(pg_cursor, dbvendor):
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
     drop_repslot_and_pub(dbvendor, name, "postgres")
-
 
 def test_DropTableWithSpace(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_ddl"
@@ -510,7 +504,6 @@ def test_DropTableWithSpace(pg_cursor, dbvendor):
     drop_default_pg_schema(pg_cursor, dbvendor)
     drop_repslot_and_pub(dbvendor, name, "postgres")
 
-
 def test_AlterTableAlterColumn(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_ddl"
     dbname = getDbname(dbvendor).lower()
@@ -607,7 +600,6 @@ def test_AlterTableAlterColumn(pg_cursor, dbvendor):
     drop_default_pg_schema(pg_cursor, dbvendor)
     drop_repslot_and_pub(dbvendor, name, "postgres")
     run_remote_query(dbvendor, "DROP TABLE alter_table_alter_col")
-
 
 def test_AlterTableAlterColumnAddPK(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_ddl"
@@ -727,7 +719,6 @@ def test_AlterTableAlterColumnAddPK(pg_cursor, dbvendor):
     drop_repslot_and_pub(dbvendor, name, "postgres")
     run_remote_query(dbvendor, "DROP TABLE alter_table_addpk")
     assert True
-
 
 def test_AlterTableiAddColumn(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_ddl"

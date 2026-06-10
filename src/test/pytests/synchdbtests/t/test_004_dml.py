@@ -5,7 +5,6 @@ from common import run_pg_query, run_pg_query_one, run_remote_query, create_sync
 # import pytest
 # pytestmark = pytest.mark.skip(reason="跳过此文件")
 
-
 def test_Insert(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_insert"
     dbname = getDbname(dbvendor).lower()
@@ -75,10 +74,8 @@ def test_Insert(pg_cursor, dbvendor):
     drop_default_pg_schema(pg_cursor, dbvendor)
     drop_repslot_and_pub(dbvendor, name, "postgres")
 
-
 def test_InsertWithError(pg_cursor, dbvendor):
     assert True
-
 
 def test_Update(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_update"
@@ -153,7 +150,6 @@ def test_Update(pg_cursor, dbvendor):
     drop_default_pg_schema(pg_cursor, dbvendor)
     drop_repslot_and_pub(dbvendor, name, "postgres")
 
-
 def test_UpdateWithError(pg_cursor, dbvendor):
     assert True
 
@@ -212,7 +208,7 @@ def test_Delete(pg_cursor, dbvendor):
     run_remote_query(dbvendor, "COMMIT")
 
     if dbvendor in ("oracle", "oracle23ai", "olr"):
-        time.sleep(80)
+        time.sleep(90)
     else:
         time.sleep(15)
 

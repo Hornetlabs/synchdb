@@ -2,6 +2,7 @@ import os
 import subprocess
 import socket
 import time
+from datetime import datetime
 
 def get_container_ip(name: str, network: str = "synchdbnet") -> str | None:
     # Go template with the specific network:
@@ -119,14 +120,14 @@ def getSchema(dbvendor):
         return ORA19C_SCHEMA
 
 def run_pg_query(cursor, query):
-    # print(f"[run_pg_query] {query}")  # Debug: print the query being executed
+    print(f"[{datetime.now().strftime('%H:%M:%S')}][run_pg_query] {query}")  # Debug: print the query being executed
     cursor.execute(query)
     if cursor.description:  # Only fetch if query returns results
         return cursor.fetchall()
     return None
 
 def run_pg_query_one(cursor, query):
-    # print(f"[run_pg_query_one] {query}")  # Debug: print the query being executed
+    print(f"[{datetime.now().strftime('%H:%M:%S')}][run_pg_query_one] {query}")  # Debug: print the query being executed
     cursor.execute(query)
     if cursor.description:
         return cursor.fetchone()
@@ -222,6 +223,8 @@ def run_remote_query(where, query, srcdb=None):
         "olr": ORA19C_DB,
         "postgres": POSTGRES_DB
     }[where]
+
+    print(f"[{datetime.now().strftime('%H:%M:%S')}][run_remote_query] Running on {db}: {query}")  # Debug: print the query being executed
 
     try:
         if where == "mysql":
@@ -415,3 +418,31 @@ def drop_repslot_and_pub(dbvendor, name, dstdb):
 
     run_remote_query(dbvendor, f"SELECT pg_drop_replication_slot('{name}_{dstdb}_synchdb_slot')")
     run_remote_query(dbvendor, f"DROP PUBLICATION IF EXISTS {name}_{dstdb}_synchdb_pub")
+
+
+def restart_remote_db(dbvendor, wait_time=30):
+    """
+    BUG WORKAROUND: Restart the remote database container.
+
+    Restart the remote database container.
+    This is mainly used for oracle23ai, because it seems
+    to have some stability issue after running for a while,
+    and restart can help recover it.
+    """
+    if dbvendor == "mysql":
+        subprocess.run(["docker", "restart", "mysql"], check=True)
+    elif dbvendor == "sqlserver":
+        subprocess.run(["docker", "restart", "sqlserver"], check=True)
+    elif dbvendor == "oracle":
+        subprocess.run(["docker", "restart", "ora19c"], check=True)
+    elif dbvendor == "oracle23ai":
+        subprocess.run(["docker", "restart", "eztest_oracle23ai"], check=True)
+    elif dbvendor == "olr":
+        subprocess.run(["docker", "restart", "OpenLogReplicator"], check=True)
+    else:
+        print(f"restart not supported for {dbvendor}")
+        return
+
+    if wait_time > 0:
+        print(f"waiting {wait_time} seconds for {dbvendor} to restart...")
+        time.sleep(wait_time)

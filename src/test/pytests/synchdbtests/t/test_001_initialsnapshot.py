@@ -1,7 +1,7 @@
 import common
 import time
 from datetime import datetime
-from common import run_pg_query, run_pg_query_one, run_remote_query, create_synchdb_connector, getConnectorName, getDbname, verify_default_type_mappings, stop_and_delete_synchdb_connector, drop_default_pg_schema, create_and_start_synchdb_connector, update_guc_conf, getSchema, drop_repslot_and_pub
+from common import run_pg_query, run_pg_query_one, run_remote_query, create_synchdb_connector, getConnectorName, getDbname, verify_default_type_mappings, stop_and_delete_synchdb_connector, drop_default_pg_schema, create_and_start_synchdb_connector, update_guc_conf, getSchema, drop_repslot_and_pub, restart_remote_db
 
 # import pytest
 # pytestmark = pytest.mark.skip(reason="跳过此文件")
@@ -218,12 +218,13 @@ def test_InitialSnapshotFDW(pg_cursor, dbvendor):
             return
 
     update_guc_conf(pg_cursor, "synchdb.snapshot_engine", "'fdw'", True)
+    update_guc_conf(pg_cursor, "synchdb.letter_casing_strategy", "'lowercase'", True)
 
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial")
     assert result == 0
 
     if dbvendor in ("oracle", "oracle23ai", "olr"):
-        time.sleep(30)
+        time.sleep(80)
     else:
         time.sleep(10)
 
@@ -407,7 +408,7 @@ def test_InitialSnapshotDBZ_uppercase(pg_cursor, dbvendor):
     if dbvendor == "mysql":
         query = """
             INSERT INTO orders(order_number, order_date, purchaser, quantity,
-            product_id) VALUES (10005, '2025-12-12', 1002, 10000, 102)
+            product_id) VALUES (10005, '2025-12-12', 1002, 10000, 102);
         """
     elif dbvendor == "sqlserver":
         query = """
@@ -415,10 +416,10 @@ def test_InitialSnapshotDBZ_uppercase(pg_cursor, dbvendor):
             ("2025-12-12", 1002, 10000, 102)
         """
     elif dbvendor == "postgres":
-	    query = """
-		    INSERT INTO orders(order_number, order_date, purchaser, quantity,
-    		product_id) VALUES (10005, '2025-12-12', 1002, 10000, 102);
-	    """
+        query = """
+            INSERT INTO orders(order_number, order_date, purchaser, quantity,
+            product_id) VALUES (10005, '2025-12-12', 1002, 10000, 102);
+        """
     else:
         query = """
             INSERT INTO orders(order_number, order_date, purchaser, quantity,
@@ -478,7 +479,7 @@ def test_InitialSnapshotFDW_uppercase(pg_cursor, dbvendor):
     assert result == 0
 
     if dbvendor in ("oracle", "oracle23ai", "olr"):
-        time.sleep(30)
+        time.sleep(80)
     else:
         time.sleep(10)
 
@@ -556,10 +557,10 @@ def test_InitialSnapshotFDW_uppercase(pg_cursor, dbvendor):
             ("2025-12-12", 1002, 10000, 102)
         """
     elif dbvendor == "postgres":
-	    query = """
-    		INSERT INTO orders(order_number, order_date, purchaser, quantity,
-		    product_id) VALUES (10005, '2025-12-12', 1002, 10000, 102);
-	    """
+        query = """
+            INSERT INTO orders(order_number, order_date, purchaser, quantity,
+            product_id) VALUES (10005, '2025-12-12', 1002, 10000, 102);
+        """
     else:
         query = """
             INSERT INTO orders(order_number, order_date, purchaser, quantity,
@@ -587,6 +588,8 @@ def test_InitialSnapshotFDW_uppercase(pg_cursor, dbvendor):
 
 
 def test_InitialSnapshotDBZ_asis(pg_cursor, dbvendor):
+    restart_remote_db(dbvendor)
+    
     name = getConnectorName(dbvendor) + "_dbzsnap_asis"
     dbname = getDbname(dbvendor)
     schema = getSchema(dbvendor)
@@ -687,10 +690,10 @@ def test_InitialSnapshotDBZ_asis(pg_cursor, dbvendor):
             ("2025-12-12", 1002, 10000, 102)
         """
     elif dbvendor == "postgres":
-    	query = """
-	    	INSERT INTO orders(order_number, order_date, purchaser, quantity,
-		    product_id) VALUES (10005, '2025-12-12', 1002, 10000, 102);
-    	"""
+        query = """
+            INSERT INTO orders(order_number, order_date, purchaser, quantity,
+            product_id) VALUES (10005, '2025-12-12', 1002, 10000, 102);
+        """
     else:
         query = """
             INSERT INTO orders(order_number, order_date, purchaser, quantity,
@@ -700,7 +703,7 @@ def test_InitialSnapshotDBZ_asis(pg_cursor, dbvendor):
 
     run_remote_query(dbvendor, query)
     if dbvendor in ("oracle", "oracle23ai", "olr"):
-        time.sleep(30)
+        time.sleep(50)
     else:
         time.sleep(10)
 
@@ -838,10 +841,10 @@ def test_InitialSnapshotFDW_asis(pg_cursor, dbvendor):
             ("2025-12-12", 1002, 10000, 102)
         """
     elif dbvendor == "postgres":
-    	query = """
-		    INSERT INTO orders(order_number, order_date, purchaser, quantity,
-		    product_id) VALUES (10005, '2025-12-12', 1002, 10000, 102);
-	    """
+        query = """
+            INSERT INTO orders(order_number, order_date, purchaser, quantity,
+            product_id) VALUES (10005, '2025-12-12', 1002, 10000, 102);
+        """
     else:
         query = """
             INSERT INTO orders(order_number, order_date, purchaser, quantity,
@@ -851,7 +854,7 @@ def test_InitialSnapshotFDW_asis(pg_cursor, dbvendor):
 
     run_remote_query(dbvendor, query)
     if dbvendor in ("oracle", "oracle23ai", "olr"):
-        time.sleep(30)
+        time.sleep(60)
     else:
         time.sleep(10)
 
@@ -869,7 +872,6 @@ def test_InitialSnapshotFDW_asis(pg_cursor, dbvendor):
     update_guc_conf(pg_cursor, "synchdb.letter_casing_strategy", "'lowercase'", True)
     drop_repslot_and_pub(dbvendor, name, "postgres")
     time.sleep(10)
-
 
 def test_ConnectorStartSchemaSyncModeDBZ(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_dbz_schemasync"
@@ -965,10 +967,10 @@ def test_ConnectorStartSchemaSyncModeDBZ(pg_cursor, dbvendor):
             1002, 10000, 102);
         """
     elif dbvendor == "postgres":
-	    query = """
-    		INSERT INTO orders(order_number, order_date, purchaser, quantity,
-		    product_id) VALUES (10005, '2025-12-12', 1002, 10000, 102);
-	    """
+        query = """
+            INSERT INTO orders(order_number, order_date, purchaser, quantity,
+            product_id) VALUES (10005, '2025-12-12', 1002, 10000, 102);
+        """
     else:
         query = """
             INSERT INTO orders(order_number, order_date, purchaser, quantity,
@@ -978,7 +980,7 @@ def test_ConnectorStartSchemaSyncModeDBZ(pg_cursor, dbvendor):
 
     run_remote_query(dbvendor, query)
     if dbvendor in ("oracle", "oracle23ai", "olr"):
-        time.sleep(30)
+        time.sleep(60)
     else:
         time.sleep(10)
 
@@ -990,7 +992,6 @@ def test_ConnectorStartSchemaSyncModeDBZ(pg_cursor, dbvendor):
     run_remote_query(dbvendor, f"DELETE FROM orders WHERE order_number > 10004")
     drop_repslot_and_pub(dbvendor, name, "postgres")
     time.sleep(10)
-
 
 def test_ConnectorStartSchemaSyncModeFDW(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_fdw_schemasync"
@@ -1202,7 +1203,6 @@ def test_ConnectorStartAlwaysModeDBZ(pg_cursor, dbvendor):
     drop_default_pg_schema(pg_cursor, dbvendor)
     drop_repslot_and_pub(dbvendor, name, "postgres")
 
-
 def test_ConnectorStartAlwaysModeFDW(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_dbz_always"
     dbname = getDbname(dbvendor).lower()
@@ -1384,7 +1384,6 @@ def test_ConnectorStartNodataModeDBZ(pg_cursor, dbvendor):
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
     drop_repslot_and_pub(dbvendor, name, "postgres")
-
 
 def test_ConnectorStartNodataModeFDW(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_dbz_nodata"
