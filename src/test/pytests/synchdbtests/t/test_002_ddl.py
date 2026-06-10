@@ -330,6 +330,10 @@ def test_CreateTableWithNotInlinePK(pg_cursor, dbvendor):
     run_remote_query(dbvendor, "DROP TABLE create_table_noinlinepk")
 
 def test_DropTable(pg_cursor, dbvendor):
+
+    if dbvendor == "oracle23ai":
+        restart_remote_db(dbvendor)
+
     name = getConnectorName(dbvendor) + "_ddl"
     dbname = getDbname(dbvendor).lower()
 
@@ -382,8 +386,10 @@ def test_DropTable(pg_cursor, dbvendor):
         );
         """
     run_remote_query(dbvendor, query)
-    if dbvendor in ("oracle", "oracle23ai", "olr"):
+    if dbvendor in ("oracle", "olr"):
         time.sleep(60)
+    elif dbvendor == "oracle23ai":
+        time.sleep(100)
     else:
         time.sleep(20)
 
