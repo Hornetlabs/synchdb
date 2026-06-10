@@ -1,11 +1,15 @@
 import common
 import time
-from common import run_pg_query, run_pg_query_one, run_remote_query, create_synchdb_connector, getConnectorName, getDbname, verify_default_type_mappings, create_and_start_synchdb_connector, stop_and_delete_synchdb_connector, drop_default_pg_schema, drop_repslot_and_pub
+from common import restart_remote_db, run_pg_query, run_pg_query_one, run_remote_query, create_synchdb_connector, getConnectorName, getDbname, verify_default_type_mappings, create_and_start_synchdb_connector, stop_and_delete_synchdb_connector, drop_default_pg_schema, drop_repslot_and_pub
 
 # import pytest
 # pytestmark = pytest.mark.skip(reason="跳过此文件")
 
 def test_CreateTable(pg_cursor, dbvendor):
+
+    if dbvendor == "oracle23ai":
+        restart_remote_db(dbvendor)
+
     name = getConnectorName(dbvendor) + "_ddl"
     dbname = getDbname(dbvendor).lower()
 
@@ -58,8 +62,10 @@ def test_CreateTable(pg_cursor, dbvendor):
         );
         """
     run_remote_query(dbvendor, query)
-    if dbvendor in ("oracle", "oracle23ai", "olr"):
+    if dbvendor in ("oracle", "olr"):
         time.sleep(60)
+    elif dbvendor == "oracle23ai":
+        time.sleep(100)
     else:
         time.sleep(20)
 
@@ -131,8 +137,10 @@ def test_CreateTableWithSpace(pg_cursor, dbvendor):
         );
         """
     run_remote_query(dbvendor, query)
-    if dbvendor in ("oracle", "oracle23ai", "olr"):
+    if dbvendor in ("oracle", "olr"):
         time.sleep(90)
+    elif dbvendor == "oracle23ai":
+        time.sleep(120)
     else:
         time.sleep(20)
 
@@ -213,8 +221,10 @@ def test_CreateTableWithNoPK(pg_cursor, dbvendor):
         );
         """
     run_remote_query(dbvendor, query)
-    if dbvendor in ("oracle", "oracle23ai", "olr"):
+    if dbvendor in ("oracle", "olr"):
         time.sleep(80)
+    elif dbvendor == "oracle23ai":
+        time.sleep(120)
     else:
         time.sleep(40)
 
@@ -289,8 +299,10 @@ def test_CreateTableWithNotInlinePK(pg_cursor, dbvendor):
         );
         """
     run_remote_query(dbvendor, query)
-    if dbvendor in ("oracle", "oracle23ai", "olr"):
+    if dbvendor in ("oracle", "olr"):
         time.sleep(90)
+    elif dbvendor == "oracle23ai":
+        time.sleep(120)
     else:
         time.sleep(20)
 
