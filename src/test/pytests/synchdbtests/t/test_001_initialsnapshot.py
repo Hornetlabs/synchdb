@@ -1435,8 +1435,10 @@ def test_ConnectorStartNodataModeFDW(pg_cursor, dbvendor):
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "no_data")
     assert result == 0
 
-    if dbvendor in ("oracle", "oracle23ai", "olr"):
+    if dbvendor in ("oracle", "olr"):
         time.sleep(30)
+    elif dbvendor == "oracle23ai":
+        time.sleep(60)
     else:
         time.sleep(10)
 

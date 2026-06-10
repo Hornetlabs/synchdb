@@ -272,8 +272,10 @@ def test_AllDefaultDataTypes(pg_cursor, dbvendor):
         """
 
     run_remote_query(dbvendor, query)
-    if dbvendor in ("oracle", "oracle23ai", "olr"):
+    if dbvendor in ("oracle", "olr"):
         time.sleep(30)
+    elif dbvendor == "oracle23ai":
+        time.sleep(60)
     else:
         time.sleep(20)
     
@@ -475,8 +477,10 @@ def test_AllDefaultDataTypes(pg_cursor, dbvendor):
         """
 
     run_remote_query(dbvendor, query)
-    if dbvendor in ("oracle", "oracle23ai", "olr"):
+    if dbvendor in ("oracle", "olr"):
         time.sleep(60)
+    elif dbvendor == "oracle23ai":
+        time.sleep(120)
     else:
         time.sleep(15)
 
