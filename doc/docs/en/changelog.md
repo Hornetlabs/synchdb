@@ -80,7 +80,7 @@ SynchDB 1.2 introduces introduces a native Openlog Replicator connector (BETA), 
 * Supported DMLs: insert, update delete
 * Supported DDLs: CREATE TABLE, DROP TABLE, ALTER TABLE MODIFY, ALTER TABLE ADD/DROP COLUMN, ALTER TABLE ADD/DROP CONSTRAINT, TRUNCATE
 * Based on libprotobuf-c to communiate with Openlog Replicator and IvorySQL's Oracle parser to process incoming DDL query events,
-* Supported snapshot modes: initial, initial_only, no_data, always, never
+* Supported snapshot modes: initial, initial_only, no_data, always
 * Supported batching, schema history, and offset management just like other Debezium based connectors.
 * Supported Debezium-based Openlog Replicator connector in addition to native.
 

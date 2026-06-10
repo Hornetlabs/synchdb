@@ -79,7 +79,7 @@ SynchDB 1.2 引入了原生 Openlog Replicator 连接器（测试版）、增强
 * 支持的 DML：插入、更新/删除
 * 支持的 DDL：创建表、删除表、修改表、添加/删除列、添加/删除约束、截断
 * 基于 libprotobuf-c 与 Openlog Replicator 和 IvorySQL 的 Oracle 解析器通信，以处理传入的 DDL 查询事件。
-* 支持的快照模式：initial、initial_only、no_data、always、never
+* 支持的快照模式：initial、initial_only、no_data、always
 * 与其他基于 Debezium 的连接器一样，支持批处理、模式历史记录和偏移量管理。
 * 除原生连接器外，还支持基于 Debezium 的 Openlog Replicator 连接器。
 
