@@ -1,11 +1,15 @@
 import common
 import time
-from common import run_pg_query, run_pg_query_one, run_remote_query, create_synchdb_connector, getConnectorName, getDbname, create_and_start_synchdb_connector, stop_and_delete_synchdb_connector, drop_default_pg_schema, drop_repslot_and_pub
+from common import restart_remote_db, run_pg_query, run_pg_query_one, run_remote_query, create_synchdb_connector, getConnectorName, getDbname, create_and_start_synchdb_connector, stop_and_delete_synchdb_connector, drop_default_pg_schema, drop_repslot_and_pub
 
 # import pytest
 # pytestmark = pytest.mark.skip(reason="跳过此文件")
 
 def test_Insert(pg_cursor, dbvendor):
+
+    if dbvendor == "oracle23ai":
+        restart_remote_db(dbvendor)
+
     name = getConnectorName(dbvendor) + "_insert"
     dbname = getDbname(dbvendor).lower()
 
