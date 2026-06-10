@@ -1,6 +1,6 @@
 #原生 Openlog Replicator 連接器
 
-## **準備用於 SynchDB 的 MySQL 資料庫**
+## **準備用於 SynchDB 的 Oracle 資料庫**
 
 在使用 SynchDB 透過原生 Openlog Replicator (OLR) 連接器進行複製之前，OLR 和 Oracle 資料庫本身都需要按照[此處](../../getting-started/remote_database_setups/)中概述的步驟進行設定。
 
@@ -106,16 +106,6 @@ SELECT synchdb_start_engine_bgw('olrconn', 'no_data');
 
 以 `no_data` 模式重新啟動連接器不會再次重建架構，而是從上次成功捕獲的位置繼續 CDC 擷取。
 
-### **僅 CDC**
-
-使用 `never` 模式啟動連接器將完全跳過架構擷取和初始快照，直接進入 CDC 模式擷取後續變更。請注意，連接器要求所有擷取表在以 `never` 模式啟動之前已在 PostgreSQL 中建立。如果表不存在，連接器在嘗試將 CDC 變更套用到不存在的表時會遇到錯誤。
-
-```sql
-SELECT synchdb_start_engine_bgw('olrconn', 'never');
-
-```
-
-以 `never` 模式重新啟動連接器將從上次成功點恢復 CDC。
 
 ### **始終執行初始快照 + CDC**
 
@@ -128,12 +118,11 @@ SELECT synchdb_start_engine_bgw('olrconn', 'always');
 
 初始快照完成後，CDC 將開始。在 `always` 模式下重新啟動連接器將重複上述過程。
 
-## **MySQL 連接器的可用快照模式**
+## **Oracle 連接器的可用快照模式**
 
 * initial（預設）
 * initial_only
 * no_data
-* never
 * always
 * schemasync
 

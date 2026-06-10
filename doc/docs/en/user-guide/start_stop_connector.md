@@ -32,8 +32,8 @@ SELECT synchdb_start_engine_bgw('mysqlconn', 'always');
 | `initial` | First-time snapshot only | Normal operations |
 | `initial_only` | One-time snapshot, then stop | Data migration |
 | `no_data` | Structure only, no data | Schema synchronization |
-| `never` | Skip snapshot, stream only | Real-time updates |
-| `schemasync` | Structure only, no data, no CDC | normal operations |
+| `never` | Skip snapshot, stream only (MySQL only) | Real-time updates |
+| `schemasync` | same as `no_data` | normal operations |
 
 
 **Refer to the [tutorial](../../tutorial/selective_table_sync/) on when to use what mode**

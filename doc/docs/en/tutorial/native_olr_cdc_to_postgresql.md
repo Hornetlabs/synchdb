@@ -102,17 +102,6 @@ SELECT synchdb_start_engine_bgw('olrconn', 'no_data');
 
 Restarting the connector in `no_data` mode will not rebuild the schema again, and it will resume CDC since the last successful point.
 
-### **CDC only**
-
-Start the connector using `never` will skip schema capture and initial snapshot entirely and will go to CDC mode to capture subsequent changes. Please note that the connector expects all the capture tables have been created in PostgreSQL prior to starting in `never` mode. If the tables do not exist, the connector will encounter an error when it tries to apply a CDC change to a non-existent table.
-
-```sql
-SELECT synchdb_start_engine_bgw('olrconn', 'never');
-
-```
-
-Restarting the connector in `never` mode will resume CDC since the last successful point.
-
 ### **Always do Initial Snapshot + CDC**
 
 Start the connector using `always` mode will always capture the schemas of capture tables, always redo the initial snapshot and then go to CDC. This is similar to a reset button because everything will be rebuilt using this mode. Use it with caution especially when you have large number of tables being captured, which could take a long time to finish. After the rebuild, CDC resumes as normal.
@@ -129,7 +118,6 @@ After the initial snapshot, CDC will begin. Restarting a connector in `always` m
 * initial (default)
 * initial_only
 * no_data
-* never
 * always
 * schemasync
 

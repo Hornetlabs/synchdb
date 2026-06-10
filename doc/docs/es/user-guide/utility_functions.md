@@ -146,8 +146,7 @@ SELECT synchdb_set_offset(
 | `initial` | Solo instantánea inicial | Operaciones normales |
 | `initial_only` | Una única instantánea, luego se detiene | Migración de datos |
 | `no_data` | Solo estructura, sin datos | Sincronización de esquema |
-| `never` | Omite instantánea, solo transmite | Actualizaciones en tiempo real |
-| `recovery` | Reconstruye desde el origen | Recuperación de desastres |
+| `never` | Omite instantánea, solo transmite (solo MySQL) | Actualizaciones en tiempo real |
 | `when_needed` | Instantánea condicional | Recuperación automática |
 
 **Ejemplo**:
