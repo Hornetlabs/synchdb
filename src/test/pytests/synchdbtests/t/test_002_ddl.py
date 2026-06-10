@@ -478,8 +478,10 @@ def test_DropTableWithSpace(pg_cursor, dbvendor):
         );
         """
     run_remote_query(dbvendor, query)
-    if dbvendor in ("oracle", "oracle23ai", "olr"):
+    if dbvendor in ("oracle", "olr"):
         time.sleep(60)
+    elif dbvendor == "oracle23ai":
+        time.sleep(100)
     else:
         time.sleep(20)
 
@@ -501,8 +503,10 @@ def test_DropTableWithSpace(pg_cursor, dbvendor):
     else:
         run_remote_query(dbvendor, "DROP TABLE \"drop with space\"")
 
-    if dbvendor in ("oracle", "oracle23ai", "olr"):
+    if dbvendor in ("oracle", "olr"):
         time.sleep(60)
+    elif dbvendor == "oracle23ai":
+        time.sleep(100)
     else:
         time.sleep(20)
 
@@ -575,8 +579,10 @@ def test_AlterTableAlterColumn(pg_cursor, dbvendor):
         );
         """
     run_remote_query(dbvendor, query)
-    if dbvendor in ("oracle", "oracle23ai", "olr"):
+    if dbvendor in ("oracle", "olr"):
         time.sleep(60)
+    elif dbvendor == "oracle23ai":
+        time.sleep(100)
     else:
         time.sleep(20)
 
@@ -599,8 +605,10 @@ def test_AlterTableAlterColumn(pg_cursor, dbvendor):
         run_remote_query(dbvendor, "ALTER TABLE alter_table_alter_col MODIFY age NUMBER(10,0)")
 
 
-    if dbvendor in ("oracle", "oracle23ai", "olr"):
+    if dbvendor in ("oracle", "olr"):
         time.sleep(60)
+    elif dbvendor == "oracle23ai":
+        time.sleep(100)
     else:
         time.sleep(20)
 
@@ -673,8 +681,10 @@ def test_AlterTableAlterColumnAddPK(pg_cursor, dbvendor):
         );
         """
     run_remote_query(dbvendor, query)
-    if dbvendor in ("oracle", "oracle23ai", "olr"):
+    if dbvendor in ("oracle", "olr"):
         time.sleep(80)
+    elif dbvendor == "oracle23ai":
+        time.sleep(120)
     else:
         time.sleep(20)
 
@@ -717,8 +727,10 @@ def test_AlterTableAlterColumnAddPK(pg_cursor, dbvendor):
                 ADD CONSTRAINT pk_create_table_addpk PRIMARY KEY (id);
             """)
 
-    if dbvendor in ("oracle", "oracle23ai", "olr"):
+    if dbvendor in ("oracle", "olr"):
         time.sleep(60)
+    elif dbvendor == "oracle23ai":
+        time.sleep(100)
     else:
         time.sleep(20)
 
@@ -792,8 +804,10 @@ def test_AlterTableiAddColumn(pg_cursor, dbvendor):
         );
         """
     run_remote_query(dbvendor, query)
-    if dbvendor in ("oracle", "oracle23ai", "olr"):
+    if dbvendor in ("oracle", "olr"):
         time.sleep(60)
+    elif dbvendor == "oracle23ai":
+        time.sleep(100)
     else:
         time.sleep(20)
 
@@ -830,8 +844,10 @@ def test_AlterTableiAddColumn(pg_cursor, dbvendor):
     else:
         run_remote_query(dbvendor, "ALTER TABLE alter_table_add_col ADD age NUMBER")
 
-    if dbvendor in ("oracle", "oracle23ai", "olr"):
+    if dbvendor in ("oracle", "olr"):
         time.sleep(60)
+    elif dbvendor == "oracle23ai":
+        time.sleep(100)
     else:
         time.sleep(20)
 
@@ -904,8 +920,10 @@ def test_AlterTableDropColumn(pg_cursor, dbvendor):
         );
         """
     run_remote_query(dbvendor, query)
-    if dbvendor in ("oracle", "oracle23ai", "olr"):
+    if dbvendor in ("oracle", "olr"):
         time.sleep(80)
+    elif dbvendor == "oracle23ai":
+        time.sleep(120)
     else:
         time.sleep(20)
 
@@ -919,8 +937,11 @@ def test_AlterTableDropColumn(pg_cursor, dbvendor):
     assert len(rows) == 3
 
     run_remote_query(dbvendor, "ALTER TABLE alter_table_drop_col DROP COLUMN created_at")
-    if dbvendor in ("oracle", "oracle23ai", "olr"):
+
+    if dbvendor in ("oracle", "olr"):
         time.sleep(60)
+    elif dbvendor == "oracle23ai":
+        time.sleep(100)
     else:
         time.sleep(20)
 
