@@ -322,6 +322,7 @@ def test_InitialSnapshotFDW(pg_cursor, dbvendor):
 
 
 def test_InitialSnapshotDBZ_uppercase(pg_cursor, dbvendor):
+    restart_remote_db(dbvendor)
     name = getConnectorName(dbvendor) + "_dbzsnap_upper"
     dbname = getDbname(dbvendor).upper()
     schema = getSchema(dbvendor)

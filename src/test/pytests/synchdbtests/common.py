@@ -120,14 +120,14 @@ def getSchema(dbvendor):
         return ORA19C_SCHEMA
 
 def run_pg_query(cursor, query):
-    print(f"[{datetime.now().strftime('%H:%M:%S')}][run_pg_query] {query}")  # Debug: print the query being executed
+    # print(f"[{datetime.now().strftime('%H:%M:%S')}][run_pg_query] {query}")  # Debug: print the query being executed
     cursor.execute(query)
     if cursor.description:  # Only fetch if query returns results
         return cursor.fetchall()
     return None
 
 def run_pg_query_one(cursor, query):
-    print(f"[{datetime.now().strftime('%H:%M:%S')}][run_pg_query_one] {query}")  # Debug: print the query being executed
+    # print(f"[{datetime.now().strftime('%H:%M:%S')}][run_pg_query_one] {query}")  # Debug: print the query being executed
     cursor.execute(query)
     if cursor.description:
         return cursor.fetchone()
@@ -224,7 +224,7 @@ def run_remote_query(where, query, srcdb=None):
         "postgres": POSTGRES_DB
     }[where]
 
-    print(f"[{datetime.now().strftime('%H:%M:%S')}][run_remote_query] Running on {db}: {query}")  # Debug: print the query being executed
+    # print(f"[{datetime.now().strftime('%H:%M:%S')}][run_remote_query] Running on {db}: {query}")  # Debug: print the query being executed
 
     try:
         if where == "mysql":
