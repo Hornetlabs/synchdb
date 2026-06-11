@@ -216,26 +216,6 @@ static int populate_debezium_metadata(ConnectionInfo * connInfo, ConnectorType c
 		const char * dstdb, const char * srcdb);
 static int launch_fdw_based_snapshot(ConnectorType connectorType, ConnectionInfo *connInfo,
 		char * snapshotMode, bool schemahistory);
-/*
- * count_active_connectors
- *
- * helper function to count number of active connectors
- *
- * @return: number of active connectors
- */
-static int
-count_active_connectors(void)
-{
-	int i = 0;
-
-	for (i = 0; i < synchdb_max_connector_workers; i++)
-	{
-		/* if an empty name is found, there is no need to continue counting */
-		if (strlen(sdb_state->connectors[i].conninfo.name) == 0)
-			break;
-	}
-	return i;
-}
 
 /*
  * has_running_connectors_for_db
