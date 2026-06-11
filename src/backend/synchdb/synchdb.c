@@ -216,26 +216,6 @@ static int populate_debezium_metadata(ConnectionInfo * connInfo, ConnectorType c
 		const char * dstdb, const char * srcdb);
 static int launch_fdw_based_snapshot(ConnectorType connectorType, ConnectionInfo *connInfo,
 		char * snapshotMode, bool schemahistory);
-/*
- * count_active_connectors
- *
- * helper function to count number of active connectors
- *
- * @return: number of active connectors
- */
-static int
-count_active_connectors(void)
-{
-	int i = 0;
-
-	for (i = 0; i < synchdb_max_connector_workers; i++)
-	{
-		/* if an empty name is found, there is no need to continue counting */
-		if (strlen(sdb_state->connectors[i].conninfo.name) == 0)
-			break;
-	}
-	return i;
-}
 
 /*
  * has_running_connectors_for_db
@@ -5028,11 +5008,18 @@ synchdb_get_state(PG_FUNCTION_ARGS)
 	funcctx = SRF_PERCALL_SETUP();
 	idx = (int *)funcctx->user_fctx;
 
-	while (*idx < count_active_connectors())
+	while (*idx < synchdb_max_connector_workers)
 	{
 		Datum values[7];
 		bool nulls[7] = {0};
 		HeapTuple tuple;
+
+		/* skip slots cleared by synchdb_del_conninfo */
+		if (sdb_state->connectors[*idx].conninfo.name[0] == '\0')
+		{
+				(*idx)++;
+				continue;
+		}
 
 		/* we only want to show the connectors created in current database */
 		if (strcasecmp(sdb_state->connectors[*idx].conninfo.dstdb,
@@ -5095,11 +5082,18 @@ synchdb_get_stats(PG_FUNCTION_ARGS)
 	funcctx = SRF_PERCALL_SETUP();
 	idx = (int *)funcctx->user_fctx;
 
-	while (*idx < count_active_connectors())
+	while (*idx < synchdb_max_connector_workers)
 	{
 		Datum values[20];
 		bool nulls[20] = {0};
 		HeapTuple tuple;
+
+		/* skip slots cleared by synchdb_del_conninfo */
+		if (sdb_state->connectors[*idx].conninfo.name[0] == '\0')
+		{
+				(*idx)++;
+				continue;
+		}
 
 		/* we only want to show the connectors created in current database */
 		if (strcasecmp(sdb_state->connectors[*idx].conninfo.dstdb,
@@ -6327,9 +6321,15 @@ synchdb_del_conninfo(PG_FUNCTION_ARGS)
 			elog(WARNING, "terminating dbz connector (%s) with pid %d. Shutdown timeout: %d ms",
 					NameStr(*name), (int)pid, DEBEZIUM_SHUTDOWN_TIMEOUT_MSEC);
 			DirectFunctionCall2(pg_terminate_backend, UInt32GetDatum(pid), Int64GetDatum(DEBEZIUM_SHUTDOWN_TIMEOUT_MSEC));
-			set_shm_connector_pid(connectorId, InvalidPid);
-
 		}
+
+		/* clear the shared memory slot so it no longer appears in state/stats views */
+		LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
+		memset(&sdb_state->connectors[connectorId], 0, sizeof(ActiveConnectors));
+		sdb_state->connectors[connectorId].pid   = InvalidPid;
+		sdb_state->connectors[connectorId].state = STATE_UNDEF;
+		sdb_state->connectors[connectorId].type  = TYPE_UNDEF;
+		LWLockRelease(&sdb_state->lock);
 	}
 
 	/* remove the connector info record */
