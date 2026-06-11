@@ -1,7 +1,11 @@
 import common
 import time
 from datetime import datetime
-from common import run_pg_query, run_pg_query_one, run_remote_query, create_synchdb_connector, getConnectorName, getDbname, verify_default_type_mappings, stop_and_delete_synchdb_connector, drop_default_pg_schema, create_and_start_synchdb_connector, update_guc_conf, getSchema, drop_repslot_and_pub
+from common import run_pg_query, run_pg_query_one, run_remote_query, create_synchdb_connector, getConnectorName, getDbname, verify_default_type_mappings, stop_and_delete_synchdb_connector, drop_default_pg_schema, create_and_start_synchdb_connector, update_guc_conf, getSchema, drop_repslot_and_pub, restart_remote_db
+
+# import pytest
+# pytestmark = pytest.mark.skip(reason="跳过此文件")
+
 
 def test_ConnectorCreate(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor)
@@ -11,7 +15,10 @@ def test_ConnectorCreate(pg_cursor, dbvendor):
     result = run_pg_query_one(pg_cursor, f"SELECT name, isactive, data->>'connector' FROM synchdb_conninfo WHERE name = '{name}'")
     assert result[0] == name
     assert result[1] == False
-    assert result[2] == dbvendor
+    if dbvendor in ('oracle', 'oracle23ai'):
+        assert result[2] == 'oracle'
+    else:
+        assert result[2] == dbvendor
 
     result = run_pg_query_one(pg_cursor, f"SELECT synchdb_add_extra_conninfo('{name}', 'verify_ca', '/path/ks', 'kspass', '/path/ts/', 'tspass')")
     assert result[0] == 0
@@ -22,6 +29,7 @@ def test_ConnectorCreate(pg_cursor, dbvendor):
     assert result[3] == "/path/ts/"
 
     stop_and_delete_synchdb_connector(pg_cursor, name)
+
 
 def test_CreateExtraConninfo(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor)
@@ -38,6 +46,7 @@ def test_CreateExtraConninfo(pg_cursor, dbvendor):
     assert row[2] == "truststore"
 
     stop_and_delete_synchdb_connector(pg_cursor, name)
+
 
 def test_RemoveExtraConninfo(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor)
@@ -58,6 +67,7 @@ def test_RemoveExtraConninfo(pg_cursor, dbvendor):
 
     stop_and_delete_synchdb_connector(pg_cursor, name)
 
+
 def test_ConnectorStart(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor)
     dbname = getDbname(dbvendor).lower()
@@ -72,14 +82,17 @@ def test_ConnectorStart(pg_cursor, dbvendor):
     assert row[0] == 0
 
     # oracle takes longer to start initial snapshot
-    if dbvendor == "oracle":
+    if dbvendor in ("oracle", "oracle23ai", "olr"):
         time.sleep(20)
     else:
         time.sleep(10)
 
     row = run_pg_query_one(pg_cursor, f"SELECT name, connector_type, pid, stage, state, err FROM synchdb_state_view WHERE name = '{name}'")
     assert row[0] == name
-    assert row[1] == dbvendor
+    if dbvendor in ('oracle', 'oracle23ai'):
+        assert row[1] == 'oracle'
+    else:
+        assert row[1] == dbvendor
     assert row[2] > -1
     assert row[3] == "initial snapshot" or row[3] == "change data capture"
     assert row[4] == "polling"
@@ -90,6 +103,7 @@ def test_ConnectorStart(pg_cursor, dbvendor):
 
     if dbvendor == "postgres":
         update_guc_conf(pg_cursor, "synchdb.snapshot_engine", "'debezium'", True)
+
 
 def test_InitialSnapshotDBZ(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_dbzsnap"
@@ -104,7 +118,7 @@ def test_InitialSnapshotDBZ(pg_cursor, dbvendor):
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial")
     assert result == 0
 
-    if dbvendor == "oracle" or dbvendor == "olr":
+    if dbvendor in ("oracle", "oracle23ai", "olr"):
         time.sleep(30)
     else:
         time.sleep(10)
@@ -128,7 +142,10 @@ def test_InitialSnapshotDBZ(pg_cursor, dbvendor):
 
     if dbvendor != "postgres":
         # check table name mappings
-        rows = run_pg_query(pg_cursor, f"SELECT ext_tbname, pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+        if dbvendor == "oracle23ai":
+            rows = run_pg_query(pg_cursor, f"SELECT ext_tbname, pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND type = 'oracle'")
+        else:
+            rows = run_pg_query(pg_cursor, f"SELECT ext_tbname, pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
         assert len(rows) > 0
         for row in rows:
             id = row[0].split(".")
@@ -137,13 +154,19 @@ def test_InitialSnapshotDBZ(pg_cursor, dbvendor):
             else:
                 assert row[0].lower() == row[1]
         # check attname mappings
-        rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+        if dbvendor == "oracle23ai":
+            rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = 'oracle'")
+        else:
+            rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
         assert len(rows) > 0
         for row in rows:
             assert row[0].lower() == row[1]
 
         # check data type mappings
-        rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+        if dbvendor == "oracle23ai":
+            rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND type = 'oracle'")
+        else:
+            rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
         assert len(rows) > 0
         for row in rows:
             assert verify_default_type_mappings(row[0], row[1], dbvendor) == True
@@ -152,7 +175,7 @@ def test_InitialSnapshotDBZ(pg_cursor, dbvendor):
     pgrow = run_pg_query_one(pg_cursor, f"SELECT order_number, order_date, purchaser, quantity, product_id FROM {dbname}.orders WHERE order_number = 10003")
     extrow = run_remote_query(dbvendor, f"SELECT order_number, order_date, purchaser, quantity, product_id FROM orders WHERE order_number = 10003")
     assert int(pgrow[0]) == int(extrow[0][0])
-    if dbvendor == "oracle" or dbvendor == "olr":
+    if dbvendor in ("oracle", "oracle23ai", "olr"):
         assert pgrow[1] == datetime.strptime(extrow[0][1], '%d-%b-%y')
     elif dbvendor == "postgres":
         assert pgrow[1] == datetime.strptime(extrow[0][1], '%Y-%m-%d %H:%M:%S')
@@ -165,6 +188,7 @@ def test_InitialSnapshotDBZ(pg_cursor, dbvendor):
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
     drop_repslot_and_pub(dbvendor, name, "postgres")
+
 
 def test_InitialSnapshotFDW(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_fdwsnap"
@@ -194,12 +218,13 @@ def test_InitialSnapshotFDW(pg_cursor, dbvendor):
             return
 
     update_guc_conf(pg_cursor, "synchdb.snapshot_engine", "'fdw'", True)
+    update_guc_conf(pg_cursor, "synchdb.letter_casing_strategy", "'lowercase'", True)
 
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial")
     assert result == 0
 
-    if dbvendor == "oracle" or dbvendor == "olr":
-        time.sleep(30)
+    if dbvendor in ("oracle", "oracle23ai", "olr"):
+        time.sleep(80)
     else:
         time.sleep(10)
 
@@ -221,7 +246,10 @@ def test_InitialSnapshotFDW(pg_cursor, dbvendor):
     assert int(pgrowcount[0]) == int(extrowcount[0][0])
 
     # check table name mappings
-    rows = run_pg_query(pg_cursor, f"SELECT ext_tbname, pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+    if dbvendor == "oracle23ai":
+        rows = run_pg_query(pg_cursor, f"SELECT ext_tbname, pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND type = 'oracle'")
+    else:
+        rows = run_pg_query(pg_cursor, f"SELECT ext_tbname, pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
     assert len(rows) > 0
     for row in rows:
         id = row[0].split(".")
@@ -231,13 +259,19 @@ def test_InitialSnapshotFDW(pg_cursor, dbvendor):
             assert row[0].lower() == row[1]
 
     # check attname mappings
-    rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+    if dbvendor == "oracle23ai":
+        rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = 'oracle'")
+    else:
+        rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
     assert len(rows) > 0
     for row in rows:
         assert row[0].lower() == row[1]
 
     # check data type mappings
-    rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+    if dbvendor == "oracle23ai":
+        rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND type = 'oracle'")
+    else:
+        rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
     assert len(rows) > 0
     for row in rows:
         assert verify_default_type_mappings(row[0], row[1], dbvendor) == True
@@ -246,7 +280,7 @@ def test_InitialSnapshotFDW(pg_cursor, dbvendor):
     pgrow = run_pg_query_one(pg_cursor, f"SELECT order_number, order_date, purchaser, quantity, product_id FROM {dbname}.orders WHERE order_number = 10003")
     extrow = run_remote_query(dbvendor, f"SELECT order_number, order_date, purchaser, quantity, product_id FROM orders WHERE order_number = 10003")
     assert int(pgrow[0]) == int(extrow[0][0])
-    if dbvendor == "oracle" or dbvendor == "olr":
+    if dbvendor in ("oracle", "oracle23ai", "olr"):
         assert pgrow[1] == datetime.strptime(extrow[0][1], '%d-%b-%y')
     elif dbvendor == "postgres":
         assert pgrow[1] == datetime.strptime(extrow[0][1], '%Y-%m-%d %H:%M:%S')
@@ -270,8 +304,8 @@ def test_InitialSnapshotFDW(pg_cursor, dbvendor):
         """
     
     run_remote_query(dbvendor, query)
-    if dbvendor == "oracle" or dbvendor == "olr":
-        time.sleep(30)
+    if dbvendor in ("oracle", "oracle23ai", "olr"):
+        time.sleep(50)
     else:
         time.sleep(10)
 
@@ -286,7 +320,12 @@ def test_InitialSnapshotFDW(pg_cursor, dbvendor):
     drop_repslot_and_pub(dbvendor, name, "postgres")
     time.sleep(10)
 
+
 def test_InitialSnapshotDBZ_uppercase(pg_cursor, dbvendor):
+    
+    if dbvendor == "oracle23ai":
+        restart_remote_db(dbvendor)
+
     name = getConnectorName(dbvendor) + "_dbzsnap_upper"
     dbname = getDbname(dbvendor).upper()
     schema = getSchema(dbvendor)
@@ -301,7 +340,7 @@ def test_InitialSnapshotDBZ_uppercase(pg_cursor, dbvendor):
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial")
     assert result == 0
 
-    if dbvendor == "oracle" or dbvendor == "olr":
+    if dbvendor in ("oracle", "oracle23ai", "olr"):
         time.sleep(30)
     else:
         time.sleep(10)
@@ -325,7 +364,10 @@ def test_InitialSnapshotDBZ_uppercase(pg_cursor, dbvendor):
 
     if dbvendor != "postgres":
         # check table name mappings
-        rows = run_pg_query(pg_cursor, f"SELECT ext_tbname, pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+        if dbvendor == "oracle23ai":
+            rows = run_pg_query(pg_cursor, f"SELECT ext_tbname, pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND type = 'oracle'")
+        else:
+            rows = run_pg_query(pg_cursor, f"SELECT ext_tbname, pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
         assert len(rows) > 0
         for row in rows:
             id = row[0].split(".")
@@ -335,13 +377,19 @@ def test_InitialSnapshotDBZ_uppercase(pg_cursor, dbvendor):
                 assert row[0].upper() == row[1]
 
         # check attname mappings
-        rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+        if dbvendor == "oracle23ai":
+            rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = 'oracle'")
+        else:
+            rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
         assert len(rows) > 0
         for row in rows:
             assert row[0].upper() == row[1]
 
         # check data type mappings
-        rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+        if dbvendor == "oracle23ai":
+            rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND type = 'oracle'")
+        else:
+            rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
         assert len(rows) > 0
         for row in rows:
             assert verify_default_type_mappings(row[0], row[1], dbvendor) == True
@@ -350,7 +398,7 @@ def test_InitialSnapshotDBZ_uppercase(pg_cursor, dbvendor):
     pgrow = run_pg_query_one(pg_cursor, f"SELECT \"ORDER_NUMBER\", \"ORDER_DATE\", \"PURCHASER\", \"QUANTITY\", \"PRODUCT_ID\" FROM \"{dbname}\".\"ORDERS\" WHERE \"ORDER_NUMBER\" = 10003")
     extrow = run_remote_query(dbvendor, f"SELECT order_number, order_date, purchaser, quantity, product_id FROM orders WHERE order_number = 10003")
     assert int(pgrow[0]) == int(extrow[0][0])
-    if dbvendor == "oracle" or dbvendor == "olr":
+    if dbvendor in ("oracle", "oracle23ai", "olr"):
         assert pgrow[1] == datetime.strptime(extrow[0][1], '%d-%b-%y')
     elif dbvendor == "postgres":
         assert pgrow[1] == datetime.strptime(extrow[0][1], '%Y-%m-%d %H:%M:%S')
@@ -364,7 +412,7 @@ def test_InitialSnapshotDBZ_uppercase(pg_cursor, dbvendor):
     if dbvendor == "mysql":
         query = """
             INSERT INTO orders(order_number, order_date, purchaser, quantity,
-            product_id) VALUES (10005, '2025-12-12', 1002, 10000, 102)
+            product_id) VALUES (10005, '2025-12-12', 1002, 10000, 102);
         """
     elif dbvendor == "sqlserver":
         query = """
@@ -372,10 +420,10 @@ def test_InitialSnapshotDBZ_uppercase(pg_cursor, dbvendor):
             ("2025-12-12", 1002, 10000, 102)
         """
     elif dbvendor == "postgres":
-	    query = """
-		    INSERT INTO orders(order_number, order_date, purchaser, quantity,
-    		product_id) VALUES (10005, '2025-12-12', 1002, 10000, 102);
-	    """
+        query = """
+            INSERT INTO orders(order_number, order_date, purchaser, quantity,
+            product_id) VALUES (10005, '2025-12-12', 1002, 10000, 102);
+        """
     else:
         query = """
             INSERT INTO orders(order_number, order_date, purchaser, quantity,
@@ -384,8 +432,10 @@ def test_InitialSnapshotDBZ_uppercase(pg_cursor, dbvendor):
         """
 
     run_remote_query(dbvendor, query)
-    if dbvendor == "oracle" or dbvendor == "olr":
-        time.sleep(30)
+    if dbvendor in ("oracle", "olr"):
+        time.sleep(50)
+    elif dbvendor == "oracle23ai":
+        time.sleep(80)
     else:
         time.sleep(10)
 
@@ -399,6 +449,7 @@ def test_InitialSnapshotDBZ_uppercase(pg_cursor, dbvendor):
     update_guc_conf(pg_cursor, "synchdb.letter_casing_strategy", "'lowercase'", True)
     drop_repslot_and_pub(dbvendor, name, "postgres")
     time.sleep(10)
+
 
 def test_InitialSnapshotFDW_uppercase(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_fdwsnap_upper"
@@ -433,8 +484,8 @@ def test_InitialSnapshotFDW_uppercase(pg_cursor, dbvendor):
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial")
     assert result == 0
 
-    if dbvendor == "oracle" or dbvendor == "olr":
-        time.sleep(30)
+    if dbvendor in ("oracle", "oracle23ai", "olr"):
+        time.sleep(80)
     else:
         time.sleep(10)
 
@@ -456,7 +507,10 @@ def test_InitialSnapshotFDW_uppercase(pg_cursor, dbvendor):
     assert int(pgrowcount[0]) == int(extrowcount[0][0])
 
     # check table name mappings
-    rows = run_pg_query(pg_cursor, f"SELECT ext_tbname, pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+    if dbvendor == "oracle23ai":
+        rows = run_pg_query(pg_cursor, f"SELECT ext_tbname, pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND type = 'oracle'")
+    else:
+        rows = run_pg_query(pg_cursor, f"SELECT ext_tbname, pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
     assert len(rows) > 0
     for row in rows:
         id = row[0].split(".")
@@ -466,13 +520,19 @@ def test_InitialSnapshotFDW_uppercase(pg_cursor, dbvendor):
             assert row[0].upper() == row[1]
 
     # check attname mappings
-    rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+    if dbvendor == "oracle23ai":
+        rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = 'oracle'")
+    else:
+        rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
     assert len(rows) > 0
     for row in rows:
         assert row[0].upper() == row[1]
 
     # check data type mappings
-    rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+    if dbvendor == "oracle23ai":
+        rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND type = 'oracle'")
+    else:
+        rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
     assert len(rows) > 0
     for row in rows:
         assert verify_default_type_mappings(row[0], row[1], dbvendor) == True
@@ -481,7 +541,7 @@ def test_InitialSnapshotFDW_uppercase(pg_cursor, dbvendor):
     pgrow = run_pg_query_one(pg_cursor, f"SELECT \"ORDER_NUMBER\", \"ORDER_DATE\", \"PURCHASER\", \"QUANTITY\", \"PRODUCT_ID\" FROM \"{dbname}\".\"ORDERS\" WHERE \"ORDER_NUMBER\" = 10003")
     extrow = run_remote_query(dbvendor, f"SELECT order_number, order_date, purchaser, quantity, product_id FROM orders WHERE order_number = 10003")
     assert int(pgrow[0]) == int(extrow[0][0])
-    if dbvendor == "oracle" or dbvendor == "olr":
+    if dbvendor in ("oracle", "oracle23ai", "olr"):
         assert pgrow[1] == datetime.strptime(extrow[0][1], '%d-%b-%y')
     elif dbvendor == "postgres":
         assert pgrow[1] == datetime.strptime(extrow[0][1], '%Y-%m-%d %H:%M:%S')
@@ -503,10 +563,10 @@ def test_InitialSnapshotFDW_uppercase(pg_cursor, dbvendor):
             ("2025-12-12", 1002, 10000, 102)
         """
     elif dbvendor == "postgres":
-	    query = """
-    		INSERT INTO orders(order_number, order_date, purchaser, quantity,
-		    product_id) VALUES (10005, '2025-12-12', 1002, 10000, 102);
-	    """
+        query = """
+            INSERT INTO orders(order_number, order_date, purchaser, quantity,
+            product_id) VALUES (10005, '2025-12-12', 1002, 10000, 102);
+        """
     else:
         query = """
             INSERT INTO orders(order_number, order_date, purchaser, quantity,
@@ -515,8 +575,8 @@ def test_InitialSnapshotFDW_uppercase(pg_cursor, dbvendor):
         """
 
     run_remote_query(dbvendor, query)
-    if dbvendor == "oracle" or dbvendor == "olr":
-        time.sleep(30)
+    if dbvendor in ("oracle", "oracle23ai", "olr"):
+        time.sleep(50)
     else:
         time.sleep(10)
 
@@ -532,7 +592,12 @@ def test_InitialSnapshotFDW_uppercase(pg_cursor, dbvendor):
     drop_repslot_and_pub(dbvendor, name, "postgres")
     time.sleep(10)
 
+
 def test_InitialSnapshotDBZ_asis(pg_cursor, dbvendor):
+    
+    if dbvendor == "oracle23ai":
+        restart_remote_db(dbvendor)
+    
     name = getConnectorName(dbvendor) + "_dbzsnap_asis"
     dbname = getDbname(dbvendor)
     schema = getSchema(dbvendor)
@@ -547,7 +612,7 @@ def test_InitialSnapshotDBZ_asis(pg_cursor, dbvendor):
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial")
     assert result == 0
 
-    if dbvendor == "oracle" or dbvendor == "olr":
+    if dbvendor in ("oracle", "oracle23ai", "olr"):
         time.sleep(30)
     else:
         time.sleep(10)
@@ -565,7 +630,7 @@ def test_InitialSnapshotDBZ_asis(pg_cursor, dbvendor):
     assert int(pgtblcount[0]) == int(exttblcount[0][0])
 
     # check row counts or orders table
-    if dbvendor == "oracle" or dbvendor == "olr":
+    if dbvendor in ("oracle", "oracle23ai", "olr"):
         pgrowcount = run_pg_query_one(pg_cursor, f"SELECT count(*) FROM \"{dbname}\".\"ORDERS\"")
     else:
         pgrowcount = run_pg_query_one(pg_cursor, f"SELECT count(*) FROM \"{dbname}\".\"orders\"")
@@ -574,7 +639,10 @@ def test_InitialSnapshotDBZ_asis(pg_cursor, dbvendor):
 
     if dbvendor != "postgres":
         # check table name mappings
-        rows = run_pg_query(pg_cursor, f"SELECT ext_tbname, pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+        if dbvendor == "oracle23ai":
+            rows = run_pg_query(pg_cursor, f"SELECT ext_tbname, pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND type = 'oracle'")
+        else:
+            rows = run_pg_query(pg_cursor, f"SELECT ext_tbname, pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
         assert len(rows) > 0
         for row in rows:
             id = row[0].split(".")
@@ -584,25 +652,31 @@ def test_InitialSnapshotDBZ_asis(pg_cursor, dbvendor):
                 assert row[0] == row[1]
 
         # check attname mappings
-        rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+        if dbvendor == "oracle23ai":
+            rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = 'oracle'")
+        else:
+            rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
         assert len(rows) > 0
         for row in rows:
             assert row[0] == row[1]
 
         # check data type mappings
-        rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+        if dbvendor == "oracle23ai":
+            rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND type = 'oracle'")
+        else:
+            rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
         assert len(rows) > 0
         for row in rows:
             assert verify_default_type_mappings(row[0], row[1], dbvendor) == True
 
     # check data consistency of orders table
-    if dbvendor == "oracle" or dbvendor == "olr":
+    if dbvendor in ("oracle", "oracle23ai", "olr"):
         pgrow = run_pg_query_one(pg_cursor, f"SELECT \"ORDER_NUMBER\", \"ORDER_DATE\", \"PURCHASER\", \"QUANTITY\", \"PRODUCT_ID\" FROM \"{dbname}\".\"ORDERS\" WHERE \"ORDER_NUMBER\" = 10003")
     else:
         pgrow = run_pg_query_one(pg_cursor, f"SELECT order_number, order_date, purchaser, quantity, product_id FROM \"{dbname}\".orders WHERE order_number = 10003")
     extrow = run_remote_query(dbvendor, f"SELECT order_number, order_date, purchaser, quantity, product_id FROM orders WHERE order_number = 10003")
     assert int(pgrow[0]) == int(extrow[0][0])
-    if dbvendor == "oracle" or dbvendor == "olr":
+    if dbvendor in ("oracle", "oracle23ai", "olr"):
         assert pgrow[1] == datetime.strptime(extrow[0][1], '%d-%b-%y')
     elif dbvendor == "postgres":
         assert pgrow[1] == datetime.strptime(extrow[0][1], '%Y-%m-%d %H:%M:%S')
@@ -624,10 +698,10 @@ def test_InitialSnapshotDBZ_asis(pg_cursor, dbvendor):
             ("2025-12-12", 1002, 10000, 102)
         """
     elif dbvendor == "postgres":
-    	query = """
-	    	INSERT INTO orders(order_number, order_date, purchaser, quantity,
-		    product_id) VALUES (10005, '2025-12-12', 1002, 10000, 102);
-    	"""
+        query = """
+            INSERT INTO orders(order_number, order_date, purchaser, quantity,
+            product_id) VALUES (10005, '2025-12-12', 1002, 10000, 102);
+        """
     else:
         query = """
             INSERT INTO orders(order_number, order_date, purchaser, quantity,
@@ -636,12 +710,14 @@ def test_InitialSnapshotDBZ_asis(pg_cursor, dbvendor):
         """
 
     run_remote_query(dbvendor, query)
-    if dbvendor == "oracle" or dbvendor == "olr":
-        time.sleep(30)
+    if dbvendor in ("oracle", "olr"):
+        time.sleep(50)
+    elif dbvendor == "oracle23ai":
+        time.sleep(100)
     else:
         time.sleep(10)
 
-    if dbvendor == "oracle" or dbvendor == "olr":
+    if dbvendor in ("oracle", "oracle23ai", "olr"):
         pgrow = run_pg_query_one(pg_cursor, f"SELECT \"ORDER_NUMBER\", \"ORDER_DATE\", \"PURCHASER\", \"QUANTITY\", \"PRODUCT_ID\" FROM \"{dbname}\".\"ORDERS\" WHERE \"ORDER_NUMBER\" >= 10005")
     else:
         pgrow = run_pg_query_one(pg_cursor, f"SELECT order_number, order_date, purchaser, quantity, product_id FROM \"{dbname}\".orders WHERE order_number >= 10005")
@@ -655,7 +731,12 @@ def test_InitialSnapshotDBZ_asis(pg_cursor, dbvendor):
     drop_repslot_and_pub(dbvendor, name, "postgres")
     time.sleep(10)
 
+
 def test_InitialSnapshotFDW_asis(pg_cursor, dbvendor):
+
+    if dbvendor == "oracle23ai":
+        restart_remote_db(dbvendor)
+    
     name = getConnectorName(dbvendor) + "_fdwsnap_asis"
     dbname = getDbname(dbvendor)
     schema = getSchema(dbvendor)
@@ -688,7 +769,7 @@ def test_InitialSnapshotFDW_asis(pg_cursor, dbvendor):
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial")
     assert result == 0
 
-    if dbvendor == "oracle" or dbvendor == "olr":
+    if dbvendor in ("oracle", "oracle23ai", "olr"):
         time.sleep(30)
     else:
         time.sleep(10)
@@ -706,7 +787,7 @@ def test_InitialSnapshotFDW_asis(pg_cursor, dbvendor):
     assert int(pgtblcount[0]) == int(exttblcount[0][0])
 
     # check row counts or orders table
-    if dbvendor == "oracle" or dbvendor == "olr":
+    if dbvendor in ("oracle", "oracle23ai", "olr"):
         pgrowcount = run_pg_query_one(pg_cursor, f"SELECT count(*) FROM \"{dbname}\".\"ORDERS\"")
     else:
         pgrowcount = run_pg_query_one(pg_cursor, f"SELECT count(*) FROM \"{dbname}\".\"orders\"")
@@ -714,7 +795,10 @@ def test_InitialSnapshotFDW_asis(pg_cursor, dbvendor):
     assert int(pgrowcount[0]) == int(extrowcount[0][0])
 
     # check table name mappings
-    rows = run_pg_query(pg_cursor, f"SELECT ext_tbname, pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+    if dbvendor == "oracle23ai":
+        rows = run_pg_query(pg_cursor, f"SELECT ext_tbname, pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND type = 'oracle'")
+    else:
+        rows = run_pg_query(pg_cursor, f"SELECT ext_tbname, pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
     assert len(rows) > 0
     for row in rows:
         id = row[0].split(".")
@@ -724,25 +808,31 @@ def test_InitialSnapshotFDW_asis(pg_cursor, dbvendor):
             assert row[0] == row[1]
 
     # check attname mappings
-    rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+    if dbvendor == "oracle23ai":
+        rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = 'oracle'")
+    else:
+        rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
     assert len(rows) > 0
     for row in rows:
         assert row[0] == row[1]
 
     # check data type mappings
-    rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+    if dbvendor == "oracle23ai":
+        rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND type = 'oracle'")
+    else:
+        rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
     assert len(rows) > 0
     for row in rows:
         assert verify_default_type_mappings(row[0], row[1], dbvendor) == True
 
     # check data consistency of orders table
-    if dbvendor == "oracle" or dbvendor == "olr":
+    if dbvendor in ("oracle", "oracle23ai", "olr"):
         pgrow = run_pg_query_one(pg_cursor, f"SELECT \"ORDER_NUMBER\", \"ORDER_DATE\", \"PURCHASER\", \"QUANTITY\", \"PRODUCT_ID\" FROM \"{dbname}\".\"ORDERS\" WHERE \"ORDER_NUMBER\" = 10003")
     else:
         pgrow = run_pg_query_one(pg_cursor, f"SELECT order_number, order_date, purchaser, quantity, product_id FROM \"{dbname}\".orders WHERE order_number = 10003")
     extrow = run_remote_query(dbvendor, f"SELECT order_number, order_date, purchaser, quantity, product_id FROM orders WHERE order_number = 10003")
     assert int(pgrow[0]) == int(extrow[0][0])
-    if dbvendor == "oracle" or dbvendor == "olr":
+    if dbvendor in ("oracle", "oracle23ai", "olr"):
         assert pgrow[1] == datetime.strptime(extrow[0][1], '%d-%b-%y')
     elif dbvendor == "postgres":
         assert pgrow[1] == datetime.strptime(extrow[0][1], '%Y-%m-%d %H:%M:%S')
@@ -765,10 +855,10 @@ def test_InitialSnapshotFDW_asis(pg_cursor, dbvendor):
             ("2025-12-12", 1002, 10000, 102)
         """
     elif dbvendor == "postgres":
-    	query = """
-		    INSERT INTO orders(order_number, order_date, purchaser, quantity,
-		    product_id) VALUES (10005, '2025-12-12', 1002, 10000, 102);
-	    """
+        query = """
+            INSERT INTO orders(order_number, order_date, purchaser, quantity,
+            product_id) VALUES (10005, '2025-12-12', 1002, 10000, 102);
+        """
     else:
         query = """
             INSERT INTO orders(order_number, order_date, purchaser, quantity,
@@ -777,12 +867,14 @@ def test_InitialSnapshotFDW_asis(pg_cursor, dbvendor):
         """
 
     run_remote_query(dbvendor, query)
-    if dbvendor == "oracle" or dbvendor == "olr":
-        time.sleep(30)
+    if dbvendor in ("oracle", "olr"):
+        time.sleep(50)
+    elif dbvendor == "oracle23ai":
+        time.sleep(100)
     else:
         time.sleep(10)
 
-    if dbvendor == "oracle" or dbvendor == "olr":
+    if dbvendor in ("oracle", "oracle23ai", "olr"):
         pgrow = run_pg_query_one(pg_cursor, f"SELECT \"ORDER_NUMBER\", \"ORDER_DATE\", \"PURCHASER\", \"QUANTITY\", \"PRODUCT_ID\" FROM \"{dbname}\".\"ORDERS\" WHERE \"ORDER_NUMBER\" >= 10005")
     else:
         pgrow = run_pg_query_one(pg_cursor, f"SELECT order_number, order_date, purchaser, quantity, product_id FROM \"{dbname}\".orders WHERE order_number >= 10005")
@@ -810,7 +902,7 @@ def test_ConnectorStartSchemaSyncModeDBZ(pg_cursor, dbvendor):
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "schemasync")
     assert result == 0
 
-    if dbvendor == "oracle" or dbvendor == "olr":
+    if dbvendor in ("oracle", "oracle23ai", "olr"):
         time.sleep(30)
     else:
         time.sleep(10)
@@ -829,7 +921,10 @@ def test_ConnectorStartSchemaSyncModeDBZ(pg_cursor, dbvendor):
 
     if dbvendor != "postgres":
         # check table name mappings
-        rows = run_pg_query(pg_cursor, f"SELECT ext_tbname, pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+        if dbvendor == "oracle23ai":
+            rows = run_pg_query(pg_cursor, f"SELECT ext_tbname, pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND type = 'oracle'")
+        else:
+            rows = run_pg_query(pg_cursor, f"SELECT ext_tbname, pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
         assert len(rows) > 0
         for row in rows:
             id = row[0].split(".")
@@ -839,13 +934,19 @@ def test_ConnectorStartSchemaSyncModeDBZ(pg_cursor, dbvendor):
                 assert row[0].lower() == row[1]
 
         # check attname mappings
-        rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+        if dbvendor == "oracle23ai":
+            rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = 'oracle'")
+        else:   
+            rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
         assert len(rows) > 0
         for row in rows:
             assert row[0].lower() == row[1]
 
         # check data type mappings
-        rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+        if dbvendor == "oracle23ai":
+            rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND type = 'oracle'")
+        else:
+            rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
         assert len(rows) > 0
         for row in rows:
             assert verify_default_type_mappings(row[0], row[1], dbvendor) == True
@@ -857,7 +958,10 @@ def test_ConnectorStartSchemaSyncModeDBZ(pg_cursor, dbvendor):
     # check state = paused
     row = run_pg_query_one(pg_cursor, f"SELECT name, connector_type, pid, stage, state, err FROM synchdb_state_view WHERE name = '{name}'")
     assert row[0] == name
-    assert row[1] == dbvendor
+    if dbvendor == "oracle23ai":
+        assert row[1] == "oracle"
+    else:
+        assert row[1] == dbvendor
     assert int(row[2]) > 0
     assert row[3] == "schema sync" or row[3] == "change data capture"
     assert row[4] == "paused"
@@ -879,10 +983,10 @@ def test_ConnectorStartSchemaSyncModeDBZ(pg_cursor, dbvendor):
             1002, 10000, 102);
         """
     elif dbvendor == "postgres":
-	    query = """
-    		INSERT INTO orders(order_number, order_date, purchaser, quantity,
-		    product_id) VALUES (10005, '2025-12-12', 1002, 10000, 102);
-	    """
+        query = """
+            INSERT INTO orders(order_number, order_date, purchaser, quantity,
+            product_id) VALUES (10005, '2025-12-12', 1002, 10000, 102);
+        """
     else:
         query = """
             INSERT INTO orders(order_number, order_date, purchaser, quantity,
@@ -891,8 +995,10 @@ def test_ConnectorStartSchemaSyncModeDBZ(pg_cursor, dbvendor):
         """
 
     run_remote_query(dbvendor, query)
-    if dbvendor == "oracle" or dbvendor == "olr":
-        time.sleep(30)
+    if dbvendor in ("oracle", "olr"):
+        time.sleep(50)
+    elif dbvendor == "oracle23ai":
+        time.sleep(100)
     else:
         time.sleep(10)
 
@@ -937,7 +1043,7 @@ def test_ConnectorStartSchemaSyncModeFDW(pg_cursor, dbvendor):
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "schemasync")
     assert result == 0
 
-    if dbvendor == "oracle" or dbvendor == "olr":
+    if dbvendor in ("oracle", "oracle23ai", "olr"):
         time.sleep(30)
     else:
         time.sleep(10)
@@ -955,7 +1061,10 @@ def test_ConnectorStartSchemaSyncModeFDW(pg_cursor, dbvendor):
     assert int(pgtblcount[0]) == int(exttblcount[0][0])
 
     # check table name mappings
-    rows = run_pg_query(pg_cursor, f"SELECT ext_tbname, pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+    if dbvendor == "oracle23ai":
+        rows = run_pg_query(pg_cursor, f"SELECT ext_tbname, pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND type = 'oracle'")
+    else:
+        rows = run_pg_query(pg_cursor, f"SELECT ext_tbname, pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
     assert len(rows) > 0
     for row in rows:
         id = row[0].split(".")
@@ -965,13 +1074,19 @@ def test_ConnectorStartSchemaSyncModeFDW(pg_cursor, dbvendor):
             assert row[0].lower() == row[1]
 
     # check attname mappings
-    rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+    if dbvendor == "oracle23ai":
+        rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = 'oracle'")
+    else:
+        rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
     assert len(rows) > 0
     for row in rows:
         assert row[0].lower() == row[1]
 
     # check data type mappings
-    rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+    if dbvendor == "oracle23ai":
+        rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND type = 'oracle'")
+    else:
+        rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
     assert len(rows) > 0
     for row in rows:
         assert verify_default_type_mappings(row[0], row[1], dbvendor) == True
@@ -983,7 +1098,10 @@ def test_ConnectorStartSchemaSyncModeFDW(pg_cursor, dbvendor):
     # check state = paused
     row = run_pg_query_one(pg_cursor, f"SELECT name, connector_type, pid, stage, state, err FROM synchdb_state_view WHERE name = '{name}'")
     assert row[0] == name
-    assert row[1] == dbvendor
+    if dbvendor == "oracle23ai":
+        assert row[1] == "oracle"
+    else:
+        assert row[1] == dbvendor
     assert int(row[2]) > 0
     assert row[3] == "schema sync" or row[3] == "change data capture"
     assert row[4] == "paused"
@@ -991,7 +1109,7 @@ def test_ConnectorStartSchemaSyncModeFDW(pg_cursor, dbvendor):
 
     run_pg_query_one(pg_cursor, f"SELECT synchdb_resume_engine('{name}')")
 
-    time.sleep(10)
+    time.sleep(20)
     # test a bit of cdc
     if dbvendor == "postgres" or dbvendor == "mysql":
         query = """
@@ -1006,8 +1124,10 @@ def test_ConnectorStartSchemaSyncModeFDW(pg_cursor, dbvendor):
         """
 
     run_remote_query(dbvendor, query)
-    if dbvendor == "oracle" or dbvendor == "olr":
-        time.sleep(30)
+    if dbvendor in ("oracle", "olr"):
+        time.sleep(50)
+    elif dbvendor == "oracle23ai":
+        time.sleep(100)
     else:
         time.sleep(10)
 
@@ -1020,6 +1140,7 @@ def test_ConnectorStartSchemaSyncModeFDW(pg_cursor, dbvendor):
     update_guc_conf(pg_cursor, "synchdb.snapshot_engine", "'debezium'", True)
     drop_repslot_and_pub(dbvendor, name, "postgres")
     time.sleep(10)
+
 
 def test_ConnectorStartAlwaysModeDBZ(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_dbz_always"
@@ -1034,7 +1155,7 @@ def test_ConnectorStartAlwaysModeDBZ(pg_cursor, dbvendor):
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "always")
     assert result == 0
 
-    if dbvendor == "oracle" or dbvendor == "olr":
+    if dbvendor in ("oracle", "oracle23ai", "olr"):
         time.sleep(30)
     else:
         time.sleep(10)
@@ -1053,7 +1174,10 @@ def test_ConnectorStartAlwaysModeDBZ(pg_cursor, dbvendor):
 
     if dbvendor != "postgres":
         # check table name mappings
-        rows = run_pg_query(pg_cursor, f"SELECT ext_tbname, pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+        if dbvendor == "oracle23ai":
+            rows = run_pg_query(pg_cursor, f"SELECT ext_tbname, pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND type = 'oracle'")
+        else:
+            rows = run_pg_query(pg_cursor, f"SELECT ext_tbname, pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
         assert len(rows) > 0
         for row in rows:
             id = row[0].split(".")
@@ -1063,13 +1187,19 @@ def test_ConnectorStartAlwaysModeDBZ(pg_cursor, dbvendor):
                 assert row[0].lower() == row[1]
 
         # check attname mappings
-        rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+        if dbvendor == "oracle23ai":
+            rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = 'oracle'")
+        else:
+            rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
         assert len(rows) > 0
         for row in rows:
             assert row[0].lower() == row[1]
 
         # check data type mappings
-        rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+        if dbvendor == "oracle23ai":
+            rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND type = 'oracle'")
+        else:
+            rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
         assert len(rows) > 0
         for row in rows:
             assert verify_default_type_mappings(row[0], row[1], dbvendor) == True
@@ -1080,7 +1210,10 @@ def test_ConnectorStartAlwaysModeDBZ(pg_cursor, dbvendor):
     
     row = run_pg_query_one(pg_cursor, f"SELECT name, connector_type, pid, stage, state, err FROM synchdb_state_view WHERE name = '{name}'")
     assert row[0] == name
-    assert row[1] == dbvendor
+    if dbvendor == "oracle23ai":
+        assert row[1] == "oracle"
+    else:
+        assert row[1] == dbvendor
     assert int(row[2]) > 0
     assert row[3] == "initial snapshot" or row[3] == "change data capture"
     assert row[4] == "polling"
@@ -1122,7 +1255,7 @@ def test_ConnectorStartAlwaysModeFDW(pg_cursor, dbvendor):
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "always")
     assert result == 0
 
-    if dbvendor == "oracle" or dbvendor == "olr":
+    if dbvendor in ("oracle", "oracle23ai", "olr"):
         time.sleep(30)
     else:
         time.sleep(10)
@@ -1140,7 +1273,10 @@ def test_ConnectorStartAlwaysModeFDW(pg_cursor, dbvendor):
     assert int(pgtblcount[0]) == int(exttblcount[0][0])
 
     # check table name mappings
-    rows = run_pg_query(pg_cursor, f"SELECT ext_tbname, pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+    if dbvendor == "oracle23ai":
+        rows = run_pg_query(pg_cursor, f"SELECT ext_tbname, pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND type = 'oracle'")
+    else:
+        rows = run_pg_query(pg_cursor, f"SELECT ext_tbname, pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
     assert len(rows) > 0
     for row in rows:
         id = row[0].split(".")
@@ -1150,13 +1286,19 @@ def test_ConnectorStartAlwaysModeFDW(pg_cursor, dbvendor):
             assert row[0].lower() == row[1]
 
     # check attname mappings
-    rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+    if dbvendor == "oracle23ai":
+        rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = 'oracle'")
+    else:
+        rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
     assert len(rows) > 0
     for row in rows:
         assert row[0].lower() == row[1]
 
     # check data type mappings
-    rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+    if dbvendor == "oracle23ai":
+        rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND type = 'oracle'")
+    else:
+        rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
     assert len(rows) > 0
     for row in rows:
         assert verify_default_type_mappings(row[0], row[1], dbvendor) == True
@@ -1167,7 +1309,10 @@ def test_ConnectorStartAlwaysModeFDW(pg_cursor, dbvendor):
 
     row = run_pg_query_one(pg_cursor, f"SELECT name, connector_type, pid, stage, state, err FROM synchdb_state_view WHERE name = '{name}'")
     assert row[0] == name
-    assert row[1] == dbvendor
+    if dbvendor == "oracle23ai":
+        assert row[1] == "oracle"
+    else:
+        assert row[1] == dbvendor
     assert int(row[2]) > 0
     assert row[3] == "initial snapshot" or row[3] == "change data capture"
     assert row[4] == "polling"
@@ -1177,6 +1322,7 @@ def test_ConnectorStartAlwaysModeFDW(pg_cursor, dbvendor):
     drop_default_pg_schema(pg_cursor, dbvendor)
     update_guc_conf(pg_cursor, "synchdb.snapshot_engine", "'debezium'", True)
     drop_repslot_and_pub(dbvendor, name, "postgres")
+
 
 def test_ConnectorStartNodataModeDBZ(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor) + "_dbz_nodata"
@@ -1191,7 +1337,7 @@ def test_ConnectorStartNodataModeDBZ(pg_cursor, dbvendor):
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "no_data")
     assert result == 0
 
-    if dbvendor == "oracle" or dbvendor == "olr":
+    if dbvendor in ("oracle", "oracle23ai", "olr"):
         time.sleep(30)
     else:
         time.sleep(10)
@@ -1210,7 +1356,10 @@ def test_ConnectorStartNodataModeDBZ(pg_cursor, dbvendor):
 
     if dbvendor != "postgres":
         # check table name mappings
-        rows = run_pg_query(pg_cursor, f"SELECT ext_tbname, pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+        if dbvendor == "oracle23ai":
+            rows = run_pg_query(pg_cursor, f"SELECT ext_tbname, pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND type = 'oracle'")
+        else:
+            rows = run_pg_query(pg_cursor, f"SELECT ext_tbname, pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
         assert len(rows) > 0
         for row in rows:
             id = row[0].split(".")
@@ -1220,13 +1369,19 @@ def test_ConnectorStartNodataModeDBZ(pg_cursor, dbvendor):
                 assert row[0].lower() == row[1]
 
         # check attname mappings
-        rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+        if dbvendor == "oracle23ai":
+            rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = 'oracle'")
+        else:
+            rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
         assert len(rows) > 0
         for row in rows:
             assert row[0].lower() == row[1]
 
         # check data type mappings
-        rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+        if dbvendor == "oracle23ai":
+            rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND type = 'oracle'")
+        else:
+            rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
         assert len(rows) > 0
         for row in rows:
             assert verify_default_type_mappings(row[0], row[1], dbvendor) == True
@@ -1237,7 +1392,10 @@ def test_ConnectorStartNodataModeDBZ(pg_cursor, dbvendor):
 
     row = run_pg_query_one(pg_cursor, f"SELECT name, connector_type, pid, stage, state, err FROM synchdb_state_view WHERE name = '{name}'")
     assert row[0] == name
-    assert row[1] == dbvendor
+    if dbvendor == "oracle23ai":
+        assert row[1] == "oracle"
+    else:
+        assert row[1] == dbvendor
     assert int(row[2]) > 0
     assert row[3] == "initial snapshot" or row[3] == "change data capture"
     assert row[4] == "polling"
@@ -1279,8 +1437,10 @@ def test_ConnectorStartNodataModeFDW(pg_cursor, dbvendor):
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "no_data")
     assert result == 0
 
-    if dbvendor == "oracle" or dbvendor == "olr":
+    if dbvendor in ("oracle", "olr"):
         time.sleep(30)
+    elif dbvendor == "oracle23ai":
+        time.sleep(60)
     else:
         time.sleep(10)
 
@@ -1297,7 +1457,10 @@ def test_ConnectorStartNodataModeFDW(pg_cursor, dbvendor):
     assert int(pgtblcount[0]) == int(exttblcount[0][0])
 
     # check table name mappings
-    rows = run_pg_query(pg_cursor, f"SELECT ext_tbname, pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+    if dbvendor == "oracle23ai":
+        rows = run_pg_query(pg_cursor, f"SELECT ext_tbname, pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND type = 'oracle'")
+    else:
+        rows = run_pg_query(pg_cursor, f"SELECT ext_tbname, pg_tbname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
     assert len(rows) > 0
     for row in rows:
         id = row[0].split(".")
@@ -1307,13 +1470,19 @@ def test_ConnectorStartNodataModeFDW(pg_cursor, dbvendor):
             assert row[0].lower() == row[1]
 
     # check attname mappings
-    rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+    if dbvendor == "oracle23ai":
+        rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = 'oracle'")
+    else:
+        rows = run_pg_query(pg_cursor, f"SELECT ext_attname, pg_attname FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
     assert len(rows) > 0
     for row in rows:
         assert row[0].lower() == row[1]
 
     # check data type mappings
-    rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
+    if dbvendor == "oracle23ai":
+        rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND type = 'oracle'")
+    else:
+        rows = run_pg_query(pg_cursor, f"SELECT ext_atttypename, pg_atttypename FROM synchdb_att_view WHERE name = '{name}' AND type = '{dbvendor}'")
     assert len(rows) > 0
     for row in rows:
         assert verify_default_type_mappings(row[0], row[1], dbvendor) == True
@@ -1324,7 +1493,10 @@ def test_ConnectorStartNodataModeFDW(pg_cursor, dbvendor):
 
     row = run_pg_query_one(pg_cursor, f"SELECT name, connector_type, pid, stage, state, err FROM synchdb_state_view WHERE name = '{name}'")
     assert row[0] == name
-    assert row[1] == dbvendor
+    if dbvendor == "oracle23ai":
+        assert row[1] == "oracle"
+    else:
+        assert row[1] == dbvendor
     assert int(row[2]) > 0
     assert row[3] == "initial snapshot" or row[3] == "change data capture"
     assert row[4] == "polling"
@@ -1334,6 +1506,7 @@ def test_ConnectorStartNodataModeFDW(pg_cursor, dbvendor):
     drop_default_pg_schema(pg_cursor, dbvendor)
     update_guc_conf(pg_cursor, "synchdb.snapshot_engine", "'debezium'", True)
     drop_repslot_and_pub(dbvendor, name, "postgres")
+
 
 def test_ConnectorRestart(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor)
@@ -1347,14 +1520,17 @@ def test_ConnectorRestart(pg_cursor, dbvendor):
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "no_data")
     assert result == 0
 
-    if dbvendor == "oracle":
+    if dbvendor in ("oracle", "oracle23ai", "olr"):
         time.sleep(10)
     else:
         time.sleep(5)
 
     row = run_pg_query_one(pg_cursor, f"SELECT name, connector_type, pid, stage, state, err FROM synchdb_state_view WHERE name = '{name}'")
     assert row[0] == name
-    assert row[1] == dbvendor
+    if dbvendor == "oracle23ai":
+        assert row[1] == "oracle"
+    else:
+        assert row[1] == dbvendor
     oldpid = row[2]
     assert row[2] > -1
     assert row[3] == "initial snapshot" or row[3] == "change data capture"
@@ -1364,14 +1540,17 @@ def test_ConnectorRestart(pg_cursor, dbvendor):
     row = run_pg_query_one(pg_cursor, f"SELECT synchdb_restart_connector('{name}', 'initial')")
     assert row[0] == 0
 
-    if dbvendor == "oracle":
+    if dbvendor in ("oracle", "oracle23ai", "olr"):
         time.sleep(10)
     else:
         time.sleep(5)
 
     row = run_pg_query_one(pg_cursor, f"SELECT name, connector_type, pid, stage, state, err FROM synchdb_state_view WHERE name = '{name}'")
     assert row[0] == name
-    assert row[1] == dbvendor
+    if dbvendor == "oracle23ai":
+        assert row[1] == "oracle"
+    else:
+        assert row[1] == dbvendor
     oldpid = row[2]
     assert row[2] == oldpid
     assert row[3] == "initial snapshot" or row[3] == "change data capture"
@@ -1384,6 +1563,7 @@ def test_ConnectorRestart(pg_cursor, dbvendor):
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
     drop_repslot_and_pub(dbvendor, name, "postgres")
+
 
 def test_ConnectorStop(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor)
@@ -1408,13 +1588,17 @@ def test_ConnectorStop(pg_cursor, dbvendor):
     time.sleep(5)
     row = run_pg_query_one(pg_cursor, f"SELECT name, connector_type, pid, stage, state, err FROM synchdb_state_view WHERE name = '{name}'")
     assert row[0] == name
-    assert row[1] == dbvendor
+    if dbvendor == "oracle23ai":
+        assert row[1] == "oracle"
+    else:
+        assert row[1] == dbvendor
     assert row[2] == -1
     assert row[4] == "stopped"
 
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
     drop_repslot_and_pub(dbvendor, name, "postgres")
+
 
 def test_ConnectorDelete(pg_cursor, dbvendor):
     name = getConnectorName(dbvendor)

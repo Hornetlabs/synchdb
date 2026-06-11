@@ -138,7 +138,7 @@ install_oracle_parser:
 	@echo "installing against pgmajor ${PG_MAJOR}"
 	make install -C src/backend/olr/oracle_parser${PG_MAJOR}
 
-.PHONY: dbcheck mysqlcheck sqlservercheck oraclecheck dbcheck-tpcc mysqlcheck-tpcc sqlservercheck-tpcc oraclecheck-tpcc
+.PHONY: dbcheck mysqlcheck sqlservercheck oraclecheck oracle23aicheck dbcheck-tpcc mysqlcheck-tpcc sqlservercheck-tpcc oraclecheck-tpcc
 dbcheck:
 	@command -v pytest >/dev/null 2>&1 || { echo >&2 "❌ pytest not found in PATH."; exit 1; }
 	@command -v docker >/dev/null 2>&1 || { echo >&2 "❌ docker not found in PATH."; exit 1; }
@@ -163,6 +163,9 @@ sqlservercheck:
 
 oraclecheck:
 	$(MAKE) dbcheck DB=oracle
+
+oracle23aicheck:
+	$(MAKE) dbcheck DB=oracle23ai
 
 olrcheck:
 	$(MAKE) dbcheck DB=olr

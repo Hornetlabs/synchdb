@@ -2,6 +2,7 @@ import os
 import subprocess
 import socket
 import time
+from datetime import datetime
 
 def get_container_ip(name: str, network: str = "synchdbnet") -> str | None:
     # Go template with the specific network:
@@ -56,6 +57,16 @@ ORA19C_PASS="dbz"
 ORA19C_DB="FREE"
 ORA19C_SCHEMA="DBZUSER"
 
+ORACLE23AI_HOST=get_container_ip(name="eztest_oracle23ai")
+ORACLE23AI_PORT=1521
+ORACLE23AI_USER="DBZUSER"
+ORACLE23AI_PASS="dbz"
+ORACLE23AI_DB="FREEPDB1"
+ORACLE23AI_SCHEMA="DBZUSER"
+ORACLE23AI_CDB="FREE"
+ORACLE23AI_COMMON_USER="c##dbzuser"
+ORACLE23AI_COMMON_PASS="dbz"
+
 OLR_HOST=get_container_ip(name="OpenLogReplicator")
 OLR_PORT="7070"
 OLR_SERVICE="ORACLE"
@@ -72,7 +83,7 @@ def getConnectorName(dbvendor):
         return "mysqlconn"
     elif dbvendor == "sqlserver":
         return "sqlserverconn"
-    elif dbvendor == "oracle":
+    elif dbvendor in ("oracle", "oracle23ai"):
         return "oracleconn"
     elif dbvendor == "postgres":
         return "postgresconn"
@@ -86,6 +97,8 @@ def getDbname(dbvendor):
         return SQLSERVER_DB
     elif dbvendor == "oracle":
         return ORACLE_DB
+    elif dbvendor == "oracle23ai":
+        return ORACLE23AI_DB
     elif dbvendor == "postgres":
         return POSTGRES_DB
     else:
@@ -99,18 +112,22 @@ def getSchema(dbvendor):
         return SQLSERVER_SCHEMA
     elif dbvendor == "oracle":
         return ORACLE_SCHEMA
+    elif dbvendor == "oracle23ai":
+        return ORACLE23AI_SCHEMA
     elif dbvendor == "postgres":
         return POSTGRES_SCHEMA
     else:
         return ORA19C_SCHEMA
 
 def run_pg_query(cursor, query):
+    # print(f"[{datetime.now().strftime('%H:%M:%S')}][run_pg_query] {query}")  # Debug: print the query being executed
     cursor.execute(query)
     if cursor.description:  # Only fetch if query returns results
         return cursor.fetchall()
     return None
 
 def run_pg_query_one(cursor, query):
+    # print(f"[{datetime.now().strftime('%H:%M:%S')}][run_pg_query_one] {query}")  # Debug: print the query being executed
     cursor.execute(query)
     if cursor.description:
         return cursor.fetchone()
@@ -202,9 +219,12 @@ def run_remote_query(where, query, srcdb=None):
         "mysql": MYSQL_DB,
         "sqlserver": SQLSERVER_DB,
         "oracle": ORACLE_DB,
+        "oracle23ai": ORACLE23AI_DB,
         "olr": ORA19C_DB,
         "postgres": POSTGRES_DB
     }[where]
+
+    # print(f"[{datetime.now().strftime('%H:%M:%S')}][run_remote_query] Running on {db}: {query}")  # Debug: print the query being executed
 
     try:
         if where == "mysql":
@@ -244,6 +264,8 @@ def run_remote_query(where, query, srcdb=None):
             """
             if where == "oracle":
                 result = subprocess.check_output(["docker", "exec", "-i", "ora19c", "sqlplus", "-S", f"{ORACLE_USER}/{ORACLE_PASS}@//{ORACLE_HOST}:{ORACLE_PORT}/{db}"], input=sql, text=True).strip()
+            elif where == "oracle23ai":
+                result = subprocess.check_output(["docker", "exec", "-i", "eztest_oracle23ai", "sqlplus", "-S", f"{ORACLE23AI_USER}/{ORACLE23AI_PASS}@//{ORACLE23AI_HOST}:{ORACLE23AI_PORT}/{db}"], input=sql, text=True).strip()
             else:
                 global ORA19C_HOST
                 max_tries = 20
@@ -279,6 +301,7 @@ def create_synchdb_connector(cursor, vendor, name, srcdb=None, srcschema=None):
         "mysql": MYSQL_DB,
         "sqlserver": SQLSERVER_DB,
         "oracle": ORACLE_DB,
+        "oracle23ai": ORACLE23AI_DB,
         "olr": ORA19C_DB,
         "postgres": POSTGRES_DB
     }[vendor]
@@ -287,6 +310,7 @@ def create_synchdb_connector(cursor, vendor, name, srcdb=None, srcschema=None):
         "mysql": "null",
         "sqlserver": SQLSERVER_SCHEMA,
         "oracle": ORACLE_SCHEMA,
+        "oracle23ai": ORACLE23AI_SCHEMA,
         "olr": ORA19C_SCHEMA,
         "postgres": POSTGRES_SCHEMA
     }[vendor]
@@ -307,8 +331,20 @@ def create_synchdb_connector(cursor, vendor, name, srcdb=None, srcschema=None):
             tries += 1
             time.sleep(1)
 
-        assert ORACLE_HOST != None
+        assert ORACLE_HOST is not None
         result = run_pg_query_one(cursor, f"SELECT synchdb_add_conninfo('{name}','{ORACLE_HOST}', {ORACLE_PORT}, '{ORACLE_USER}', '{ORACLE_PASS}', '{db}', '{schema}', 'null', 'null', 'oracle');")
+    elif vendor == "oracle23ai":
+        global ORACLE23AI_HOST
+        max_tries = 20
+        tries = 0
+
+        while ORACLE23AI_HOST is None and tries < max_tries:
+            ORACLE23AI_HOST = get_container_ip(name="eztest_oracle23ai")
+            tries += 1
+            time.sleep(1)
+
+        assert ORACLE23AI_HOST is not None
+        result = run_pg_query_one(cursor, f"SELECT synchdb_add_conninfo('{name}','{ORACLE23AI_HOST}', {ORACLE23AI_PORT}, '{ORACLE23AI_COMMON_USER}', '{ORACLE23AI_COMMON_PASS}', '{ORACLE23AI_CDB}/{db}', '{schema}', 'null', 'null', 'oracle');")
     elif vendor == "postgres":
         result = run_pg_query_one(cursor, f"SELECT synchdb_add_conninfo('{name}','{POSTGRES_HOST}', {POSTGRES_PORT}, '{POSTGRES_USER}', '{POSTGRES_PASS}', '{db}', '{schema}', 'null', 'null', 'postgres');")
 
@@ -356,6 +392,9 @@ def drop_default_pg_schema(cursor, vendor):
     elif vendor == "postgres":
         row = run_pg_query_one(cursor, f"DROP SCHEMA IF EXISTS postgres CASCADE")
         row = run_pg_query_one(cursor, f"DROP SCHEMA IF EXISTS \"POSTGRES\" CASCADE")
+    elif vendor == "oracle23ai":
+        row = run_pg_query_one(cursor, f"DROP SCHEMA IF EXISTS freepdb1 CASCADE")
+        row = run_pg_query_one(cursor, f"DROP SCHEMA IF EXISTS \"FREEPDB1\" CASCADE")
     else:
         row = run_pg_query_one(cursor, f"DROP SCHEMA IF EXISTS free CASCADE")
         row = run_pg_query_one(cursor, f"DROP SCHEMA IF EXISTS \"FREE\" CASCADE")
@@ -379,3 +418,32 @@ def drop_repslot_and_pub(dbvendor, name, dstdb):
 
     run_remote_query(dbvendor, f"SELECT pg_drop_replication_slot('{name}_{dstdb}_synchdb_slot')")
     run_remote_query(dbvendor, f"DROP PUBLICATION IF EXISTS {name}_{dstdb}_synchdb_pub")
+
+
+def restart_remote_db(dbvendor, wait_time=30):
+    """
+    TODO: Upgrade Debezium, and remove this workaround.
+    BUG WORKAROUND: Restart the remote database container.
+
+    Restart the remote database container.
+    This is mainly used for oracle23ai, because it seems
+    to have some stability issue after running for a while,
+    and restart can help recover it.
+    """
+    if dbvendor == "mysql":
+        subprocess.run(["docker", "restart", "mysql"], check=True)
+    elif dbvendor == "sqlserver":
+        subprocess.run(["docker", "restart", "sqlserver"], check=True)
+    elif dbvendor == "oracle":
+        subprocess.run(["docker", "restart", "ora19c"], check=True)
+    elif dbvendor == "oracle23ai":
+        subprocess.run(["docker", "restart", "eztest_oracle23ai"], check=True)
+    elif dbvendor == "olr":
+        subprocess.run(["docker", "restart", "OpenLogReplicator"], check=True)
+    else:
+        print(f"restart not supported for {dbvendor}")
+        return
+
+    if wait_time > 0:
+        print(f"waiting {wait_time} seconds for {dbvendor} to restart...")
+        time.sleep(wait_time)
