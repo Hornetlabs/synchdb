@@ -422,6 +422,7 @@ def drop_repslot_and_pub(dbvendor, name, dstdb):
 
 def restart_remote_db(dbvendor, wait_time=30):
     """
+    TODO: Upgrade Debezium, and remove this workaround.
     BUG WORKAROUND: Restart the remote database container.
 
     Restart the remote database container.
