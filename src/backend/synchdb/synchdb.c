@@ -51,6 +51,7 @@
 #include "varatt.h"
 #include "funcapi.h"
 #include "access/xact.h"
+#include "executor/spi.h"
 #include "utils/snapmgr.h"
 #include "utils/builtins.h"
 #include "commands/dbcommands.h"
@@ -179,6 +180,7 @@ static jmethodID getoffsets;
 /* Function declarations */
 PGDLLEXPORT void synchdb_engine_main(Datum main_arg);
 PGDLLEXPORT void synchdb_auto_launcher_main(Datum main_arg);
+PGDLLEXPORT void synchdb_db_launcher_main(Datum main_arg);
 
 /* Static function prototypes */
 static int dbz_engine_stop(void);
@@ -3042,8 +3044,10 @@ remove_dbz_metadata_files(const char * name)
 void
 synchdb_auto_launcher_main(Datum main_arg)
 {
-	int ret = -1, numout = 0, i = 0;
-	char ** out;
+	int ret = -1, numdb = 0, i = 0;
+	char ** dbnames;
+	char *query = "SELECT datname FROM pg_database WHERE datallowconn AND NOT datistemplate;";
+	MemoryContext oldcontext;
 
 	/* Establish signal handlers; once that's done, unblock signals. */
 	pqsignal(SIGTERM, SignalHandlerForShutdownRequest);
@@ -3054,27 +3058,128 @@ synchdb_auto_launcher_main(Datum main_arg)
 	elog(DEBUG1, "start synchdb_auto_launcher_main");
 	BackgroundWorkerInitializeConnection("postgres", NULL, 0);
 
+	/* Enumerate all connectable non-template databases */
+	StartTransactionCommand();
+	PushActiveSnapshot(GetTransactionSnapshot());
+
+	if (SPI_connect() != SPI_OK_CONNECT)
+	{
+		elog(WARNING, "Failed to connect to SPI manager");
+		PopActiveSnapshot();
+		CommitTransactionCommand();
+		return;
+	}
+
+	ret = SPI_execute(query, true, 0);
+	if (ret != SPI_OK_SELECT)
+	{
+		SPI_finish();
+		PopActiveSnapshot();
+		CommitTransactionCommand();
+		elog(WARNING, "Failed to execute query to enumerate databases");
+		return;
+	}
+
+	numdb = SPI_processed;
+	oldcontext = MemoryContextSwitchTo(TopMemoryContext);
+	dbnames = palloc0(sizeof(char *) * numdb);
+	for (i = 0; i < numdb; i++)
+	{
+		/* get database name and store in array */
+		dbnames[i] = pstrdup(SPI_getvalue(SPI_tuptable->vals[i],
+				SPI_tuptable->tupdesc, 1));
+	}
+	MemoryContextSwitchTo(oldcontext);
+
+	SPI_finish();
+	PopActiveSnapshot();
+	CommitTransactionCommand();
+
 	/*
-	 * todo: this auto launcher worker currently assumes that synchdb
-	 * extension is created at the default postgres database. So it connects
-	 * there and try to look up the entries in synchdb_conninfo table in
-	 * public schema. If synchdb is created at another database or schema, then
-	 * it would fail to look up the retries, thus not starting any connector
-	 * workers.
+	 * Spawn per-database sub-launchers one at a time and wait for each to
+	 * finish before starting the next. This keeps the extra slot usage at
+	 * one sub-launcher at a time, avoiding slot exhaustion when many
+	 * databases are present.
 	 */
+	for (i = 0; i < numdb; i++)
+	{
+		BackgroundWorker worker;
+		BackgroundWorkerHandle *handle;
+
+		MemSet(&worker, 0, sizeof(BackgroundWorker));
+		worker.bgw_flags = BGWORKER_SHMEM_ACCESS |
+				BGWORKER_BACKEND_DATABASE_CONNECTION;
+		worker.bgw_start_time = BgWorkerStart_ConsistentState;
+		worker.bgw_restart_time = BGW_NEVER_RESTART;
+		strcpy(worker.bgw_library_name, "synchdb");
+		strcpy(worker.bgw_function_name, "synchdb_db_launcher_main");
+		snprintf(worker.bgw_name, BGW_MAXLEN, "synchdb db launcher for %s", dbnames[i]);
+		snprintf(worker.bgw_type, BGW_MAXLEN, "synchdb db launcher");
+		strlcpy(worker.bgw_extra, dbnames[i], BGW_MAXLEN);
+		worker.bgw_notify_pid = MyProcPid;
+
+		if (!RegisterDynamicBackgroundWorker(&worker, &handle))
+		{
+			elog(WARNING, "synchdb_auto_launcher: Failed to register background worker for database %s",
+				dbnames[i]);
+			continue;
+		}
+
+		/* Wait for the worker to start before launching the next one */
+		WaitForBackgroundWorkerShutdown(handle);
+		pfree(handle);
+	}
+
+	pfree(dbnames);
+	elog(DEBUG1, "end synchdb_auto_launcher_main");
+}
+
+/*
+ * synchdb_db_launcher_main - per-database connector auto-launcher
+*/
+void
+synchdb_db_launcher_main(Datum main_arg)
+{
+	int ret = -1, numout = 0, i = 0;
+	char **out;
+	char *dbname = MyBgworkerEntry->bgw_extra;
+
+	/* Establish signal handlers; once that's done, unblock signals. */
+	pqsignal(SIGTERM, SignalHandlerForShutdownRequest);
+	pqsignal(SIGHUP, SignalHandlerForConfigReload);
+	pqsignal(SIGUSR1, procsignal_sigusr1_handler);
+	BackgroundWorkerUnblockSignals();
+
+	elog(DEBUG1, "start synchdb_db_launcher_main for database: %s", dbname);
+	BackgroundWorkerInitializeConnection(dbname, NULL, 0);
 
 	out = palloc0(sizeof(char *) * synchdb_max_connector_workers);
-	ret = ra_listConnInfoNames(out, &numout);
+
+	PG_TRY();
+	{
+		ret = ra_listConnInfoNames(out, &numout);
+	}
+	PG_CATCH();
+	{
+		/* synchdb is likely not installed in this database */
+		AbortCurrentTransaction();
+		FlushErrorState();
+		pfree(out);
+		elog(DEBUG1, "synchdb not found in database %s, skipping auto-launch", dbname);
+		return;
+	}
+	PG_END_TRY();
+
 	if (ret == 0)
 	{
 		for (i = 0; i < (numout > synchdb_max_connector_workers ?
 				synchdb_max_connector_workers : numout); i++)
 		{
-			elog(WARNING, "launching %s...", out[i]);
+			elog(WARNING, "launching %s in database %s...", out[i], dbname);
 			StartTransactionCommand();
 			PushActiveSnapshot(GetTransactionSnapshot());
 
-			DirectFunctionCall1(synchdb_start_engine_bgw, CStringGetTextDatum(out[i]));
+			DirectFunctionCall1(synchdb_start_engine_bgw, CStringGetDatum(out[i]));
 
 			PopActiveSnapshot();
 			CommitTransactionCommand();
@@ -3082,7 +3187,7 @@ synchdb_auto_launcher_main(Datum main_arg)
 		}
 	}
 	pfree(out);
-	elog(DEBUG1, "stop synchdb_auto_launcher_main");
+	elog(DEBUG1, "end synchdb_db_launcher_main for database: %s", dbname);
 }
 
 /*
@@ -4747,7 +4852,7 @@ synchdb_start_engine_bgw_snapshot_mode(PG_FUNCTION_ARGS)
 	if (ret)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("connection name does not exist"),
+				 errmsg("[synchdb_start_engine_bgw_snapshot_mode] connection name does not exist: %s", name),
 				 errhint("use synchdb_add_conninfo to add one first")));
 
 	_snapshotMode = NameStr(*snapshotmode);
@@ -4856,7 +4961,7 @@ synchdb_start_engine_bgw(PG_FUNCTION_ARGS)
 	if (ret)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("connection name does not exist"),
+				 errmsg("[synchdb_start_engine_bgw] connection name does not exist: %s", name),
 				 errhint("use synchdb_add_conninfo to add one first")));
 
 #ifdef WITH_OLR
@@ -5565,7 +5670,7 @@ synchdb_restart_connector(PG_FUNCTION_ARGS)
 	{
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("connection name cannot be empty")));
+				 errmsg("[synchdb_restart_connector] connection name cannot be empty")));
 	}
 
 	/* snapshot_mode can be empty or NULL */
@@ -5578,7 +5683,7 @@ synchdb_restart_connector(PG_FUNCTION_ARGS)
 	if (ret)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("connection name does not exist"),
+				 errmsg("[synchdb_restart_connector] connection name does not exist: %s", name),
 				 errhint("use synchdb_add_conninfo to add one first")));
 
 	/*
