@@ -970,10 +970,14 @@ ra_getConninfoByName(const char * name, ConnectionInfo * conninfo, char ** conne
 			"coalesce(data->>'ispn_cache_type', 'null'), "
 			"coalesce(data->>'ispn_memory_type', 'null'), "
 			"coalesce(data->>'ispn_memory_size', 'null'), "
-			"coalesce(data->>'srcschema', 'null') "
+			"coalesce(data->>'srcschema', 'null'), "
+			"coalesce(data->>'fdw_ssl_cert', 'null'), "
+			"coalesce(data->>'fdw_ssl_key', 'null'), "
+			"coalesce(data->>'fdw_ssl_rootcert', 'null'), "
+			"coalesce(pgp_sym_decrypt((data->>'fdw_ssl_cipher')::bytea, '%s'), 'null') "
 			"FROM "
 			"synchdb_conninfo WHERE name = '%s'",
-			SYNCHDB_SECRET, SYNCHDB_SECRET, SYNCHDB_SECRET, SYNCHDB_SECRET, SYNCHDB_SECRET, name);
+			SYNCHDB_SECRET, SYNCHDB_SECRET, SYNCHDB_SECRET, SYNCHDB_SECRET, SYNCHDB_SECRET, SYNCHDB_SECRET, name);
 
 	res = spi_execute_select_one(strinfo.data, &numcols, conninfoContext);
 	if (!res)
@@ -1020,10 +1024,15 @@ ra_getConninfoByName(const char * name, ConnectionInfo * conninfo, char ** conne
 	strlcpy(conninfo->ispn.ispn_memory_type, TextDatumGetCString(res[34]), INFINISPAN_TYPE_SIZE);
 	conninfo->ispn.ispn_memory_size = atoi(TextDatumGetCString(res[35]));
 	strlcpy(conninfo->srcschema, TextDatumGetCString(res[36]), SYNCHDB_CONNINFO_DB_NAME_SIZE);
+	strlcpy(conninfo->fdw.ssl_cert,     TextDatumGetCString(res[37]), SYNCHDB_CONNINFO_KEYSTORE_SIZE);
+	strlcpy(conninfo->fdw.ssl_key,      TextDatumGetCString(res[38]), SYNCHDB_CONNINFO_KEYSTORE_SIZE);
+	strlcpy(conninfo->fdw.ssl_rootcert, TextDatumGetCString(res[39]), SYNCHDB_CONNINFO_KEYSTORE_SIZE);
+	strlcpy(conninfo->fdw.ssl_cipher,   TextDatumGetCString(res[40]), SYNCHDB_CONNINFO_NAME_SIZE);
 
 	elog(LOG, "name=%s hostname=%s, port=%d, user=%s srcdb=%s srcschema=%s"
 			"dstdb=%s table=%s snapshottable=%s connector=%s extras(ssl_mode=%s ssl_keystore=%s "
 			"ssl_keystore_pass=%s ssl_truststore=%s ssl_truststore_pass=%s) "
+			"fdw(ssl_cert=%s ssl_key=%s ssl_rootcert=%s ssl_cipher=%s) "
 			"jmx(jmx_listenaddr=%s jmx_port=%d jmx_rmiserveraddr=%s jmx_rmiport=%d "
 			"jmx_auth=%s jmx_auth_passwdfile=%s jmx_auth_accessfile=%s jmx_ssl=%s "
 			"jmx_ssl_keystore=%s jmx_ssl_keystore_pass=%s jmx_ssl_truststore=%s "
@@ -1036,6 +1045,7 @@ ra_getConninfoByName(const char * name, ConnectionInfo * conninfo, char ** conne
 			conninfo->dstdb, conninfo->table, conninfo->snapshottable, *connector,
 			conninfo->extra.ssl_mode, conninfo->extra.ssl_keystore, conninfo->extra.ssl_keystore_pass,
 			conninfo->extra.ssl_truststore, conninfo->extra.ssl_truststore_pass,
+			conninfo->fdw.ssl_cert, conninfo->fdw.ssl_key, conninfo->fdw.ssl_rootcert, conninfo->fdw.ssl_cipher,
 			conninfo->jmx.jmx_listenaddr, conninfo->jmx.jmx_port, conninfo->jmx.jmx_rmiserveraddr,
 			conninfo->jmx.jmx_rmiport, conninfo->jmx.jmx_auth ? "true" : "false",
 			conninfo->jmx.jmx_auth_passwdfile, conninfo->jmx.jmx_auth_accessfile,

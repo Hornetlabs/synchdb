@@ -208,6 +208,14 @@ CREATE OR REPLACE FUNCTION synchdb_del_extra_conninfo(name) RETURNS int
 AS '$libdir/synchdb'
 LANGUAGE C IMMUTABLE STRICT;
 
+CREATE OR REPLACE FUNCTION synchdb_add_fdw_conninfo(name, text, text, text, text) RETURNS int
+AS '$libdir/synchdb'
+LANGUAGE C IMMUTABLE STRICT;
+
+CREATE OR REPLACE FUNCTION synchdb_del_fdw_conninfo(name) RETURNS int
+AS '$libdir/synchdb'
+LANGUAGE C IMMUTABLE STRICT;
+
 CREATE OR REPLACE FUNCTION synchdb_del_conninfo(name) RETURNS int
 AS '$libdir/synchdb'
 LANGUAGE C IMMUTABLE STRICT;
@@ -321,16 +329,21 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 AS $$
 DECLARE
-	v_connector  text;      -- 'oracle' | 'olr' | 'mysql' (lowercased)
-    v_hostname   text;
-    v_port       int;
-    v_srcdb      text;   -- from data->>'srcdb'
-    v_service    text;   -- v_srcdb or Oracle PDB name
-    v_user       text;
-    v_pwd        text;   -- decrypted password
-    v_server     text;
-    v_dbserver   text;   -- oracle_fdw "dbserver" option, e.g. //host:1521/SERVICE
-    v_key        text;
+	v_connector   text;      -- 'oracle' | 'olr' | 'mysql' (lowercased)
+    v_hostname    text;
+    v_port        int;
+    v_srcdb       text;   -- from data->>'srcdb'
+    v_service     text;   -- v_srcdb or Oracle PDB name
+    v_user        text;
+    v_pwd         text;   -- decrypted password
+    v_server      text;
+    v_dbserver    text;   -- oracle_fdw "dbserver" option, e.g. //host:1521/SERVICE
+    v_key         text;
+    v_ssl_mode    text;   -- ssl_mode for postgres_fdw (from extra conninfo)
+    v_ssl_cert    text;   -- FDW client certificate file path
+    v_ssl_key     text;   -- FDW client private key file path
+    v_ssl_rootcert text;  -- FDW CA cert path; for oracle_fdw: Oracle Wallet directory
+    v_ssl_cipher  text;   -- SSL cipher list (mysql_fdw only)
 BEGIN
     ----------------------------------------------------------------------
     -- 0) Fetch connector type and ensure we have a master key
@@ -401,6 +414,17 @@ BEGIN
         RAISE EXCEPTION 'No row in synchdb_conninfo for connector name %', p_connector_name;
     END IF;
 
+    -- Fetch FDW TLS cert paths set via synchdb_add_fdw_conninfo (NULL when absent)
+    SELECT
+        NULLIF(NULLIF(data->>'ssl_mode', ''), 'null'),
+        NULLIF(data->>'fdw_ssl_cert',     'null'),
+        NULLIF(data->>'fdw_ssl_key',      'null'),
+        NULLIF(data->>'fdw_ssl_rootcert', 'null'),
+        NULLIF(pgp_sym_decrypt((data->>'fdw_ssl_cipher')::bytea, v_key), 'null')
+    INTO v_ssl_mode, v_ssl_cert, v_ssl_key, v_ssl_rootcert, v_ssl_cipher
+    FROM synchdb_conninfo
+    WHERE name = p_connector_name;
+
     IF v_hostname IS NULL OR v_hostname = '' THEN
         RAISE EXCEPTION 'synchdb_conninfo[%]: data.hostname is missing', p_connector_name;
     END IF;
@@ -437,7 +461,22 @@ BEGIN
     EXECUTE format('DROP SERVER IF EXISTS %I CASCADE', v_server);
 
 	IF v_connector IN ('oracle','olr') THEN
-	    v_dbserver := format('//%s:%s/%s', v_hostname, v_port, v_service);
+		-- oracle_fdw uses Easy Connect Plus for TLS. fdw_ssl_rootcert is treated as
+		-- the Oracle Wallet directory. fdw_ssl_cert/fdw_ssl_key have no Easy Connect
+		-- equivalent and must be imported into the Wallet beforehand via orapki.
+		IF v_ssl_rootcert IS NOT NULL THEN
+			v_dbserver := format('tcps://%s:%s/%s?wallet_location=%s&ssl_server_dn_match=yes',
+			                     v_hostname, v_port, v_service, v_ssl_rootcert);
+			IF v_ssl_cert IS NOT NULL OR v_ssl_key IS NOT NULL THEN
+				RAISE NOTICE
+					'fdw_ssl_cert/fdw_ssl_key are ignored for oracle_fdw: import them into '
+					'the Wallet at % using orapki or openssl pkcs12.',
+					v_ssl_rootcert;
+			END IF;
+		ELSE
+			v_dbserver := format('//%s:%s/%s', v_hostname, v_port, v_service);
+		END IF;
+
 		EXECUTE format(
 			'CREATE SERVER %I FOREIGN DATA WRAPPER oracle_fdw OPTIONS (dbserver %L)',
 			v_server, v_dbserver
@@ -450,9 +489,14 @@ BEGIN
 
 		RAISE NOTICE 'Created server % and user mapping for CURRENT_USER', v_server;
 	ELSIF v_connector = 'mysql' THEN
-		EXECUTE format(
-            'CREATE SERVER %I FOREIGN DATA WRAPPER mysql_fdw OPTIONS (host %L, port %L)',
-            v_server, v_hostname, v_port::text
+		EXECUTE (
+            format('CREATE SERVER %I FOREIGN DATA WRAPPER mysql_fdw OPTIONS (host %L, port %L',
+                   v_server, v_hostname, v_port::text)
+            || CASE WHEN v_ssl_cert     IS NOT NULL THEN format(', ssl_cert %L',   v_ssl_cert)     ELSE '' END
+            || CASE WHEN v_ssl_key      IS NOT NULL THEN format(', ssl_key %L',    v_ssl_key)      ELSE '' END
+            || CASE WHEN v_ssl_rootcert IS NOT NULL THEN format(', ssl_ca %L',     v_ssl_rootcert) ELSE '' END
+            || CASE WHEN v_ssl_cipher   IS NOT NULL THEN format(', ssl_cipher %L', v_ssl_cipher)   ELSE '' END
+            || ')'
         );
 
         EXECUTE format(
@@ -460,9 +504,14 @@ BEGIN
             v_server, v_user, v_pwd
         );
 	ELSIF v_connector = 'postgres' THEN
-		EXECUTE format(
-            'CREATE SERVER %I FOREIGN DATA WRAPPER postgres_fdw OPTIONS (host %L, dbname %L, port %L)',
-            v_server, v_hostname, v_srcdb, v_port::text
+		EXECUTE (
+            format('CREATE SERVER %I FOREIGN DATA WRAPPER postgres_fdw OPTIONS (host %L, dbname %L, port %L',
+                   v_server, v_hostname, v_srcdb, v_port::text)
+            || CASE WHEN v_ssl_mode     IS NOT NULL THEN format(', sslmode %L',     v_ssl_mode)     ELSE '' END
+            || CASE WHEN v_ssl_cert     IS NOT NULL THEN format(', sslcert %L',     v_ssl_cert)     ELSE '' END
+            || CASE WHEN v_ssl_key      IS NOT NULL THEN format(', sslkey %L',      v_ssl_key)      ELSE '' END
+            || CASE WHEN v_ssl_rootcert IS NOT NULL THEN format(', sslrootcert %L', v_ssl_rootcert) ELSE '' END
+            || ')'
         );
 
         EXECUTE format(
