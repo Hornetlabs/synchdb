@@ -75,6 +75,8 @@ PG_FUNCTION_INFO_V1(synchdb_add_objmap);
 PG_FUNCTION_INFO_V1(synchdb_reload_objmap);
 PG_FUNCTION_INFO_V1(synchdb_add_extra_conninfo);
 PG_FUNCTION_INFO_V1(synchdb_del_extra_conninfo);
+PG_FUNCTION_INFO_V1(synchdb_add_fdw_conninfo);
+PG_FUNCTION_INFO_V1(synchdb_del_fdw_conninfo);
 PG_FUNCTION_INFO_V1(synchdb_del_conninfo);
 PG_FUNCTION_INFO_V1(synchdb_del_objmap);
 PG_FUNCTION_INFO_V1(synchdb_add_jmx_conninfo);
@@ -5998,6 +6000,107 @@ synchdb_del_extra_conninfo(PG_FUNCTION_ARGS)
 			"'ssl_keystore_pass', "
 			"'ssl_truststore', "
 			"'ssl_truststore_pass'] "
+			"WHERE name = '%s'",
+			SYNCHDB_CONNINFO_TABLE,
+			NameStr(*name));
+	PG_RETURN_INT32(ra_executeCommand(strinfo.data));
+}
+
+/*
+ * synchdb_add_fdw_conninfo
+ *
+ * Stores FDW TLS certificate file paths (client cert, private key, CA/root cert)
+ * for connectors using FDW snapshot mode. These are PEM file paths consumed
+ * directly by postgres_fdw / mysql_fdw. For oracle_fdw, ssl_rootcert is the
+ * Oracle Wallet directory path. Distinct from synchdb_add_extra_conninfo which
+ * configures Java Keystore/Truststore for the Debezium connector.
+ */
+Datum
+synchdb_add_fdw_conninfo(PG_FUNCTION_ARGS)
+{
+	Name name                   = PG_GETARG_NAME(0);
+	text *ssl_cert_text         = PG_GETARG_TEXT_PP(1);
+	text *ssl_key_text          = PG_GETARG_TEXT_PP(2);
+	text *ssl_rootcert_text     = PG_GETARG_TEXT_PP(3);
+	text *ssl_cipher_text       = PG_GETARG_TEXT_PP(4);
+
+	FdwConnectionInfo fdwssl = {0};
+	StringInfoData strinfo;
+	initStringInfo(&strinfo);
+
+	if (VARSIZE(ssl_cert_text) - VARHDRSZ == 0)
+		strlcpy(fdwssl.ssl_cert, "null", SYNCHDB_CONNINFO_KEYSTORE_SIZE);
+	else if (VARSIZE(ssl_cert_text) - VARHDRSZ > SYNCHDB_CONNINFO_KEYSTORE_SIZE)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("ssl_cert path cannot be longer than %d",
+						SYNCHDB_CONNINFO_KEYSTORE_SIZE)));
+	else
+		strlcpy(fdwssl.ssl_cert, text_to_cstring(ssl_cert_text), SYNCHDB_CONNINFO_KEYSTORE_SIZE);
+
+	if (VARSIZE(ssl_key_text) - VARHDRSZ == 0)
+		strlcpy(fdwssl.ssl_key, "null", SYNCHDB_CONNINFO_KEYSTORE_SIZE);
+	else if (VARSIZE(ssl_key_text) - VARHDRSZ > SYNCHDB_CONNINFO_KEYSTORE_SIZE)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("ssl_key path cannot be longer than %d",
+						SYNCHDB_CONNINFO_KEYSTORE_SIZE)));
+	else
+		strlcpy(fdwssl.ssl_key, text_to_cstring(ssl_key_text), SYNCHDB_CONNINFO_KEYSTORE_SIZE);
+
+	if (VARSIZE(ssl_rootcert_text) - VARHDRSZ == 0)
+		strlcpy(fdwssl.ssl_rootcert, "null", SYNCHDB_CONNINFO_KEYSTORE_SIZE);
+	else if (VARSIZE(ssl_rootcert_text) - VARHDRSZ > SYNCHDB_CONNINFO_KEYSTORE_SIZE)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("ssl_rootcert path cannot be longer than %d",
+						SYNCHDB_CONNINFO_KEYSTORE_SIZE)));
+	else
+		strlcpy(fdwssl.ssl_rootcert, text_to_cstring(ssl_rootcert_text), SYNCHDB_CONNINFO_KEYSTORE_SIZE);
+
+	if (VARSIZE(ssl_cipher_text) - VARHDRSZ == 0)
+		strlcpy(fdwssl.ssl_cipher, "null", SYNCHDB_CONNINFO_NAME_SIZE);
+	else if (VARSIZE(ssl_cipher_text) - VARHDRSZ > SYNCHDB_CONNINFO_NAME_SIZE)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("ssl_cipher cannot be longer than %d",
+						SYNCHDB_CONNINFO_NAME_SIZE)));
+	else
+		strlcpy(fdwssl.ssl_cipher, text_to_cstring(ssl_cipher_text), SYNCHDB_CONNINFO_NAME_SIZE);
+
+	appendStringInfo(&strinfo, "UPDATE %s SET data = data || json_build_object("
+			"'fdw_ssl_cert',     (CASE WHEN '%s' = 'null' THEN null ELSE '%s' END), "
+			"'fdw_ssl_key',      (CASE WHEN '%s' = 'null' THEN null ELSE '%s' END), "
+			"'fdw_ssl_rootcert', (CASE WHEN '%s' = 'null' THEN null ELSE '%s' END), "
+			"'fdw_ssl_cipher',   (CASE WHEN '%s' = 'null' THEN null ELSE pgp_sym_encrypt('%s', '%s') END))::jsonb "
+			"WHERE name = '%s'",
+			SYNCHDB_CONNINFO_TABLE,
+			fdwssl.ssl_cert, fdwssl.ssl_cert,
+			fdwssl.ssl_key, fdwssl.ssl_key,
+			fdwssl.ssl_rootcert, fdwssl.ssl_rootcert,
+			fdwssl.ssl_cipher, fdwssl.ssl_cipher, SYNCHDB_SECRET,
+			NameStr(*name));
+
+	PG_RETURN_INT32(ra_executeCommand(strinfo.data));
+}
+
+/*
+ * synchdb_del_fdw_conninfo
+ *
+ * Deletes all FDW TLS certificate paths set by synchdb_add_fdw_conninfo().
+ */
+Datum
+synchdb_del_fdw_conninfo(PG_FUNCTION_ARGS)
+{
+	Name name = PG_GETARG_NAME(0);
+	StringInfoData strinfo;
+	initStringInfo(&strinfo);
+
+	appendStringInfo(&strinfo, "UPDATE %s SET data = data - ARRAY["
+			"'fdw_ssl_cert', "
+			"'fdw_ssl_key', "
+			"'fdw_ssl_rootcert', "
+			"'fdw_ssl_cipher'] "
 			"WHERE name = '%s'",
 			SYNCHDB_CONNINFO_TABLE,
 			NameStr(*name));

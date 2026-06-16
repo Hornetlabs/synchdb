@@ -305,6 +305,21 @@ typedef struct _OLRConnectionInfo
 } OLRConnectionInfo;
 
 /**
+ * FdwConnectionInfo - TLS certificate file paths for FDW-based snapshot connections.
+ * These are raw PEM file paths consumed by postgres_fdw / mysql_fdw.
+ * For oracle_fdw, ssl_rootcert is the Oracle Wallet directory path.
+ * Distinct from ExtraConnectionInfo which holds Java Keystore/Truststore
+ * paths used by the Debezium connector via JNI.
+ */
+typedef struct _FdwConnectionInfo
+{
+	char ssl_cert[SYNCHDB_CONNINFO_KEYSTORE_SIZE];
+	char ssl_key[SYNCHDB_CONNINFO_KEYSTORE_SIZE];
+	char ssl_rootcert[SYNCHDB_CONNINFO_KEYSTORE_SIZE];
+	char ssl_cipher[SYNCHDB_CONNINFO_NAME_SIZE];
+} FdwConnectionInfo;
+
+/**
  * Infinispan settings - alternative caching mechanism for oracle connector
  */
 typedef struct _IspnInfo
@@ -360,6 +375,7 @@ typedef struct _ConnectionInfo
     ExtraConnectionInfo extra;
     JMXConnectionInfo jmx;
     OLRConnectionInfo olr;
+    FdwConnectionInfo fdw;
     IspnInfo ispn;
     SnapshotEngine snapengine;
     OffsetData offsetdata;
