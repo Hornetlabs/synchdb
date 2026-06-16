@@ -18,13 +18,5 @@ shared_preload_libraries = 'synchdb'
 synchdb.synchdb_auto_launcher = true
 ```
 
-At startup, SynchDB extension will be preloaded very early. With `synchdb.synchdb_auto_launcher` set to true, SynchDB will spawn a `synchdb_auto_launcher` background worker that will retrieve all the conninfos in `synchdb_conninfo` table that is marked as `active` (has `isactive` flag set to `true`). Then, it will start them automatically as a separate background worker in the same way as when `synchdb_start_engine_bgw()` is called. `synchdb_auto_launcher` will exit after.
-
-## **Known Issue**
-`synchdb_auto_launcher` worker will login to the default `postgres` database and try to find active connectors from `synchdb_conninfo` table. 
-
-If SynchDB has been installed from non-default database, then `synchdb_auto_launcher` will fail to find the table, and thus not automatically starting the connector worker. 
-
-In the future, we will make `synchdb_auto_launcher` check for all the databases and automatically start connector workers based on every database's `synchdb_conninfo` tables.
-
-Ref [[Issue #71]](https://github.com/Hornetlabs/synchdb/issues/71) for detail and updates.
+At startup, the SynchDB extension is preloaded early. With `synchdb.synchdb_auto_launcher` set to true, SynchDB spawns a `synchdb_auto_launcher` background worker, which in turn spawns one
+`synchdb_db_launcher` worker for every connectable, non-template database. Each `synchdb_db_launcher` retrieves all the conninfos in the `synchdb_conninfo` table (if it exists) that are marked as `active` (i.e., with the `isactive` flag set to `true`), and then starts them automatically as separate background workers, in the same way as when `synchdb_start_engine_bgw()` is called. The `synchdb_auto_launcher` worker exits after every `synchdb_db_launcher` finishes its job.
