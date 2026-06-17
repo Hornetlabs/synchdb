@@ -24,7 +24,7 @@ jobs:
         run: echo 'noop'
 
   # ----------------------------------------------------------- build (PostgreSQL)
-  build:
+  build-postgresql:
     needs: params
     name: Build for PG${{ fromJson(matrix.pg_version).major }}
     strategy:
@@ -64,7 +64,7 @@ jobs:
     - name: Install Protobuf
       run: |
         sudo apt-get update
-        sudo apt-get install -y protobuf-compiler libprotobuf-dev libprotoc-dev
+        sudo apt-get install -y protobuf-compiler libprotobuf-dev libprotoc-dev uuid-dev
     - name: Expose $PG_MAJOR to Github Env
       run: |
         echo "PG_MAJOR=$(echo '${{ matrix.pg_version }}' | jq -r .major)" >> $GITHUB_ENV
@@ -77,7 +77,7 @@ jobs:
         TARGET_FLAVOR: postgres
     - uses: actions/upload-artifact@v4
       with:
-        name: synchdb-install-${{ env.PG_MAJOR }}
+        name: synchdb-install-${{ fromJson(matrix.pg_version).major }}
         path: |-
           ./synchdb-install-${{ fromJson(matrix.pg_version).major }}.tar.gz
 
@@ -128,7 +128,7 @@ jobs:
     - name: Install Protobuf
       run: |
         sudo apt-get update
-        sudo apt-get install -y protobuf-compiler libprotobuf-dev libprotoc-dev
+        sudo apt-get install -y protobuf-compiler libprotobuf-dev libprotoc-dev uuid-dev
     - name: Build
       run: "./ci/build-synchdb.sh"
       shell: bash
@@ -151,7 +151,7 @@ jobs:
     runs-on: ubuntu-22.04
     needs:
     - params
-    - build
+    - build-postgresql
     steps:
     - name: Free disk space (runner)
       run: |

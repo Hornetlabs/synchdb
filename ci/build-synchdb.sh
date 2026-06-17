@@ -61,6 +61,7 @@ function build_synchdb()
 			--enable-injection-points \
 			--with-libedit-preferred \
 			--with-libxml \
+			--with-uuid=e2fs \
 			--with-icu \
 			--with-ssl=openssl
 		make
