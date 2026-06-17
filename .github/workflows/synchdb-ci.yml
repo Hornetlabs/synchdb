@@ -81,16 +81,23 @@ jobs:
         path: |-
           ./synchdb-install-${{ fromJson(matrix.pg_version).major }}.tar.gz
 
-  # ----------------------------------------------------------- build (IvorySQL 4)
+  # ----------------------------------------------------------- build (IvorySQL)
   # IvorySQL is a PG fork; reuse build-synchdb.sh with TARGET_FLAVOR=ivorysql.
-  build-ivorysql4:
+  # 3.x=PG16-compat, 4.x=PG17-compat, 5.x=PG18-compat.
+  build-ivorysql:
     needs: params
-    name: Build for IvorySQL 4
+    name: Build for IvorySQL ${{ matrix.ivy.major }}
+    strategy:
+      matrix:
+        ivy:
+          - {major: "3", tag: "IvorySQL_3.4" }
+          - {major: "4", tag: "IvorySQL_4.6" }
+          - {major: "5", tag: "IvorySQL_5.4" }
     runs-on: ubuntu-22.04
     env:
       TARGET_FLAVOR: ivorysql
-      IVORYSQL_TAG: IvorySQL_4.6
-      IVORYSQL_MAJOR: "4"
+      IVORYSQL_TAG: ${{ matrix.ivy.tag }}
+      IVORYSQL_MAJOR: ${{ matrix.ivy.major }}
     steps:
     - uses: actions/checkout@v2
     - name: Set up JDK 22
