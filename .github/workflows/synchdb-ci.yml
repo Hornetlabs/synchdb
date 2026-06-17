@@ -90,9 +90,9 @@ jobs:
     strategy:
       matrix:
         ivy:
-          - {major: "3", tag: "IvorySQL_3.4" }
-          - {major: "4", tag: "IvorySQL_4.6" }
-          - {major: "5", tag: "IvorySQL_5.4" }
+          - { major: "3", tag: "IvorySQL_3.4" }
+          - { major: "4", tag: "IvorySQL_4.6" }
+          - { major: "5", tag: "IvorySQL_5.4" }
     runs-on: ubuntu-22.04
     env:
       TARGET_FLAVOR: ivorysql
@@ -134,8 +134,8 @@ jobs:
       shell: bash
     - uses: actions/upload-artifact@v4
       with:
-        name: synchdb-install-ivorysql4
-        path: ./synchdb-install-ivorysql4.tar.gz
+        name: synchdb-install-ivorysql${{ matrix.ivy.major }}
+        path: ./synchdb-install-ivorysql${{ matrix.ivy.major }}.tar.gz
 
   # ----------------------------------------------------------- test (PostgreSQL)
   # source axis x PG-major axis. Target binaries come from --target-bin (the
