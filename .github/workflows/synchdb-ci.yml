@@ -233,16 +233,17 @@ jobs:
 
   # ----------------------------------------------------------- test (IvorySQL 4)
   # Decoupled from the PG test job so a flaky IvorySQL build never blocks PG CI.
-  test-synchdb-ivorysql4:
-    name: ${{ matrix.source }}-ivorysql4
+  test-synchdb-ivorysql:
+    name: ${{ matrix.source }}-ivorysql${{ matrix.major }}
     strategy:
       fail-fast: false
       matrix:
         source: [mysql, oracle, sqlserver, olr, postgres]
+        major: ["3", "4", "5"]
     runs-on: ubuntu-22.04
     needs:
     - params
-    - build-ivorysql4
+    - build-ivorysql
     steps:
     - name: Free disk space (runner)
       run: |
@@ -262,7 +263,7 @@ jobs:
     - uses: actions/checkout@v2
     - uses: actions/download-artifact@v4
       with:
-        name: synchdb-install-ivorysql4
+        name: synchdb-install-ivorysql${{ matrix.major }}
     - name: Set up JDK 22
       uses: actions/setup-java@v2
       with:
@@ -290,7 +291,7 @@ jobs:
         sudo ldconfig
     - name: Install IvorySQL and SynchDB
       run: |
-        sudo tar xzvf synchdb-install-ivorysql4.tar.gz -C /mnt
+        sudo tar xzvf synchdb-install-ivorysql${{ matrix.major }}.tar.gz -C /mnt
         sudo apt-get install -y docker-compose
         docker-compose --version
     - name: Setup Oracle Instant Client v23.9
@@ -310,14 +311,14 @@ jobs:
         sudo apt-get install -y protobuf-compiler libprotobuf-dev libprotoc-dev
     - name: synchdb test
       run: |
-        TBIN=/mnt/usr/lib/ivorysql/ivorysql-4/bin
+        TBIN=/mnt/usr/lib/ivorysql/ivorysql-${{ matrix.major }}/bin
         mkdir -p /var/run/postgresql
         sudo chown -R $(whoami) /var/run/postgresql
         make USE_PGXS=1 PG_CONFIG=$TBIN/pg_config dbcheck \
-          SOURCE=${{ matrix.source }} TARGET=ivorysql4 TARGET_BIN=$TBIN
+          SOURCE=${{ matrix.source }} TARGET=ivorysql${{ matrix.major }} TARGET_BIN=$TBIN
     - uses: actions/upload-artifact@v4
       if: always()
       with:
-        name: synchdb-test-outputs-${{ matrix.source }}-ivorysql4
+        name: synchdb-test-outputs-${{ matrix.source }}-ivorysql${{ matrix.major }}
         path: |-
           ./synchdb_testdir
