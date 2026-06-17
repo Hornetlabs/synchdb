@@ -2439,8 +2439,14 @@ fc_processOLRChangeEvent(void * event, SynchdbStatistics * myBatchStats,
 
 			oralib_path = psprintf("%s/%s", pkglib_path, ORACLE_RAW_PARSER_LIB);
 
-			/* Load the shared library */
-			handle = dlopen(oralib_path, RTLD_NOW | RTLD_GLOBAL);
+			/*
+			 * RTLD_LOCAL keeps the parser's internal ora_* symbols private to
+			 * the library so they do not collide with IvorySQL's built-in
+			 * Oracle parser (which exports the same names).  We only use the
+			 * uniquely named synchdb_oracle_raw_parser entry via dlsym(), which
+			 * works through the explicit handle regardless of LOCAL/GLOBAL.
+			 */
+			handle = dlopen(oralib_path, RTLD_NOW | RTLD_LOCAL);
 			if (!handle)
 			{
 				set_shm_connector_errmsg(myConnectorId, "failed to load oracle_parser.so");
