@@ -79,13 +79,16 @@ function build_synchdb()
 		exit 1
 	fi
 
+	# TODO: currently build under IvorySQL 5.4 will failed: ExecTypeFromTL
 	# ---- mysql_fdw (FDW-based MySQL snapshot) ----
-	git clone https://github.com/EnterpriseDB/mysql_fdw.git --branch REL-2_9_3 "${srcdir}/contrib/mysql_fdw"
-	(
-		cd "${srcdir}/contrib/mysql_fdw"
-		make PG_CONFIG="${pgconfig}"
-		make install PG_CONFIG="${pgconfig}"
-	)
+	if [ "$TARGET_FLAVOR" != "ivorysql" ] || [ "$IVORYSQL_MAJOR" != 5]; then
+		git clone https://github.com/EnterpriseDB/mysql_fdw.git --branch REL-2_9_3 "${srcdir}/contrib/mysql_fdw"
+		(
+			cd "${srcdir}/contrib/mysql_fdw"
+			make PG_CONFIG="${pgconfig}"
+			make install PG_CONFIG="${pgconfig}"
+		)
+	fi
 
 	# ---- protobuf-c (OLR connector dependency) ----
 	git clone https://github.com/protobuf-c/protobuf-c.git --branch v1.5.2

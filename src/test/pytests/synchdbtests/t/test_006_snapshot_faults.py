@@ -44,7 +44,9 @@ def fdw_engine(pg_cursor):
     update_guc_conf(pg_cursor, "synchdb.snapshot_engine", "'debezium'", True)
 
 
-def test_FailThenRetryFDW(pg_cursor, dbvendor, fdw_engine):
+def test_FailThenRetryFDW(pg_cursor, dbvendor, fdw_engine, target):
+    if dbvendor == "mysql" and target.key == "ivorysql5":
+        pytest.skip("TODO: IvorySQL 5.4 not support mysql_fdw yet")
     if dbvendor == "sqlserver":
         pytest.skip("sqlserver no FDW snapshot yet")
     
