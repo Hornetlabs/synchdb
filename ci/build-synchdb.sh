@@ -80,9 +80,9 @@ function build_synchdb()
 	fi
 
 	# ---- mysql_fdw (FDW-based MySQL snapshot) ----
-	git clone https://github.com/EnterpriseDB/mysql_fdw.git --branch REL-2_9_3
+	git clone https://github.com/EnterpriseDB/mysql_fdw.git --branch REL-2_9_3 "${srcdir}/contrib/mysql_fdw"
 	(
-		cd mysql_fdw
+		cd "${srcdir}/contrib/mysql_fdw"
 		make PG_CONFIG="${pgconfig}"
 		make install PG_CONFIG="${pgconfig}"
 	)
