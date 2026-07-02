@@ -94,7 +94,10 @@ def test_FailThenRetryFDW(pg_cursor, dbvendor, fdw_engine):
     run_pg_query_one(pg_cursor, f"SELECT synchdb_start_engine_bgw('{name}')")
     stage, state, err = wait_for_fdw_snapshot_complete(pg_cursor, name, timeout=100)
 
+    if state != "paused":
+        print(f"Unexpected: stage: {stage}, state: {state}, err: {err}")
     assert state == "paused"
+
     assert "synchdb_fdw_snapshot_errors_" in err
     ret = run_pg_query(pg_cursor, f"SELECT * FROM synchdb_fdw_snapshot_errors_{name};")
     assert len(ret) == 1
