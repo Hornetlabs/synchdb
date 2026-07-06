@@ -15,6 +15,8 @@ SynchDB supports 2 snapshot engines, each supports various connector types:
 
 **FDW based snapshot：**
 
+> 💡 **Note:** mysql_fdw cannot be compiled under IvorySQL 5.x.
+
 * MySQL (uses mysql_fdw)
 * Oracle (uses oracle_fdw)
 * Openlog Replicator (uses oracle_fdw)
