@@ -32,6 +32,7 @@ def wait_for_snapshot_complete(cursor, name, timeout=120, interval=2):
         if state in ("paused", "stopped"):
             return last
         time.sleep(interval)
+    print(f"wait_for_snapshot_complete time out: from {deadline - timeout} to {time.time()}")
     return last
 
 
