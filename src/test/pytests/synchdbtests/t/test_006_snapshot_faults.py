@@ -9,12 +9,15 @@ from common import (
     drop_default_pg_schema, drop_repslot_and_pub, update_guc_conf
 )
 
-def wait_for_fdw_snapshot_complete(cursor, name, timeout=120, interval=2):
+def wait_for_snapshot_complete(cursor, name, timeout=120, interval=2):
     """Poll until the connector leaves the initial-snapshot stage.
 
     Returns the final (stage, state, err).  'change data capture' + 'polling'
     means success; 'paused' with a non-'no error' err means partial failure.
     """
+
+    time.sleep(5) # sleep to wait for connector starting
+    
     deadline = time.time() + timeout
     last = (None, None, None)
     while time.time() < deadline:
@@ -24,9 +27,9 @@ def wait_for_fdw_snapshot_complete(cursor, name, timeout=120, interval=2):
         last = (None, None, None) if row is None else (row[0], row[1], row[2])
 
         stage, state, err = last
-        if stage == "change data capture":
+        if stage not in ("initial snapshot", "schema sync"):
             return last
-        if state == "paused":          # FDW partial-failure parks here
+        if state in ("paused", "stopped"):
             return last
         time.sleep(interval)
     return last
@@ -94,7 +97,7 @@ def test_FailThenRetryFDW(pg_cursor, dbvendor, fdw_engine, target):
 
     # 2. start connector
     run_pg_query_one(pg_cursor, f"SELECT synchdb_start_engine_bgw('{name}')")
-    stage, state, err = wait_for_fdw_snapshot_complete(pg_cursor, name, timeout=100)
+    stage, state, err = wait_for_snapshot_complete(pg_cursor, name, timeout=100)
 
     if state != "paused":
         print(f"Unexpected: stage: {stage}, state: {state}, err: {err}")
@@ -108,10 +111,8 @@ def test_FailThenRetryFDW(pg_cursor, dbvendor, fdw_engine, target):
     # 3. remove objmap then resume connector
     run_pg_query(pg_cursor, f"SELECT synchdb_del_objmap('{name}','datatype','{dbname}.bad_table_1.order_id');")
     run_pg_query_one(pg_cursor, f"SELECT synchdb_resume_engine('{name}')")
-    
-    time.sleep(2) # connector need time to switch between states
 
-    stage, state, err = wait_for_fdw_snapshot_complete(pg_cursor, name, timeout=100)
+    stage, state, err = wait_for_snapshot_complete(pg_cursor, name, timeout=100)
     assert state == "polling"
 
     ret = run_pg_query_one(pg_cursor, f"SELECT * from {dbname}.bad_table_1;")
@@ -120,3 +121,74 @@ def test_FailThenRetryFDW(pg_cursor, dbvendor, fdw_engine, target):
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
     drop_repslot_and_pub(dbvendor, name, "postgres")
+    for i in range(3):
+        run_remote_query(dbvendor, f"DROP TABLE IF EXISTS bad_table_{i}")
+
+
+def test_FailThenRetryDebezium(pg_cursor, dbvendor):
+    BIG_VALUE = 9223372036854775807
+
+    dbname = getDbname(dbvendor).lower()
+    schema = getSchema(dbvendor)
+    failed_source_table_full_name = f"{dbname}.bad_table_1" if schema is None else f"{dbname}.{schema}.bad_table_1"
+    name = getConnectorName(dbvendor) + "_debeziumfailretry"
+
+    if dbvendor == "mysql":
+        query_pattern = """
+        CREATE TABLE bad_table_{} (
+        id INT NOT NULL,
+        order_id BIGINT,
+        PRIMARY KEY(id)
+        );
+        """
+    elif dbvendor == "postgres":
+        query_pattern = """
+        CREATE TABLE bad_table_{} (
+        id INT NOT NULL,
+        order_id BIGINT,
+        PRIMARY KEY(id)
+        );
+        """
+    else:
+        query_pattern = """
+        CREATE TABLE bad_table_{} (
+        id NUMBER(10) NOT NULL,
+        order_id NUMBER(19),
+        PRIMARY KEY(id)
+        );
+        """
+
+    # Create three tables with bigint values
+    for i in range(3):
+        run_remote_query(dbvendor, query_pattern.format(str(i)))
+        run_remote_query(dbvendor, "INSERT INTO bad_table_{} values ({}, {})".format(str(i), i, BIG_VALUE))
+
+    create_synchdb_connector(pg_cursor, dbvendor, name)
+
+    # 1. create wrong datatype mapping so that the snapshot will fail
+    run_pg_query(pg_cursor, f"SELECT synchdb_add_objmap('{name}','datatype','{dbname}.bad_table_1.order_id','smallint');")
+
+    # 2. start connector
+    run_pg_query_one(pg_cursor, f"SELECT synchdb_start_engine_bgw('{name}')")
+    stage, state, err = wait_for_snapshot_complete(pg_cursor, name, timeout=100)
+
+    if state != "paused":
+        print(f"Unexpected: stage: {stage}, state: {state}, err: {err}")
+    assert state == "stopped"
+    assert "is out of range" in err
+
+    # 3. remove objmap then resume connector
+    run_pg_query(pg_cursor, f"SELECT synchdb_del_objmap('{name}','datatype','{dbname}.bad_table_1.order_id');")
+    run_pg_query_one(pg_cursor, f"SELECT synchdb_start_engine_bgw('{name}')")
+
+    stage, state, err = wait_for_snapshot_complete(pg_cursor, name, timeout=100)
+    assert state == "polling"
+
+    ret = run_pg_query_one(pg_cursor, f"SELECT * from {dbname}.bad_table_1;")
+    assert ret[1] == BIG_VALUE
+
+    stop_and_delete_synchdb_connector(pg_cursor, name)
+    drop_default_pg_schema(pg_cursor, dbvendor)
+    drop_repslot_and_pub(dbvendor, name, "postgres")
+    for i in range(3):
+        run_remote_query(dbvendor, f"DROP TABLE IF EXISTS bad_table_{i}")
