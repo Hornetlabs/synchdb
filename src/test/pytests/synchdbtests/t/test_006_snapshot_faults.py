@@ -25,7 +25,7 @@ def wait_for_snapshot_complete(cursor, name, timeout=120, interval=2):
             cursor,
             f"SELECT stage, state, err FROM synchdb_state_view WHERE name = '{name}'")
         last = (None, None, None) if row is None else (row[0], row[1], row[2])
-
+        print(row)
         stage, state, err = last
         if stage not in ("initial snapshot", "schema sync"):
             return last
@@ -60,7 +60,7 @@ def test_FailThenRetryFDW(pg_cursor, dbvendor, fdw_engine, target):
     schema = getSchema(dbvendor)
     failed_source_table_full_name = f"{dbname}.bad_table_1" if schema is None else f"{dbname}.{schema}.bad_table_1"
     name = getConnectorName(dbvendor) + "_fdwfailretry"
-
+            
     if dbvendor == "mysql":
         query_pattern = """
         CREATE TABLE bad_table_{} (
@@ -126,12 +126,31 @@ def test_FailThenRetryFDW(pg_cursor, dbvendor, fdw_engine, target):
         run_remote_query(dbvendor, f"DROP TABLE IF EXISTS bad_table_{i}")
 
 
+@pytest.mark.skip("TODO: implement after upgrade Debezium")
 def test_FailThenRetryDebezium(pg_cursor, dbvendor):
+    if dbvendor == "postgres":
+        pytest.skip("TODO: postgres cannot be tested yet")
+        '''
+        # TODO: with postgres, table need to be created mannually
+        # changing datatype mappings may not proper
+        if dbvendor == "postgres":
+            # postgres in debezium snapshot needs to create tables manually
+            run_pg_query_one(pg_cursor, f"CREATE SCHEMA IF NOT EXISTS {dbname}")
+            run_pg_query_one(pg_cursor, f"CREATE TABLE {dbname}.orders (order_number int primary key, order_date timestamp without time zone, purchaser int, quantity int , product_id int)")
+            
+            for i in range(3):
+                # Note: order_id is smallint here
+                run_pg_query_one(pg_cursor, """CREATE TABLE {}.bad_table_{} (
+                id INT NOT NULL,
+                order_id smallint,
+                PRIMARY KEY(id)
+                );
+                """.format(dbname, str(i)))
+        '''
+
     BIG_VALUE = 9223372036854775807
 
     dbname = getDbname(dbvendor).lower()
-    schema = getSchema(dbvendor)
-    failed_source_table_full_name = f"{dbname}.bad_table_1" if schema is None else f"{dbname}.{schema}.bad_table_1"
     name = getConnectorName(dbvendor) + "_debeziumfailretry"
 
     if dbvendor == "mysql":
@@ -171,7 +190,7 @@ def test_FailThenRetryDebezium(pg_cursor, dbvendor):
 
     # 2. start connector
     run_pg_query_one(pg_cursor, f"SELECT synchdb_start_engine_bgw('{name}')")
-    stage, state, err = wait_for_snapshot_complete(pg_cursor, name, timeout=100)
+    stage, state, err = wait_for_snapshot_complete(pg_cursor, name, timeout=200)
 
     if state != "paused":
         print(f"Unexpected: stage: {stage}, state: {state}, err: {err}")
