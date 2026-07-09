@@ -41,6 +41,7 @@ The following software is required to build and run SynchDB. The versions listed
 **The following is required if you would like to use FDW based snapshot**
 * OCI v23.9.0. Refer to [here](https://docs.synchdb.com/user-guide/configure_snapshot_engine/) for more information
 * oracle_fdw v2.8.0. Refer to [here](https://github.com/laurenz/oracle_fdw) to build from source
+* mysql_fdw v2.9.3. Refer to [here](https://github.com/EnterpriseDB/mysql_fdw) to build from source
 
 ## Build Procedure
 

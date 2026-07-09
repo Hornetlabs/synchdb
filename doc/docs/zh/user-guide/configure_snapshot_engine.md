@@ -15,7 +15,7 @@ SynchDB 支援兩種快照引擎，每種引擎支援多種連接器類型：
 
 **基於 FDW 的快照：**
 
-> 💡 **提示:** IvorySQL 5.x 版本無法編譯 mysql_fdw
+<**注意**> IvorySQL 5.x 版本無法編譯 mysql_fdw
 
 * MySQL（使用 mysql_fdw）
 * Oracle（使用 oracle_fdw）
