@@ -702,6 +702,17 @@ public class DebeziumRunner {
 
 				props.setProperty("tasks.max", "1");
 				props.setProperty("plugin.name", "pgoutput");
+
+				/*
+				 * restore pre-3.x startup behavior: synchdb's fdw snapshot engine
+				 * writes an offset file before the replication slot exists, which
+				 * fails Debezium 3.x's valicateLogPosition() check. trust_slot skips
+				 * the check and lets Debezium create the slot and stream from it,
+				 * as Debezium 2.6 did
+				 *
+				 * TODO: https://github.com/Hornetlabs/synchdb/issues/256
+				 */
+				props.setProperty("offset.mismatch.strategy", "trust_slot");
 				props.setProperty("slot.name", myParameters.connectorName + "_" + myParameters.dstdb + "_" + "synchdb_slot");
 				props.setProperty("publication.name", myParameters.connectorName + "_" + myParameters.dstdb + "_" + "synchdb_pub");
 	
