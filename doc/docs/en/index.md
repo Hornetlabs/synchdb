@@ -48,6 +48,8 @@ This architecture allows PostgreSQL to leverage the rich ecosystem of Debezium c
 
 ## **Optional Third Party Libraries and extensions**
 
+<**NOTE**> mysql_fdw cannot be compiled under IvorySQL 5.x.
+
 - libprotobuf-c v1.5.2 (tested version) (optional for Openlog Replicator support)
 - oracle_fdw extension v2.8.0 (tested version) (needed if you choose to use fdw based initial snapshot for OLR or Oracle connector)
 - mysql_fdw extensions v2.9.3 (tested version) (needed if you choose to use fdw based initial snapshot for MySQL connector)

@@ -53,6 +53,8 @@ SynchDB 的核心集成了 Debezium 嵌入式引擎，这是一个基于 Java �
 
 ## **可選的第三方庫和插件**
 
+<**注意**> IvorySQL 5.x 版本無法編譯 mysql_fdw
+
 - libprotobuf-c v1.5.2（已測試版本）（Openlog Replicator 支援可選）
 - oracle_fdw 擴充功能 v2.8.0（已測試版本）（如果您選擇使用基於 fdw 的初始快照來建立 OLR 或 Oracle 連接器，則需要此擴充）
 - mysql_fdw 擴充功能 v2.9.3（已測試版本）（如果您選擇使用基於 fdw 的初始快照來建立 MySQL 連接器，則需要此擴充功能）
