@@ -3202,24 +3202,24 @@ BEGIN
           'columns', COALESCE(v_cols_json, '[]'::jsonb),
           'attributes', '[]'::jsonb
         );
-		IF v_offset_json IS NOT NULL THEN
-		  v_binlog_file := v_offset_json->>'file';
-  		  v_binlog_pos  := (v_offset_json->>'pos')::bigint;
-		  v_ts_sec      := COALESCE((v_offset_json->>'ts_sec')::bigint, 0);
-		ELSE
-	      v_binlog_file := 'n/a';
-		  v_binlog_pos := 0;
-		  v_ts_sec := 0;
-		END IF;
+        IF v_offset_json IS NOT NULL THEN
+          v_binlog_file := v_offset_json->>'file';
+            v_binlog_pos  := (v_offset_json->>'pos')::bigint;
+          v_ts_sec      := COALESCE((v_offset_json->>'ts_sec')::bigint, 0);
+        ELSE
+            v_binlog_file := 'n/a';
+          v_binlog_pos := 0;
+          v_ts_sec := 0;
+        END IF;
 
-		v_change_obj := jsonb_build_object(
-		  'type', 'CREATE',
-		  'id', format('"%s"."%s"',
-					 p_desired_db::text,
-					 r.table_name),
-		  'table', v_table_obj,
-		  'comment', NULL
-		);
+        v_change_obj := jsonb_build_object(
+          'type', 'CREATE',
+          'id', format('"%s"."%s"',
+              r.ora_owner,    -- using origin name instead of transformed name
+              r.table_name),
+          'table', v_table_obj,
+          'comment', NULL
+        );
         v_msg_json := jsonb_build_object(
           'source',   jsonb_build_object('server', 'synchdb-connector'),
           'position', jsonb_build_object(
@@ -3229,7 +3229,7 @@ BEGIN
                          'snapshot', 		TRUE
                        ),
           'ts_ms', v_ts_ms,
-          'databaseName', p_desired_db::text,
+          'databaseName', r.ora_owner,
           'ddl', '',
           'tableChanges', jsonb_build_array(v_change_obj)
         );

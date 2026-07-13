@@ -28,6 +28,27 @@ def get_container_ip(name: str, network: str = "synchdbnet") -> str | None:
     ip = proc.stdout.strip()
     return ip or None # None if not attached to that network
 
+
+# Canonical test cluster data dir.  Shared by conftest's TargetInstance (which
+# runs initdb/pg_ctl here) and update_guc_conf() below (which appends GUCs to
+# its postgresql.conf), so the two never drift apart.
+TEST_DATA_DIR = os.path.join("synchdb_testdir", "data")
+
+
+def resolve_host(container: str, max_tries: int = 20) -> str:
+    """Resolve a container's synchdbnet IP lazily (NOT at import time).
+
+    Replaces the old module-level get_container_ip() calls that ran
+    `docker inspect` on every import regardless of which vendor was tested.
+    """
+    for _ in range(max_tries):
+        ip = get_container_ip(name=container)
+        if ip:
+            return ip
+        time.sleep(1)
+    raise RuntimeError(f"could not resolve IP for container '{container}'")
+
+
 MYSQL_HOST="127.0.0.1"
 MYSQL_PORT=3306
 MYSQL_USER="mysqluser"
@@ -41,7 +62,7 @@ SQLSERVER_PASS="Password!"
 SQLSERVER_DB="testDB"
 SQLSERVER_SCHEMA="dbo"
 
-ORACLE_HOST=get_container_ip(name="ora19c")
+ORACLE_HOST=None  # resolved lazily via resolve_host("ora19c")
 ORACLE_PORT=1521
 ORACLE_USER="DBZUSER"
 ORACLE_PASS="dbz"
@@ -49,15 +70,15 @@ ORACLE_DB="FREE"
 ORACLE_SCHEMA="DBZUSER"
 
 # ora19c and olr are put to a dedicated docker network called synchdb to test
-# so we need to resolve their container UPs
-ORA19C_HOST=get_container_ip(name="ora19c")
+# so we need to resolve their container IPs (lazily, on first use)
+ORA19C_HOST=None
 ORA19C_PORT=1521
 ORA19C_USER="DBZUSER"
 ORA19C_PASS="dbz"
 ORA19C_DB="FREE"
 ORA19C_SCHEMA="DBZUSER"
 
-ORACLE23AI_HOST=get_container_ip(name="eztest_oracle23ai")
+ORACLE23AI_HOST=None  # resolved lazily via resolve_host("eztest_oracle23ai")
 ORACLE23AI_PORT=1521
 ORACLE23AI_USER="DBZUSER"
 ORACLE23AI_PASS="dbz"
@@ -67,7 +88,7 @@ ORACLE23AI_CDB="FREE"
 ORACLE23AI_COMMON_USER="c##dbzuser"
 ORACLE23AI_COMMON_PASS="dbz"
 
-OLR_HOST=get_container_ip(name="OpenLogReplicator")
+OLR_HOST=None  # resolved lazily via resolve_host("OpenLogReplicator")
 OLR_PORT="7070"
 OLR_SERVICE="ORACLE"
 
@@ -263,20 +284,14 @@ def run_remote_query(where, query, srcdb=None):
             exit
             """
             if where == "oracle":
-                result = subprocess.check_output(["docker", "exec", "-i", "ora19c", "sqlplus", "-S", f"{ORACLE_USER}/{ORACLE_PASS}@//{ORACLE_HOST}:{ORACLE_PORT}/{db}"], input=sql, text=True).strip()
+                host = resolve_host("ora19c")
+                result = subprocess.check_output(["docker", "exec", "-i", "ora19c", "sqlplus", "-S", f"{ORACLE_USER}/{ORACLE_PASS}@//{host}:{ORACLE_PORT}/{db}"], input=sql, text=True).strip()
             elif where == "oracle23ai":
-                result = subprocess.check_output(["docker", "exec", "-i", "eztest_oracle23ai", "sqlplus", "-S", f"{ORACLE23AI_USER}/{ORACLE23AI_PASS}@//{ORACLE23AI_HOST}:{ORACLE23AI_PORT}/{db}"], input=sql, text=True).strip()
+                host = resolve_host("eztest_oracle23ai")
+                result = subprocess.check_output(["docker", "exec", "-i", "eztest_oracle23ai", "sqlplus", "-S", f"{ORACLE23AI_USER}/{ORACLE23AI_PASS}@//{host}:{ORACLE23AI_PORT}/{db}"], input=sql, text=True).strip()
             else:
-                global ORA19C_HOST
-                max_tries = 20
-                tries = 0
-
-                while ORA19C_HOST is None and tries < max_tries:
-                    ORA19C_HOST = get_container_ip(name="ora19c")
-                    tries += 1
-                    time.sleep(1)
-
-                result = subprocess.check_output(["docker", "exec", "-i", "ora19c", "sqlplus", "-S", f"{ORA19C_USER}/{ORA19C_PASS}@//{ORA19C_HOST}:{ORA19C_PORT}/{db}"], input=sql, text=True).strip()
+                host = resolve_host("ora19c")
+                result = subprocess.check_output(["docker", "exec", "-i", "ora19c", "sqlplus", "-S", f"{ORA19C_USER}/{ORA19C_PASS}@//{host}:{ORA19C_PORT}/{db}"], input=sql, text=True).strip()
                 
             rows = []
             for line in result.splitlines():
@@ -322,52 +337,19 @@ def create_synchdb_connector(cursor, vendor, name, srcdb=None, srcschema=None):
         result = run_pg_query_one(cursor, f"SELECT synchdb_add_conninfo('{name}','{SQLSERVER_HOST}', {SQLSERVER_PORT}, '{SQLSERVER_USER}', '{SQLSERVER_PASS}', '{db}', '{schema}', 'null', 'null', 'sqlserver');")
 
     elif vendor == "oracle":
-        global ORACLE_HOST
-        max_tries = 20
-        tries = 0
-
-        while ORACLE_HOST is None and tries < max_tries:
-            ORACLE_HOST = get_container_ip(name="ora19c")
-            tries += 1
-            time.sleep(1)
-
-        assert ORACLE_HOST is not None
-        result = run_pg_query_one(cursor, f"SELECT synchdb_add_conninfo('{name}','{ORACLE_HOST}', {ORACLE_PORT}, '{ORACLE_USER}', '{ORACLE_PASS}', '{db}', '{schema}', 'null', 'null', 'oracle');")
+        host = resolve_host("ora19c")
+        result = run_pg_query_one(cursor, f"SELECT synchdb_add_conninfo('{name}','{host}', {ORACLE_PORT}, '{ORACLE_USER}', '{ORACLE_PASS}', '{db}', '{schema}', 'null', 'null', 'oracle');")
     elif vendor == "oracle23ai":
-        global ORACLE23AI_HOST
-        max_tries = 20
-        tries = 0
-
-        while ORACLE23AI_HOST is None and tries < max_tries:
-            ORACLE23AI_HOST = get_container_ip(name="eztest_oracle23ai")
-            tries += 1
-            time.sleep(1)
-
-        assert ORACLE23AI_HOST is not None
-        result = run_pg_query_one(cursor, f"SELECT synchdb_add_conninfo('{name}','{ORACLE23AI_HOST}', {ORACLE23AI_PORT}, '{ORACLE23AI_COMMON_USER}', '{ORACLE23AI_COMMON_PASS}', '{ORACLE23AI_CDB}/{db}', '{schema}', 'null', 'null', 'oracle');")
+        host = resolve_host("eztest_oracle23ai")
+        result = run_pg_query_one(cursor, f"SELECT synchdb_add_conninfo('{name}','{host}', {ORACLE23AI_PORT}, '{ORACLE23AI_COMMON_USER}', '{ORACLE23AI_COMMON_PASS}', '{ORACLE23AI_CDB}/{db}', '{schema}', 'null', 'null', 'oracle');")
     elif vendor == "postgres":
         result = run_pg_query_one(cursor, f"SELECT synchdb_add_conninfo('{name}','{POSTGRES_HOST}', {POSTGRES_PORT}, '{POSTGRES_USER}', '{POSTGRES_PASS}', '{db}', '{schema}', 'null', 'null', 'postgres');")
 
     else:
-        global ORA19C_HOST
-        global OLR_HOST
-        max_tries = 20
-        tries = 0
-
-        while ORA19C_HOST is None and tries < max_tries:
-            ORA19C_HOST = get_container_ip(name="ora19c")
-            tries += 1
-            time.sleep(1)
-        
-        tries = 0
-        while OLR_HOST is None and tries < max_tries:
-            OLR_HOST = get_container_ip(name="OpenLogReplicator")
-            tries += 1
-            time.sleep(1)
-        
-        assert ORA19C_HOST != None and OLR_HOST != None
-        result = run_pg_query_one(cursor, f"SELECT synchdb_add_conninfo('{name}','{ORA19C_HOST}', {ORA19C_PORT}, '{ORA19C_USER}', '{ORA19C_PASS}', '{db}', '{schema}', 'null', 'null', 'olr');")
-        result = run_pg_query_one(cursor, f"SELECT synchdb_add_olr_conninfo('{name}','{OLR_HOST}', {OLR_PORT}, '{OLR_SERVICE}');")
+        ora_host = resolve_host("ora19c")
+        olr_host = resolve_host("OpenLogReplicator")
+        result = run_pg_query_one(cursor, f"SELECT synchdb_add_conninfo('{name}','{ora_host}', {ORA19C_PORT}, '{ORA19C_USER}', '{ORA19C_PASS}', '{db}', '{schema}', 'null', 'null', 'olr');")
+        result = run_pg_query_one(cursor, f"SELECT synchdb_add_olr_conninfo('{name}','{olr_host}', {OLR_PORT}, '{OLR_SERVICE}');")
 
     return result
 
@@ -400,9 +382,9 @@ def drop_default_pg_schema(cursor, vendor):
         row = run_pg_query_one(cursor, f"DROP SCHEMA IF EXISTS \"FREE\" CASCADE")
 
 def update_guc_conf(cursor, key, val, reload_conf=False):
-    temp_dir = "synchdb_testdir"
-    data_dir = os.path.join(temp_dir, "data")
-    conf_file = os.path.join(data_dir, "postgresql.conf")
+    # TEST_DATA_DIR is the same dir conftest's TargetInstance ran initdb in,
+    # so this appends to the live cluster's postgresql.conf.
+    conf_file = os.path.join(TEST_DATA_DIR, "postgresql.conf")
 
     # Append parameter
     with open(conf_file, "a") as f:

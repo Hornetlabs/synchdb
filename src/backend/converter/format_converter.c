@@ -5234,10 +5234,6 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 							found = true;
 							if (mappedColumnName)
 								pfree(mappedColumnName);
-
-							if (colNameObjId.data)
-								pfree(colNameObjId.data);
-
 							break;
 						}
 						if (mappedColumnName)
