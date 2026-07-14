@@ -637,7 +637,7 @@ def test_AllDefaultDataTypes(pg_cursor, dbvendor):
             assert row[27] == extrow[27]
             assert row[28] == extrow[28]
             assert row[29] == extrow[29]
-            assert row[30] == None
+            assert row[30] == extrow[30]
             assert row[31] == None
             assert row[32] == extrow[32]
             assert row[33] == extrow[33]
