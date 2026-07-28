@@ -26,9 +26,10 @@ import java.io.FileInputStream;
 import java.io.ObjectInputStream;
 import java.io.FileOutputStream;
 import java.io.ObjectOutputStream;
-import org.apache.log4j.Logger;
-import org.apache.log4j.Level;
-import org.apache.log4j.*;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.core.config.Configurator;
 import java.lang.management.ManagementFactory;
 import java.lang.management.MemoryMXBean;
 import java.lang.management.MemoryUsage;
@@ -37,7 +38,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 
 public class DebeziumRunner {
-	private static Logger logger = Logger.getRootLogger();
+	private static Logger logger = LogManager.getRootLogger();
 	private List<String> changeEvents = new ArrayList<>();
 	private DebeziumEngine<ChangeEvent<String, String>> engine;
 	private ExecutorService executor;
@@ -385,59 +386,52 @@ public class DebeziumRunner {
 		
 		Properties props = new Properties();
 
-		/* Initialize Logging */
-		if (logger.getAppender("Console") == null)
-		{
-			ConsoleAppender consoleAppender = new ConsoleAppender();
-			consoleAppender.setName("Console");
-        	consoleAppender.setLayout(new PatternLayout("%d{yyyy-MM-dd HH:mm:ss} %-5p %c{1}:%L - %m%n"));
-        	consoleAppender.setTarget(ConsoleAppender.SYSTEM_OUT);
-        	consoleAppender.activateOptions();
-			logger.addAppender(consoleAppender);
-		}
-
+		/*
+		 * Initialize Logging: console appender and pattern are declared in
+		 * src/main/resources/log4j2.xml; only the level is set at runtime
+		 */
 		switch (myParameters.logLevel)
 		{
 			case LOG_LEVEL_ALL:
 			{
-				logger.setLevel(Level.ALL);
+				Configurator.setRootLevel(Level.ALL);
 				break;
 			}
 			case LOG_LEVEL_DEBUG:
 			{
-				logger.setLevel(Level.DEBUG);
+				Configurator.setRootLevel(Level.DEBUG);
 				break;
 			}
 			case LOG_LEVEL_INFO:
 			{
-				logger.setLevel(Level.INFO);
+				Configurator.setRootLevel(Level.INFO);
 				break;
 			}
 			case LOG_LEVEL_ERROR:
 			{
-				logger.setLevel(Level.ERROR);
+				Configurator.setRootLevel(Level.ERROR);
 				break;
 			}
 			case LOG_LEVEL_FATAL:
 			{
-				logger.setLevel(Level.FATAL);
+				Configurator.setRootLevel(Level.FATAL);
 				break;
 			}
 			case LOG_LEVEL_OFF:
 			{
-				logger.setLevel(Level.OFF);
+				Configurator.setRootLevel(Level.OFF);
 				break;
 			}
 			case LOG_LEVEL_TRACE:
 			{
-				logger.setLevel(Level.TRACE);
+				Configurator.setRootLevel(Level.TRACE);
 				break;
 			}
-			default:	
+			default:
 			case LOG_LEVEL_UNDEF:
 			case LOG_LEVEL_WARN:
 			{
-				logger.setLevel(Level.WARN);
+				Configurator.setRootLevel(Level.WARN);
 				break;
 			}
 		}
@@ -708,6 +702,17 @@ public class DebeziumRunner {
 
 				props.setProperty("tasks.max", "1");
 				props.setProperty("plugin.name", "pgoutput");
+
+				/*
+				 * restore pre-3.x startup behavior: synchdb's fdw snapshot engine
+				 * writes an offset file before the replication slot exists, which
+				 * fails Debezium 3.x's valicateLogPosition() check. trust_slot skips
+				 * the check and lets Debezium create the slot and stream from it,
+				 * as Debezium 2.6 did
+				 *
+				 * TODO: https://github.com/Hornetlabs/synchdb/issues/256
+				 */
+				props.setProperty("offset.mismatch.strategy", "trust_slot");
 				props.setProperty("slot.name", myParameters.connectorName + "_" + myParameters.dstdb + "_" + "synchdb_slot");
 				props.setProperty("publication.name", myParameters.connectorName + "_" + myParameters.dstdb + "_" + "synchdb_pub");
 	
@@ -1325,16 +1330,16 @@ public class DebeziumRunner {
 	{
       switch (level)
       {
-          case LOG_LEVEL_ALL:   logger.setLevel(Level.ALL);   break;
-          case LOG_LEVEL_DEBUG: logger.setLevel(Level.DEBUG); break;
-          case LOG_LEVEL_INFO:  logger.setLevel(Level.INFO);  break;
-          case LOG_LEVEL_ERROR: logger.setLevel(Level.ERROR); break;
-          case LOG_LEVEL_FATAL: logger.setLevel(Level.FATAL); break;
-          case LOG_LEVEL_OFF:   logger.setLevel(Level.OFF);   break;
-          case LOG_LEVEL_TRACE: logger.setLevel(Level.TRACE); break;
+          case LOG_LEVEL_ALL:   Configurator.setRootLevel(Level.ALL);   break;
+          case LOG_LEVEL_DEBUG: Configurator.setRootLevel(Level.DEBUG); break;
+          case LOG_LEVEL_INFO:  Configurator.setRootLevel(Level.INFO);  break;
+          case LOG_LEVEL_ERROR: Configurator.setRootLevel(Level.ERROR); break;
+          case LOG_LEVEL_FATAL: Configurator.setRootLevel(Level.FATAL); break;
+          case LOG_LEVEL_OFF:   Configurator.setRootLevel(Level.OFF);   break;
+          case LOG_LEVEL_TRACE: Configurator.setRootLevel(Level.TRACE); break;
           default:
           case LOG_LEVEL_UNDEF:
-          case LOG_LEVEL_WARN:  logger.setLevel(Level.WARN);  break;
+          case LOG_LEVEL_WARN:  Configurator.setRootLevel(Level.WARN);  break;
       }
       logger.warn("DBZ log level changed to " + logger.getLevel());
 	}

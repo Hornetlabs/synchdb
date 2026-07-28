@@ -7,6 +7,12 @@
   <version>1.1.0</version>
   <name>dbz-engine</name>
   <url>http://maven.apache.org</url>
+  <properties>
+    <debezium.version>3.5.2.Final</debezium.version>
+    <kafka.version>4.1.2</kafka.version>
+    <jackson.version>2.19.0</jackson.version>
+    <log4j2.version>2.26.1</log4j2.version>
+  </properties>
   <dependencies>
     <dependency>
       <groupId>junit</groupId>
@@ -15,109 +21,115 @@
       <scope>test</scope>
     </dependency>
     <dependency>
-      <groupId>mysql</groupId>
-      <artifactId>mysql-connector-java</artifactId>
-      <version>8.0.33</version>
+      <groupId>com.mysql</groupId>
+      <artifactId>mysql-connector-j</artifactId>
+      <version>9.3.0</version>
     </dependency>
     <dependency>
       <groupId>org.apache.kafka</groupId>
 	  <artifactId>connect-api</artifactId>
-	  <version>3.6.2</version>
+	  <version>${kafka.version}</version>
     </dependency>
     <dependency>
       <groupId>org.apache.kafka</groupId>
 	  <artifactId>connect-runtime</artifactId>
-	  <version>3.6.2</version>
-    </dependency>
-    <dependency>
-      <groupId>com.zendesk</groupId>
-	  <artifactId>mysql-binlog-connector-java</artifactId>
-	  <version>0.29.1</version>
+	  <version>${kafka.version}</version>
     </dependency>
     <dependency>
       <groupId>io.debezium</groupId>
       <artifactId>debezium-api</artifactId>
-	  <version>2.6.2.Final</version>
+	  <version>${debezium.version}</version>
     </dependency>
     <dependency>
       <groupId>io.debezium</groupId>
       <artifactId>debezium-embedded</artifactId>
-      <version>2.6.2.Final</version>
+      <version>${debezium.version}</version>
     </dependency>
     <dependency>
       <groupId>io.debezium</groupId>
       <artifactId>debezium-connector-mysql</artifactId>
-      <version>2.6.2.Final</version>
+      <version>${debezium.version}</version>
     </dependency>
     <dependency>
       <groupId>io.debezium</groupId>
       <artifactId>debezium-connector-oracle</artifactId>
-      <version>2.6.2.Final</version>
+      <version>${debezium.version}</version>
+      <exclusions>
+        <!--
+          ehcache (used only for log.mining.buffer.type=ehcache, which synchdb
+          does not use) pulls pre-release JAXB artifacts hosted only on the
+          defunct maven.java.net repository
+        -->
+        <exclusion>
+          <groupId>org.ehcache</groupId>
+          <artifactId>ehcache</artifactId>
+        </exclusion>
+      </exclusions>
     </dependency>
     <dependency>
       <groupId>io.debezium</groupId>
       <artifactId>debezium-connector-sqlserver</artifactId>
-      <version>2.6.2.Final</version>
+      <version>${debezium.version}</version>
     </dependency>
     <dependency>
         <groupId>io.debezium</groupId>
         <artifactId>debezium-connector-postgres</artifactId>
-        <version>2.6.2.Final</version>
+        <version>${debezium.version}</version>
     </dependency>
     <dependency>
       <groupId>io.debezium</groupId>
       <artifactId>debezium-core</artifactId>
-      <version>2.6.2.Final</version>
+      <version>${debezium.version}</version>
     </dependency>
     <dependency>
       <groupId>io.debezium</groupId>
       <artifactId>debezium-storage-kafka</artifactId>
-      <version>2.6.2.Final</version>
+      <version>${debezium.version}</version>
     </dependency>
     <dependency>
       <groupId>io.debezium</groupId>
       <artifactId>debezium-storage-file</artifactId>
-      <version>2.6.2.Final</version>
+      <version>${debezium.version}</version>
     </dependency>
     <dependency>
       <groupId>io.debezium</groupId>
       <artifactId>debezium-ddl-parser</artifactId>
-      <version>2.6.2.Final</version>
+      <version>${debezium.version}</version>
     </dependency>
     <dependency>
       <groupId>org.slf4j</groupId>
       <artifactId>slf4j-api</artifactId>
-      <version>1.7.36</version>
+      <version>2.0.18</version>
     </dependency>
     <dependency>
-      <groupId>org.slf4j</groupId>
-      <artifactId>slf4j-log4j12</artifactId>
-      <version>1.7.36</version>
+      <groupId>org.apache.logging.log4j</groupId>
+      <artifactId>log4j-api</artifactId>
+      <version>${log4j2.version}</version>
     </dependency>
     <dependency>
-      <groupId>log4j</groupId>
-      <artifactId>log4j</artifactId>
-      <version>1.2.17</version>
+      <groupId>org.apache.logging.log4j</groupId>
+      <artifactId>log4j-core</artifactId>
+      <version>${log4j2.version}</version>
     </dependency>
     <dependency>
-      <groupId>org.antlr</groupId>
-      <artifactId>antlr4-runtime</artifactId>
-      <version>4.10.1</version>
+      <groupId>org.apache.logging.log4j</groupId>
+      <artifactId>log4j-slf4j2-impl</artifactId>
+      <version>${log4j2.version}</version>
     </dependency>
     <dependency>
       <groupId>com.fasterxml.jackson.core</groupId>
       <artifactId>jackson-databind</artifactId>
-      <version>2.15.3</version>
+      <version>${jackson.version}</version>
     </dependency>
     <dependency>
       <groupId>com.fasterxml.jackson.core</groupId>
       <artifactId>jackson-annotations</artifactId>
-      <version>2.15.3</version>
+      <version>${jackson.version}</version>
     </dependency>
     <dependency>
       <groupId>com.fasterxml.jackson.core</groupId>
       <artifactId>jackson-core</artifactId>
-      <version>2.15.3</version>
+      <version>${jackson.version}</version>
     </dependency>
   </dependencies>
   <build>
@@ -125,10 +137,9 @@
 	<plugin>
         <groupId>org.apache.maven.plugins</groupId>
             <artifactId>maven-compiler-plugin</artifactId>
-            <version>3.8.1</version> <!-- Ensure this is updated -->
+            <version>3.13.0</version>
             <configuration>
-                <source>1.8</source>
-                <target>1.8</target>
+                <release>17</release>
             </configuration>
         </plugin>
         <plugin>
