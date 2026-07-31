@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+
+{% block languages %}
+  {% include "partials/language.html" %}
+{% endblock %}
+
+{% block content %}
+
+{% if page.url_to_print_page %}
+    <a href="{{ page.url_to_print_page }}" title="Print Site" class="md-content__button md-icon">
+        {% include ".icons/material/printer.svg" %}
+    </a>
+{% endif %} 
+
+{{ super() }}
+{% endblock content %}
+
+
+{% block repo %}
+    {% if page.url_to_print_page %}
+        <li class="nav-item">
+            <a href="{{ page.url_to_print_page }}" title="Print Site" class="nav-link">
+                <i class="fa fa-print"></i> Print
+            </a>
+        </li>
+    {% endif %}
+
+{{ super() }}
+{% endblock repo %}

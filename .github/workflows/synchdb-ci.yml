@@ -3,8 +3,14 @@ on:
   workflow_dispatch:
   push:
     branches: [ main, synchdb-devel]
+    paths-ignore:
+      - 'doc/**'
+      - '.github/workflows/docs-ci.yml'
   pull_request:
     branches: [ main, synchdb-devel]
+    paths-ignore:
+      - 'doc/**'
+      - '.github/workflows/docs-ci.yml'
 jobs:
   params:
     runs-on: ubuntu-22.04
@@ -16,7 +22,9 @@ jobs:
     steps:
       - name: set up parameters
         run: echo 'noop'
-  build:
+
+  # ----------------------------------------------------------- build (PostgreSQL)
+  build-postgresql:
     needs: params
     name: Build for PG${{ fromJson(matrix.pg_version).major }}
     strategy:
@@ -51,10 +59,12 @@ jobs:
         echo "OCI_INC_DIR=$GITHUB_WORKSPACE/oci/instantclient_23_9/sdk/include" >> $GITHUB_ENV
         echo "LD_LIBRARY_PATH=$GITHUB_WORKSPACE/oci/instantclient_23_9:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
         echo "$GITHUB_WORKSPACE/oci/instantclient_23_9" >> $GITHUB_PATH
+        rm -f instantclient-basic-linux.x64-23.9.0.25.07.zip
+        rm -f instantclient-sdk-linux.x64-23.9.0.25.07.zip
     - name: Install Protobuf
       run: |
         sudo apt-get update
-        sudo apt-get install -y protobuf-compiler libprotobuf-dev libprotoc-dev
+        sudo apt-get install -y protobuf-compiler libprotobuf-dev libprotoc-dev uuid-dev
     - name: Expose $PG_MAJOR to Github Env
       run: |
         echo "PG_MAJOR=$(echo '${{ matrix.pg_version }}' | jq -r .major)" >> $GITHUB_ENV
@@ -63,29 +73,85 @@ jobs:
     - name: Build
       run: "./ci/build-synchdb.sh"
       shell: bash
+      env:
+        TARGET_FLAVOR: postgres
     - uses: actions/upload-artifact@v4
       with:
-        name: synchdb-install-${{ env.PG_MAJOR }}
+        name: synchdb-install-${{ fromJson(matrix.pg_version).major }}
         path: |-
           ./synchdb-install-${{ fromJson(matrix.pg_version).major }}.tar.gz
+
+  # ----------------------------------------------------------- build (IvorySQL)
+  # IvorySQL is a PG fork; reuse build-synchdb.sh with TARGET_FLAVOR=ivorysql.
+  # 3.x=PG16-compat, 4.x=PG17-compat, 5.x=PG18-compat.
+  build-ivorysql:
+    needs: params
+    name: Build for IvorySQL ${{ matrix.ivy.major }}
+    strategy:
+      matrix:
+        ivy:
+          - { major: "3", tag: "IvorySQL_3.4" }
+          - { major: "4", tag: "IvorySQL_4.6" }
+          - { major: "5", tag: "IvorySQL_5.4" }
+    runs-on: ubuntu-22.04
+    env:
+      TARGET_FLAVOR: ivorysql
+      IVORYSQL_TAG: ${{ matrix.ivy.tag }}
+      IVORYSQL_MAJOR: ${{ matrix.ivy.major }}
+    steps:
+    - uses: actions/checkout@v2
+    - name: Set up JDK 22
+      uses: actions/setup-java@v2
+      with:
+        java-version: '22'
+        distribution: 'temurin'
+        architecture: x64
+        check-latest: true
+    - name: Set up Maven
+      uses: stCarolas/setup-maven@v4.5
+      with:
+        maven-version: 3.9.8
+    - name: Setup Oracle Instant Client v23.9
+      run: |
+        mkdir -p $GITHUB_WORKSPACE/oci && cd $GITHUB_WORKSPACE/oci
+        wget -q https://download.oracle.com/otn_software/linux/instantclient/2390000/instantclient-basic-linux.x64-23.9.0.25.07.zip
+        wget -q https://download.oracle.com/otn_software/linux/instantclient/2390000/instantclient-sdk-linux.x64-23.9.0.25.07.zip
+        unzip -q instantclient-basic-linux.x64-23.9.0.25.07.zip
+        unzip -q -o instantclient-sdk-linux.x64-23.9.0.25.07.zip
+        echo "OCI_HOME=$GITHUB_WORKSPACE/oci/instantclient_23_9" >> $GITHUB_ENV
+        echo "OCI_LIB_DIR=$GITHUB_WORKSPACE/oci/instantclient_23_9" >> $GITHUB_ENV
+        echo "OCI_INC_DIR=$GITHUB_WORKSPACE/oci/instantclient_23_9/sdk/include" >> $GITHUB_ENV
+        echo "LD_LIBRARY_PATH=$GITHUB_WORKSPACE/oci/instantclient_23_9:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
+        echo "$GITHUB_WORKSPACE/oci/instantclient_23_9" >> $GITHUB_PATH
+        rm -f instantclient-basic-linux.x64-23.9.0.25.07.zip
+        rm -f instantclient-sdk-linux.x64-23.9.0.25.07.zip
+    - name: Install Protobuf
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y protobuf-compiler libprotobuf-dev libprotoc-dev uuid-dev
+    - name: Build
+      run: "./ci/build-synchdb.sh"
+      shell: bash
+    - uses: actions/upload-artifact@v4
+      with:
+        name: synchdb-install-ivorysql${{ matrix.ivy.major }}
+        path: ./synchdb-install-ivorysql${{ matrix.ivy.major }}.tar.gz
+
+  # ----------------------------------------------------------- test (PostgreSQL)
+  # source axis x PG-major axis. Target binaries come from --target-bin (the
+  # extracted artifact), and PG_CONFIG points make/pgxs at the same install,
+  # so no global PATH injection is needed.
   test-synchdb:
-    name: PG${{ fromJson(matrix.pg_version).major }}-${{ matrix.dbtypes }} Tests
+    name: ${{ matrix.source }}-pg${{ matrix.major }}
     strategy:
       fail-fast: false
       matrix:
-        pg_version:
-          - ${{ needs.params.outputs.pg16_version }}
-          - ${{ needs.params.outputs.pg17_version }}
-          - ${{ needs.params.outputs.pg18_version }}
-        dbtypes:
-          - mysql
-          - oracle
-          - sqlserver
-          - olr
+        source: [mysql, oracle, sqlserver, olr, postgres]
+        major: ["16", "17", "18"]
     runs-on: ubuntu-22.04
     needs:
     - params
-    - build
+    - build-postgresql
     steps:
     - name: Free disk space (runner)
       run: |
@@ -94,10 +160,18 @@ jobs:
         docker builder prune -af || true
         docker volume prune -af || true
         echo "After cleanup:" && df -h
+    - name: Move docker root to save space
+      run: |
+        sudo systemctl stop docker
+        sudo mkdir -p /mnt/docker
+        sudo mv /var/lib/docker/* /mnt/docker/ || true
+        sudo rm -rf /var/lib/docker
+        sudo ln -s /mnt/docker /var/lib/docker
+        sudo systemctl start docker
     - uses: actions/checkout@v2
     - uses: actions/download-artifact@v4
       with:
-        name: synchdb-install-${{ fromJson(matrix.pg_version).major }}
+        name: synchdb-install-${{ matrix.major }}
     - name: Set up JDK 22
       uses: actions/setup-java@v2
       with:
@@ -116,16 +190,16 @@ jobs:
         pytest --version
     - name: Configure Linker
       run: |
-        echo "configure Java"
         JAVA_PATH=$(which java)
         JDK_HOME_PATH=$(readlink -f ${JAVA_PATH} | sed 's:/bin/java::')
         JDK_LIB_PATH=${JDK_HOME_PATH}/lib
         echo $JDK_LIB_PATH | sudo tee -a /etc/ld.so.conf.d/x86_64-linux-gnu.conf
         echo $JDK_LIB_PATH/server | sudo tee -a /etc/ld.so.conf.d/x86_64-linux-gnu.conf
+        echo "/mnt/usr/local/lib" | sudo tee /etc/ld.so.conf.d/synchdb-mnt.conf
         sudo ldconfig
     - name: Install Base PG and SynchDB
       run: |
-        sudo tar xzvf synchdb-install-${{ fromJson(matrix.pg_version).major }}.tar.gz -C /
+        sudo tar xzvf synchdb-install-${{ matrix.major }}.tar.gz -C /mnt
         sudo apt-get install -y docker-compose
         docker-compose --version
     - name: Setup Oracle Instant Client v23.9
@@ -135,27 +209,116 @@ jobs:
         wget -q https://download.oracle.com/otn_software/linux/instantclient/2390000/instantclient-sdk-linux.x64-23.9.0.25.07.zip
         unzip -q instantclient-basic-linux.x64-23.9.0.25.07.zip
         unzip -q -o instantclient-sdk-linux.x64-23.9.0.25.07.zip
-        echo "OCI_HOME=$GITHUB_WORKSPACE/oci/instantclient_23_9" >> $GITHUB_ENV
-        echo "OCI_LIB_DIR=$GITHUB_WORKSPACE/oci/instantclient_23_9" >> $GITHUB_ENV
-        echo "OCI_INC_DIR=$GITHUB_WORKSPACE/oci/instantclient_23_9/sdk/include" >> $GITHUB_ENV
         echo "LD_LIBRARY_PATH=$GITHUB_WORKSPACE/oci/instantclient_23_9:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
         echo "$GITHUB_WORKSPACE/oci/instantclient_23_9" >> $GITHUB_PATH
+        rm -f instantclient-basic-linux.x64-23.9.0.25.07.zip
+        rm -f instantclient-sdk-linux.x64-23.9.0.25.07.zip
     - name: Install Protobuf
       run: |
         sudo apt-get update
         sudo apt-get install -y protobuf-compiler libprotobuf-dev libprotoc-dev
-    - name: Expose $DBTYPE to Github Env
-      run: echo "DBTYPE=${{ matrix.dbtypes }}" >> $GITHUB_ENV
-      shell: bash
     - name: synchdb test
       run: |
-        export PATH=$PATH:/usr/lib/postgresql/${{ fromJson(matrix.pg_version).major }}/bin
+        TBIN=/mnt/usr/lib/postgresql/${{ matrix.major }}/bin
         mkdir -p /var/run/postgresql
         sudo chown -R $(whoami) /var/run/postgresql
-        make USE_PGXS=1 ${{ matrix.dbtypes }}check
+        make USE_PGXS=1 PG_CONFIG=$TBIN/pg_config dbcheck \
+          SOURCE=${{ matrix.source }} TARGET=pg${{ matrix.major }} TARGET_BIN=$TBIN
     - uses: actions/upload-artifact@v4
       if: always()
       with:
-        name: synchdb-test-outputs-${{ fromJson(matrix.pg_version).major }}-${{ matrix.dbtypes }}
+        name: synchdb-test-outputs-${{ matrix.source }}-pg${{ matrix.major }}
+        path: |-
+          ./synchdb_testdir
+
+  # ----------------------------------------------------------- test (IvorySQL 4)
+  # Decoupled from the PG test job so a flaky IvorySQL build never blocks PG CI.
+  test-synchdb-ivorysql:
+    name: ${{ matrix.source }}-ivorysql${{ matrix.major }}
+    strategy:
+      fail-fast: false
+      matrix:
+        source: [mysql, oracle, sqlserver, olr, postgres]
+        major: ["3", "4", "5"]
+    runs-on: ubuntu-22.04
+    needs:
+    - params
+    - build-ivorysql
+    steps:
+    - name: Free disk space (runner)
+      run: |
+        echo "Before cleanup:" && df -h
+        docker system prune -af || true
+        docker builder prune -af || true
+        docker volume prune -af || true
+        echo "After cleanup:" && df -h
+    - name: Move docker root to save space
+      run: |
+        sudo systemctl stop docker
+        sudo mkdir -p /mnt/docker
+        sudo mv /var/lib/docker/* /mnt/docker/ || true
+        sudo rm -rf /var/lib/docker
+        sudo ln -s /mnt/docker /var/lib/docker
+        sudo systemctl start docker
+    - uses: actions/checkout@v2
+    - uses: actions/download-artifact@v4
+      with:
+        name: synchdb-install-ivorysql${{ matrix.major }}
+    - name: Set up JDK 22
+      uses: actions/setup-java@v2
+      with:
+        java-version: '22'
+        distribution: 'temurin'
+        architecture: x64
+        check-latest: true
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.10"
+    - name: Install pytest
+      run: |
+        pip install pytest psycopg2
+        python --version
+        pytest --version
+    - name: Configure Linker
+      run: |
+        JAVA_PATH=$(which java)
+        JDK_HOME_PATH=$(readlink -f ${JAVA_PATH} | sed 's:/bin/java::')
+        JDK_LIB_PATH=${JDK_HOME_PATH}/lib
+        echo $JDK_LIB_PATH | sudo tee -a /etc/ld.so.conf.d/x86_64-linux-gnu.conf
+        echo $JDK_LIB_PATH/server | sudo tee -a /etc/ld.so.conf.d/x86_64-linux-gnu.conf
+        echo "/mnt/usr/local/lib" | sudo tee /etc/ld.so.conf.d/synchdb-mnt.conf
+        sudo ldconfig
+    - name: Install IvorySQL and SynchDB
+      run: |
+        sudo tar xzvf synchdb-install-ivorysql${{ matrix.major }}.tar.gz -C /mnt
+        sudo apt-get install -y docker-compose
+        docker-compose --version
+    - name: Setup Oracle Instant Client v23.9
+      run: |
+        mkdir -p $GITHUB_WORKSPACE/oci && cd $GITHUB_WORKSPACE/oci
+        wget -q https://download.oracle.com/otn_software/linux/instantclient/2390000/instantclient-basic-linux.x64-23.9.0.25.07.zip
+        wget -q https://download.oracle.com/otn_software/linux/instantclient/2390000/instantclient-sdk-linux.x64-23.9.0.25.07.zip
+        unzip -q instantclient-basic-linux.x64-23.9.0.25.07.zip
+        unzip -q -o instantclient-sdk-linux.x64-23.9.0.25.07.zip
+        echo "LD_LIBRARY_PATH=$GITHUB_WORKSPACE/oci/instantclient_23_9:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
+        echo "$GITHUB_WORKSPACE/oci/instantclient_23_9" >> $GITHUB_PATH
+        rm -f instantclient-basic-linux.x64-23.9.0.25.07.zip
+        rm -f instantclient-sdk-linux.x64-23.9.0.25.07.zip
+    - name: Install Protobuf
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y protobuf-compiler libprotobuf-dev libprotoc-dev
+    - name: synchdb test
+      run: |
+        TBIN=/mnt/usr/lib/ivorysql/ivorysql-${{ matrix.major }}/bin
+        mkdir -p /var/run/postgresql
+        sudo chown -R $(whoami) /var/run/postgresql
+        make USE_PGXS=1 PG_CONFIG=$TBIN/pg_config dbcheck \
+          SOURCE=${{ matrix.source }} TARGET=ivorysql${{ matrix.major }} TARGET_BIN=$TBIN
+    - uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: synchdb-test-outputs-${{ matrix.source }}-ivorysql${{ matrix.major }}
         path: |-
           ./synchdb_testdir

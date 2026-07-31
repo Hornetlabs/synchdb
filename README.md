@@ -20,7 +20,7 @@ Visit SynchDB documentation site [here](https://docs.synchdb.com/) for more desi
 SynchDB extension consists of these major components:
 * Debezium Runner (Java) - Responsible for connecting to source databases and get change events.
 * SynchDB Worker - Responsible for polling change events from Debezium Runner via JNI.
-* Event Processor - Reponsible for processing raw events into internal structures.
+* Event Processor - Responsible for processing raw events into internal structures.
 * Data Converter - Responsible for transforming data values.
 * Replication Agent - Responsible for applying changes to PostgreSQL.
 
@@ -28,12 +28,12 @@ SynchDB extension consists of these major components:
 
 ## Build Requirement
 The following software is required to build and run SynchDB. The versions listed are the versions tested during development. Older versions may still work.
+* Unix based operating system like Ubuntu 22.04 or MacOS
 * Java Development Kit 17 or later. Download [here](https://www.oracle.com/ca-en/java/technologies/downloads/)
 * Apache Maven 3.6.3 or later. Download [here](https://maven.apache.org/download.cgi)
-* PostgreSQL source or build enviornment. Git clone [here](https://github.com/postgres/postgres). Refer to this [wiki](https://wiki.postgresql.org/wiki/Compile_and_Install_from_source_code) to build PostgreSQL from source or this [page](https://www.postgresql.org/download/linux/) to install PostgreSQL via packages
+* PostgreSQL source or build environment. Git clone [here](https://github.com/postgres/postgres). Refer to this [wiki](https://wiki.postgresql.org/wiki/Compile_and_Install_from_source_code) to build PostgreSQL from source or this [page](https://www.postgresql.org/download/linux/) to install PostgreSQL via packages
+    * If PostgreSQL is installed via a package manager, the corresponding devel package needs to be installed as well.
 * Docker compose 2.28.1 (for testing). Refer to [here](https://docs.docker.com/compose/install/linux/)
-* Unix based operating system like Ubuntu 22.04 or MacOS
-
 **The following is required if Openlog Replicator Connector is enabled in build**
 
 * libprotobuf-c v1.5.2. Refer to [here](https://github.com/protobuf-c/protobuf-c.git) to build from source.
@@ -41,6 +41,7 @@ The following software is required to build and run SynchDB. The versions listed
 **The following is required if you would like to use FDW based snapshot**
 * OCI v23.9.0. Refer to [here](https://docs.synchdb.com/user-guide/configure_snapshot_engine/) for more information
 * oracle_fdw v2.8.0. Refer to [here](https://github.com/laurenz/oracle_fdw) to build from source
+* mysql_fdw v2.9.3. Refer to [here](https://github.com/EnterpriseDB/mysql_fdw) to build from source
 
 ## Build Procedure
 
@@ -50,6 +51,9 @@ If you already have PostgreSQL installed, you can build and install Default Sync
 
 ``` BASH
 USE_PGXS=1 make PG_CONFIG=$(which pg_config)
+
+# Using Maven to build Debezium
+export PATH=${YOUR_MAVEN_PATH}/bin/:$PATH
 USE_PGXS=1 make build_dbz PG_CONFIG=$(which pg_config)
 
 sudo USE_PGXS=1 make PG_CONFIG=$(which pg_config) install
@@ -131,7 +135,7 @@ Run ldconfig to reload:
 sudo ldconfig
 ```
 
-Ensure synchdo.so extension can link to libjvm Java library on your system:
+Ensure synchdb.so extension can link to libjvm Java library on your system:
 ``` BASH
 ldd synchdb.so
         linux-vdso.so.1 (0x00007ffeae35a000)
@@ -171,9 +175,9 @@ CREATE EXTENSION synchdb CASCADE;
 ```
 
 ### Create a Connector
-A connector represents the details to connecto to a remote heterogeneous database and describes what tables to replicate from. It can be created with `synchdb_add_conninfo()` function.
+A connector represents the details to connect to a remote heterogeneous database and describes what tables to replicate from. It can be created with `synchdb_add_conninfo()` function.
 
-Create a MySQL connector and replicate `inventory.orders` and `inventory.customers` tables under `invnetory` database:
+Create a MySQL connector and replicate `inventory.orders` and `inventory.customers` tables under `inventory` database:
 ``` SQL
 SELECT synchdb_add_conninfo('mysqlconn','127.0.0.1', 3306, 'mysqluser', 'mysqlpwd', 'inventory', 'postgres', 'inventory.orders,inventory.customers', 'null', 'mysql');
 ```

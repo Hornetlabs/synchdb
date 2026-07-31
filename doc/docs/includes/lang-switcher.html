@@ -1,0 +1,12 @@
+<div class="md-select">
+  <label>
+    <span class="md-select__label">Language</span>
+    <select class="md-select__inner" onchange="window.location.href=this.value">
+      {% for alt in config.extra.alternate %}
+        <option value="{{ alt.link }}" {% if alt.lang == config.theme.language %}selected{% endif %}>
+          {{ alt.name }}
+        </option>
+      {% endfor %}
+    </select>
+  </label>
+</div>

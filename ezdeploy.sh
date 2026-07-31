@@ -91,7 +91,7 @@ function custom-deployment()
 {
 	echo ""
 	echo "please list source databases separate by comma"
-	echo "possible values: (mysql, sqlserver, oracle23ai, oracle19c, olr)"
+	echo "possible values: (mysql, sqlserver, oracle23ai, oracle19c, olr, postgres)"
 
 	read -rp "your selection: " RAW_CHOICES
 	IFS=', ' read -r -a _tokens <<< "$RAW_CHOICES"
@@ -100,7 +100,7 @@ function custom-deployment()
 		[[ -z "$t" ]] && continue
 		key="${t,,}"
 		case "$key" in
-			mysql|sqlserver|oracle23ai|oracle19c|olr) PICKED["$key"]=1 ;;
+			mysql|sqlserver|oracle23ai|oracle19c|olr|postgres) PICKED["$key"]=1 ;;
 		*) echo "Ignoring unknown option: $t" ;;
 		esac
 	done
@@ -175,10 +175,11 @@ echo -e "\t 3) synchdb + sqlserver"
 echo -e "\t 4) synchdb + oracle23ai"
 echo -e "\t 5) synchdb + oracle19c"
 echo -e "\t 6) synchdb + olr(oracle19c)"
-echo -e "\t 7) synchdb + all source databases"
-echo -e "\t 8) custom deployment"
-echo -e "\t 9) deploy monitoring"
-echo -e "\t10) teardown deployment"
+echo -e "\t 7) synchdb + postgres18"
+echo -e "\t 8) synchdb + all source databases"
+echo -e "\t 9) custom deployment"
+echo -e "\t10) deploy monitoring"
+echo -e "\t11) teardown deployment"
 
 read -rp "enter your selection: " choice
 
@@ -201,21 +202,26 @@ case "$choice" in
 	 deploy-sourcedb "olr"
 	 ;;
   7) deploy-synchdb
+	 deploy-sourcedb "postgres"
+	 ;;
+  8) deploy-synchdb
 	 deploy-sourcedb "mysql"
 	 deploy-sourcedb "sqlserver" 
 	 deploy-sourcedb "oracle" 
 	 deploy-sourcedb "olr"
+	 deploy-sourcedb "postgres"
 	 ;;
-  8) custom-deployment 
+  9) custom-deployment 
 	 ;;
-  9) deploy-monitoring
+ 10) deploy-monitoring
 	 ;;
- 10) teardown-synchdb
+ 11) teardown-synchdb
 	 teardown-sourcedb "mysql"
 	 teardown-sourcedb "sqlserver" 
 	 teardown-sourcedb "oracle" 
 	 teardown-sourcedb "ora19c" 
 	 teardown-sourcedb "olr"
+	 teardown-sourcedb "postgres"
 	 teardown-monitoring
 	 clear-oradata
 	 teardown-sourcedb "synchdbnet"

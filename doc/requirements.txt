@@ -1,0 +1,8 @@
+mkdocs-material
+mkdocs-minify-plugin
+pymdown-extensions
+mike
+mkdocs-static-i18n
+mkdocs-print-site-plugin
+mkdocs-nav-weight
+mkdocs-awesome-pages-plugin

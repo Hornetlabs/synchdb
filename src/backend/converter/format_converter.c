@@ -52,6 +52,10 @@
 /* global external variables */
 extern bool synchdb_dml_use_spi;
 extern int myConnectorId;
+extern int synchdb_letter_casing_strategy;
+extern int synchdb_error_strategy;
+extern bool synchdb_log_event_on_error;
+extern char * g_eventStr;
 
 /* data transformation related hash tables */
 HTAB * dataCacheHash = NULL;
@@ -62,6 +66,7 @@ static HTAB * transformExpressionHash = NULL;
 static HTAB * mysqlDatatypeHash = NULL;
 static HTAB * oracleDatatypeHash = NULL;
 static HTAB * sqlserverDatatypeHash = NULL;
+static HTAB * postgresDatatypeHash = NULL;
 
 DatatypeHashEntry mysql_defaultTypeMappings[] =
 {
@@ -115,20 +120,20 @@ DatatypeHashEntry mysql_defaultTypeMappings[] =
 	{{"mediumblob", false}, "bytea", 0},
 	{{"longblob", false}, "bytea", 0},
 	{{"tinyblob", false}, "bytea", 0},
-	{{"long varchar", false}, "text", -1},
-	{{"longtext", false}, "text", -1},
-	{{"mediumtext", false}, "text", -1},
-	{{"tinytext", false}, "text", -1},
+	{{"long varchar", false}, "text", 0},
+	{{"longtext", false}, "text", 0},
+	{{"mediumtext", false}, "text", 0},
+	{{"tinytext", false}, "text", 0},
 	{{"json", false}, "jsonb", -1},
-	{{"geometry", false}, "text", -1},
-	{{"geometrycollection", false}, "text", -1},
-	{{"geomcollection", false}, "text", -1},
-	{{"linestring", false}, "text", -1},
-	{{"multilinestring", false}, "text", -1},
-	{{"multipoint", false}, "text", -1},
-	{{"multipolygon", false}, "text", -1},
-	{{"point", false}, "text", -1},
-	{{"polygon", false}, "text", -1}
+	{{"geometry", false}, "text", 0},
+	{{"geometrycollection", false}, "text", 0},
+	{{"geomcollection", false}, "text", 0},
+	{{"linestring", false}, "text", 0},
+	{{"multilinestring", false}, "text", 0},
+	{{"multipoint", false}, "text", 0},
+	{{"multipolygon", false}, "text", 0},
+	{{"point", false}, "text", 0},
+	{{"polygon", false}, "text", 0}
 };
 #define SIZE_MYSQL_DATATYPE_MAPPING (sizeof(mysql_defaultTypeMappings) / sizeof(DatatypeHashEntry))
 
@@ -255,6 +260,81 @@ DatatypeHashEntry sqlserver_defaultTypeMappings[] =
 
 #define SIZE_SQLSERVER_DATATYPE_MAPPING (sizeof(sqlserver_defaultTypeMappings) / sizeof(DatatypeHashEntry))
 
+DatatypeHashEntry postgres_defaultTypeMappings[] =
+{
+	{{"bigint", false}, "bigint", 0},
+	{{"bigserial", false}, "bigserial", 0},
+	{{"bigserial", true}, "bigserial", 0},
+	{{"bit", false}, "bit", -1},
+	{{"bit varying", false}, "bit varying", -1},
+	{{"bool", false}, "bool", 0},
+	{{"boolean", false}, "boolean", 0},
+	{{"box", false}, "box", 0},
+	{{"bytea", false}, "bytea", 0},
+	{{"char", false}, "char", -1},
+	{{"character", false}, "character", -1},
+	{{"character varying", false}, "character varying", -1},
+	{{"cidr", false}, "cidr", 0},
+	{{"circle", false}, "circle", 0},
+	{{"date", false}, "date", 0},
+	{{"decimal", false}, "decimal", -1},
+	{{"double precision", false}, "double precision", 0},
+	{{"float", false}, "float", 0},
+	{{"float4", false}, "float4", 0},
+	{{"float8", false}, "float8", 0},
+	{{"inet", false}, "inet", 0},
+	{{"int", false}, "int", 0},
+	{{"int2", false}, "int2", 0},
+	{{"int4", false}, "int4", 0},
+	{{"int8", false}, "int8", 0},
+	{{"integer", false}, "integer", 0},
+	{{"interval", false}, "interval", -1},
+	{{"json", false}, "json", 0},
+	{{"jsonb", false}, "jsonb", 0},
+	{{"line", false}, "line", 0},
+	{{"lseg", false}, "lseg", 0},
+	{{"macaddr", false}, "macaddr", 0},
+	{{"macaddr8", false}, "macaddr8", 0},
+	{{"money", false}, "money", 0},
+	{{"numeric", false}, "numeric", -1},
+	{{"path", false}, "path", 0},
+	{{"pg_lsn", false}, "pg_lsn", 0},
+	{{"pg_snapshot", false}, "pg_snapshot", 0},
+	{{"point", false}, "point", 0},
+	{{"polygon", false}, "polygon", 0},
+	{{"real", false}, "real", 0},
+	{{"smallint", false}, "smallint", 0},
+	{{"smallserial", false}, "smallserial", 0},
+	{{"smallserial", true}, "smallserial", 0},
+	{{"serial", false}, "serial", 0},
+	{{"serial", true}, "serial", 0},
+	{{"serial2", false}, "serial2", 0},
+	{{"serial2", true}, "serial2", 0},
+	{{"serial4", false}, "serial4", 0},
+	{{"serial4", true}, "serial4", 0},
+	{{"serial8", false}, "serial8", 0},
+	{{"serial8", true}, "serial8", 0},
+	{{"text", false}, "text", 0},
+	{{"time without time zone", false}, "time without time zone", -1},
+	{{"time with time zone", false}, "time with time zone", -1},
+	{{"time", false}, "time", -1},
+	{{"timetz", false}, "timetz", -1},
+	{{"timestamp without time zone", false}, "timestamp without time zone", -1},
+	{{"timestamp with time zone", false}, "timestamp with time zone", -1},
+	{{"timestamp", false}, "timestamp", -1},
+	{{"timestamptz", false}, "timestamptz", -1},
+	{{"tsquery", false}, "tsquery", 0},
+	{{"tsvector", false}, "tsvector", 0},
+	{{"txid_snapshot", false}, "txid_snapshot", 0},
+	{{"uuid", false}, "uuid", 0},
+	{{"varbit", false}, "varbit", -1},
+	{{"varchar", false}, "varchar", -1},
+	{{"xml", false}, "xml", 0},
+	/* ... */
+};
+
+#define SIZE_POSTGRES_DATATYPE_MAPPING (sizeof(postgres_defaultTypeMappings) / sizeof(DatatypeHashEntry))
+
 static void remove_precision(char * str, bool * removed);
 static int count_active_columns(TupleDesc tupdesc);
 static void bytearray_to_escaped_string(const unsigned char *byte_array,
@@ -263,10 +343,9 @@ static long long derive_value_from_byte(const unsigned char * bytes, int len);
 static char * derive_decimal_string_from_byte(const unsigned char *bytes, int len);
 static void reverse_byte_array(unsigned char * array, int length);
 static void trim_leading_zeros(char *str);
-static void prepend_zeros(char *str, int num_zeros);
 static void byte_to_binary(unsigned char byte, char * binary_str);
 static void bytes_to_binary_string(const unsigned char * bytes,
-		size_t len, char * binary_str);
+		size_t len, char * binary_str, bool trim);
 static char * transform_data_expression(const char * remoteObjid, const char * colname);
 static void populate_primary_keys(StringInfoData * strinfo, const char * id,
 		const char * jsonin, bool alter, bool isinline);
@@ -287,7 +366,7 @@ static void expand_struct_value(char * in, DBZ_DML_COLUMN_VALUE * colval,
 		ConnectorType conntype);
 static char * handle_base64_to_numeric_with_scale(const char * in, int scale);
 static char * handle_string_to_numeric(const char * in, bool addquote);
-static char * handle_base64_to_bit(const char * in, bool addquote, int typemod);
+static char * handle_base64_to_bit(const char * in, bool addquote, int typemod, bool padzero);
 static char * handle_string_to_bit(const char * in, bool addquote);
 static char * handle_numeric_to_bit(const char * in, bool addquote);
 static char * construct_datestr(long long input, bool addquote, int timerep);
@@ -424,7 +503,7 @@ derive_decimal_string_from_byte(const unsigned char *bytes, int len)
 	unsigned char *mag;
 	int offset;
 	int maglen;
-	char digits[128];     /* enough for DECIMAL(38) and more */
+	char *digits;
 	int nd;
 	int i;                /* declare once and reuse */
 	int outlen;
@@ -461,9 +540,16 @@ derive_decimal_string_from_byte(const unsigned char *bytes, int len)
 	if (maglen == 0)
 	{
 		out = pstrdup("0");
+		pfree(mag - offset);
 		return out;
 	}
 
+	/*
+	 * Allocate enough space for digits.
+	 * 1 byte is at most 3 digits (255), closer to 2.41 digits (log10(256)).
+	 * len * 3 is a safe upper bound.
+	 */
+	digits = (char *) palloc(len * 3 + 1);
 	nd = 0;
 
 	/* working copy */
@@ -504,6 +590,9 @@ derive_decimal_string_from_byte(const unsigned char *bytes, int len)
 		*p++ = digits[i];
 
 	*p = '\0';  /* fixed misleading indentation */
+
+	pfree(digits);
+	pfree(mag - offset);
 
 	return out;
 }
@@ -558,32 +647,6 @@ trim_leading_zeros(char *str)
 }
 
 /*
- * prepend_zeros
- *
- * prepend zeros to the given string
- */
-static void
-prepend_zeros(char *str, int num_zeros)
-{
-    int original_len = strlen(str);
-    int new_len = original_len + num_zeros;
-    char * temp = palloc0(new_len + 1);
-
-    for (int i = 0; i < num_zeros; i++)
-    {
-        temp[i] = '0';
-    }
-
-    for (int i = 0; i < original_len; i++)
-    {
-        temp[i + num_zeros] = str[i];
-    }
-    temp[new_len] = '\0';
-    strcpy(str, temp);
-    pfree(temp);
-}
-
-/*
  * byte_to_binary
  *
  * convert the given byte to a binary string with 1s and 0s
@@ -604,7 +667,7 @@ byte_to_binary(unsigned char byte, char * binary_str)
  * convert the given bytes to a binary string with 1s and 0s
  */
 static void
-bytes_to_binary_string(const unsigned char * bytes, size_t len, char * binary_str)
+bytes_to_binary_string(const unsigned char * bytes, size_t len, char * binary_str, bool trim)
 {
 	char byte_str[9];
 	size_t i = 0;
@@ -615,6 +678,9 @@ bytes_to_binary_string(const unsigned char * bytes, size_t len, char * binary_st
 		byte_to_binary(bytes[i], byte_str);
 		strcat(binary_str, byte_str);
 	}
+
+	if (trim)
+		trim_leading_zeros(binary_str);
 }
 
 /*
@@ -749,6 +815,8 @@ populate_primary_keys(StringInfoData * strinfo, const char * id, const char * js
 						if(colNameObjId.data)
 							pfree(colNameObjId.data);
 
+						/* normalize the name if needed */
+						fc_normalize_name(synchdb_letter_casing_strategy, value, strlen(value));
 						if (alter)
 						{
 							if (isinline)
@@ -756,12 +824,12 @@ populate_primary_keys(StringInfoData * strinfo, const char * id, const char * js
 								if (isfirst)
 								{
 									appendStringInfo(strinfo, ", ADD PRIMARY KEY(");
-									appendStringInfo(strinfo, "%s,", value);
+									appendStringInfo(strinfo, "\"%s\",", value);
 									isfirst = false;
 								}
 								else
 								{
-									appendStringInfo(strinfo, "%s,", value);
+									appendStringInfo(strinfo, "\"%s\",", value);
 								}
 							}
 							else
@@ -769,12 +837,12 @@ populate_primary_keys(StringInfoData * strinfo, const char * id, const char * js
 								if (isfirst)
 								{
 									appendStringInfo(strinfo, "PRIMARY KEY(");
-									appendStringInfo(strinfo, "%s,", value);
+									appendStringInfo(strinfo, "\"%s\",", value);
 									isfirst = false;
 								}
 								else
 								{
-									appendStringInfo(strinfo, "%s,", value);
+									appendStringInfo(strinfo, "\"%s\",", value);
 								}
 							}
 						}
@@ -783,12 +851,12 @@ populate_primary_keys(StringInfoData * strinfo, const char * id, const char * js
 							if (isfirst)
 							{
 								appendStringInfo(strinfo, ", PRIMARY KEY(");
-								appendStringInfo(strinfo, "%s,", value);
+								appendStringInfo(strinfo, "\"%s\",", value);
 								isfirst = false;
 							}
 							else
 							{
-								appendStringInfo(strinfo, "%s,", value);
+								appendStringInfo(strinfo, "\"%s\",", value);
 							}
 						}
 						pfree(value);
@@ -962,6 +1030,54 @@ init_sqlserver(void)
 	}
 }
 
+/*
+ * init_postgres
+ *
+ * initialize data type hash table for postgres database
+ */
+static void
+init_postgres(void)
+{
+	HASHCTL	info;
+	int i = 0;
+	DatatypeHashEntry * entry;
+	bool found = 0;
+
+	info.keysize = sizeof(DatatypeHashKey);
+	info.entrysize = sizeof(DatatypeHashEntry);
+	info.hcxt = TopMemoryContext;
+
+	postgresDatatypeHash = hash_create("postgres datatype hash",
+							 256,
+							 &info,
+							 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+
+	for (i = 0; i < SIZE_POSTGRES_DATATYPE_MAPPING; i++)
+	{
+		entry = (DatatypeHashEntry *) hash_search(postgresDatatypeHash, &(postgres_defaultTypeMappings[i].key), HASH_ENTER, &found);
+		if (!found)
+		{
+			entry->key.autoIncremented = postgres_defaultTypeMappings[i].key.autoIncremented;
+			memset(entry->key.extTypeName, 0, SYNCHDB_DATATYPE_NAME_SIZE);
+			strncpy(entry->key.extTypeName,
+					postgres_defaultTypeMappings[i].key.extTypeName,
+					strlen(postgres_defaultTypeMappings[i].key.extTypeName));
+
+			entry->pgsqlTypeLength = postgres_defaultTypeMappings[i].pgsqlTypeLength;
+			memset(entry->pgsqlTypeName, 0, SYNCHDB_DATATYPE_NAME_SIZE);
+			strncpy(entry->pgsqlTypeName,
+					postgres_defaultTypeMappings[i].pgsqlTypeName,
+					strlen(postgres_defaultTypeMappings[i].pgsqlTypeName));
+
+			elog(DEBUG1, "Inserted mapping '%s' <-> '%s'", entry->key.extTypeName, entry->pgsqlTypeName);
+		}
+		else
+		{
+			elog(DEBUG1, "mapping exists '%s' <-> '%s'", entry->key.extTypeName, entry->pgsqlTypeName);
+		}
+	}
+}
+
 static int
 alter_tbname(const char * from, const char * to)
 {
@@ -1111,7 +1227,12 @@ transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col, ConnectorType conntyp
 		pgcol->attname = pstrdup(mappedColumnName);
 	}
 	else
+	{
 		pgcol->attname = pstrdup(col->name);
+
+		/* we want to normalize according to letter casing strategy here */
+		fc_normalize_name(synchdb_letter_casing_strategy, pgcol->attname, strlen(pgcol->attname));
+	}
 
 	switch (conntype)
 	{
@@ -1159,7 +1280,7 @@ transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col, ConnectorType conntyp
 					if (datatypeonly)
 						appendStringInfo(strinfo, " %s ", col->typeName);
 					else
-						appendStringInfo(strinfo, " %s %s ", pgcol->attname, col->typeName);
+						appendStringInfo(strinfo, " \"%s\" %s ", pgcol->attname, col->typeName);
 
 					pgcol->atttype = pstrdup(col->typeName);
 				}
@@ -1172,7 +1293,7 @@ transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col, ConnectorType conntyp
 					if (datatypeonly)
 						appendStringInfo(strinfo, " %s ", entry->pgsqlTypeName);
 					else
-						appendStringInfo(strinfo, " %s %s ", pgcol->attname, entry->pgsqlTypeName);
+						appendStringInfo(strinfo, " \"%s\" %s ", pgcol->attname, entry->pgsqlTypeName);
 
 					pgcol->atttype = pstrdup(entry->pgsqlTypeName);
 					if (entry->pgsqlTypeLength != -1)
@@ -1189,7 +1310,7 @@ transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col, ConnectorType conntyp
 				if (datatypeonly)
 					appendStringInfo(strinfo, " %s ", entry->pgsqlTypeName);
 				else
-					appendStringInfo(strinfo, " %s %s ", pgcol->attname, entry->pgsqlTypeName);
+					appendStringInfo(strinfo, " \"%s\" %s ", pgcol->attname, entry->pgsqlTypeName);
 
 				pgcol->atttype = pstrdup(entry->pgsqlTypeName);
 				if (entry->pgsqlTypeLength != -1)
@@ -1264,7 +1385,7 @@ transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col, ConnectorType conntyp
 					if (datatypeonly)
 						appendStringInfo(strinfo, " %s ", col->typeName);
 					else
-						appendStringInfo(strinfo, " %s %s ", pgcol->attname, col->typeName);
+						appendStringInfo(strinfo, " \"%s\" %s ", pgcol->attname, col->typeName);
 
 					pgcol->atttype = pstrdup(col->typeName);
 				}
@@ -1277,7 +1398,7 @@ transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col, ConnectorType conntyp
 					if (datatypeonly)
 						appendStringInfo(strinfo, " %s ", entry->pgsqlTypeName);
 					else
-						appendStringInfo(strinfo, " %s %s ", pgcol->attname, entry->pgsqlTypeName);
+						appendStringInfo(strinfo, " \"%s\" %s ", pgcol->attname, entry->pgsqlTypeName);
 
 					pgcol->atttype = pstrdup(entry->pgsqlTypeName);
 					if (entry->pgsqlTypeLength != -1)
@@ -1294,7 +1415,7 @@ transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col, ConnectorType conntyp
 				if (datatypeonly)
 					appendStringInfo(strinfo, " %s ", entry->pgsqlTypeName);
 				else
-					appendStringInfo(strinfo, " %s %s ", pgcol->attname, entry->pgsqlTypeName);
+					appendStringInfo(strinfo, " \"%s\" %s ", pgcol->attname, entry->pgsqlTypeName);
 
 				pgcol->atttype = pstrdup(entry->pgsqlTypeName);
 				if (entry->pgsqlTypeLength != -1)
@@ -1346,7 +1467,7 @@ transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col, ConnectorType conntyp
 					if (datatypeonly)
 						appendStringInfo(strinfo, " %s ", col->typeName);
 					else
-						appendStringInfo(strinfo, " %s %s ", pgcol->attname, col->typeName);
+						appendStringInfo(strinfo, " \"%s\" %s ", pgcol->attname, col->typeName);
 
 					pgcol->atttype = pstrdup(col->typeName);
 				}
@@ -1359,7 +1480,7 @@ transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col, ConnectorType conntyp
 					if (datatypeonly)
 						appendStringInfo(strinfo, " %s ", entry->pgsqlTypeName);
 					else
-						appendStringInfo(strinfo, " %s %s ", pgcol->attname, entry->pgsqlTypeName);
+						appendStringInfo(strinfo, " \"%s\" %s ", pgcol->attname, entry->pgsqlTypeName);
 
 					pgcol->atttype = pstrdup(entry->pgsqlTypeName);
 					if (entry->pgsqlTypeLength != -1)
@@ -1376,7 +1497,7 @@ transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col, ConnectorType conntyp
 				if (datatypeonly)
 					appendStringInfo(strinfo, " %s ", entry->pgsqlTypeName);
 				else
-					appendStringInfo(strinfo, " %s %s ", pgcol->attname, entry->pgsqlTypeName);
+					appendStringInfo(strinfo, " \"%s\" %s ", pgcol->attname, entry->pgsqlTypeName);
 
 				pgcol->atttype = pstrdup(entry->pgsqlTypeName);
 				if (entry->pgsqlTypeLength != -1)
@@ -1400,10 +1521,82 @@ transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col, ConnectorType conntyp
 			}
 			break;
 		}
+		case TYPE_POSTGRES:
+		{
+			DatatypeHashEntry * entry;
+			DatatypeHashKey key = {0};
+			bool found = 0;
+
+			/*
+			 * check if there is a translation rule applied specifically for this column using
+			 * key format: [column object id]
+			 */
+			key.autoIncremented = col->autoIncremented;
+			snprintf(key.extTypeName, sizeof(key.extTypeName), "%s", colNameObjId.data);
+
+			entry = (DatatypeHashEntry *) hash_search(postgresDatatypeHash, &key, HASH_FIND, &found);
+			if (!found)
+			{
+				/*
+				 * no mapping found, so no data type translation for this particular column.
+				 * Now, check if there is a global data type translation rule
+				 */
+				memset(&key, 0, sizeof(DatatypeHashKey));
+				key.autoIncremented = col->autoIncremented;
+				snprintf(key.extTypeName, sizeof(key.extTypeName), "%s",
+						col->typeName);
+
+				entry = (DatatypeHashEntry *) hash_search(postgresDatatypeHash, &key, HASH_FIND, &found);
+				if (!found)
+				{
+					/* no mapping found, so no transformation done */
+					elog(DEBUG1, "no transformation done for %s (autoincrement %d)",
+							key.extTypeName, key.autoIncremented);
+					if (datatypeonly)
+						appendStringInfo(strinfo, " %s ", col->typeName);
+					else
+						appendStringInfo(strinfo, " \"%s\" %s ", pgcol->attname, col->typeName);
+
+					pgcol->atttype = pstrdup(col->typeName);
+				}
+				else
+				{
+					/* use the mapped values and sizes */
+					elog(DEBUG1, "transform %s (autoincrement %d) to %s with length %d",
+							key.extTypeName, key.autoIncremented, entry->pgsqlTypeName,
+							entry->pgsqlTypeLength);
+					if (datatypeonly)
+						appendStringInfo(strinfo, " %s ", entry->pgsqlTypeName);
+					else
+						appendStringInfo(strinfo, " \"%s\" %s ", pgcol->attname, entry->pgsqlTypeName);
+
+					pgcol->atttype = pstrdup(entry->pgsqlTypeName);
+					if (entry->pgsqlTypeLength != -1)
+						col->length = entry->pgsqlTypeLength;
+				}
+			}
+			else
+			{
+				/* use the mapped values and sizes */
+				elog(DEBUG1, "transform %s (autoincrement %d) to %s with length %d",
+						key.extTypeName, key.autoIncremented, entry->pgsqlTypeName,
+						entry->pgsqlTypeLength);
+
+				if (datatypeonly)
+					appendStringInfo(strinfo, " %s ", entry->pgsqlTypeName);
+				else
+					appendStringInfo(strinfo, " \"%s\" %s ", pgcol->attname, entry->pgsqlTypeName);
+
+				pgcol->atttype = pstrdup(entry->pgsqlTypeName);
+				if (entry->pgsqlTypeLength != -1)
+					col->length = entry->pgsqlTypeLength;
+			}
+			break;
+		}
 		default:
 		{
 			/* unknown type, no special handling - may error out later when applying to PostgreSQL */
-			appendStringInfo(strinfo, " %s %s ", col->name, col->typeName);
+			appendStringInfo(strinfo, " \"%s\" %s ", col->name, col->typeName);
 			break;
 		}
 	}
@@ -1446,7 +1639,12 @@ composeAlterColumnClauses(const char * objid, ConnectorType type, List * dbzcols
 
 		/* use the name as it came if no column name mapping found */
 		if (!mappedColumnName)
+		{
 			mappedColumnName = pstrdup(col->name);
+
+			/* we want to normalize according to letter casing strategy here */
+			fc_normalize_name(synchdb_letter_casing_strategy, mappedColumnName, strlen(mappedColumnName));
+		}
 
 		found = false;
 		for (attnum = 1; attnum <= tupdesc->natts; attnum++)
@@ -1458,7 +1656,7 @@ composeAlterColumnClauses(const char * objid, ConnectorType type, List * dbzcols
 				continue;
 
 			/* found a matching column, build the alter column clauses */
-			if (!strcasecmp(mappedColumnName, NameStr(attr->attname)))
+			if (!strcmp(mappedColumnName, NameStr(attr->attname)))
 			{
 				found = true;
 
@@ -1467,7 +1665,7 @@ composeAlterColumnClauses(const char * objid, ConnectorType type, List * dbzcols
 					continue;
 
 				/* check data type */
-				appendStringInfo(&strinfo, "ALTER COLUMN %s SET DATA TYPE",
+				appendStringInfo(&strinfo, "ALTER COLUMN \"%s\" SET DATA TYPE",
 						mappedColumnName);
 				transformDDLColumns(objid, col, type, true, &strinfo, pgcol);
 				if (col->length > 0 && col->scale > 0)
@@ -1502,13 +1700,13 @@ composeAlterColumnClauses(const char * objid, ConnectorType type, List * dbzcols
 					 * synchdb can receive a default expression not supported in postgresql.
 					 * so for now, we always set to default null. todo
 					 */
-					appendStringInfo(&strinfo, "ALTER COLUMN %s SET DEFAULT %s",
+					appendStringInfo(&strinfo, "ALTER COLUMN \"%s\" SET DEFAULT %s",
 							mappedColumnName, "NULL");
 				}
 				else
 				{
 					/* remove default value */
-					appendStringInfo(&strinfo, "ALTER COLUMN %s DROP DEFAULT",
+					appendStringInfo(&strinfo, "ALTER COLUMN \"%s\" DROP DEFAULT",
 							mappedColumnName);
 				}
 
@@ -1517,12 +1715,12 @@ composeAlterColumnClauses(const char * objid, ConnectorType type, List * dbzcols
 				/* check if nullable or not nullable */
 				if (!col->optional)
 				{
-					appendStringInfo(&strinfo, "ALTER COLUMN %s SET NOT NULL",
+					appendStringInfo(&strinfo, "ALTER COLUMN \"%s\" SET NOT NULL",
 							mappedColumnName);
 				}
 				else
 				{
-					appendStringInfo(&strinfo, "ALTER COLUMN %s DROP NOT NULL",
+					appendStringInfo(&strinfo, "ALTER COLUMN \"%s\" DROP NOT NULL",
 							mappedColumnName);
 				}
 				appendStringInfo(&strinfo, ",");
@@ -1585,6 +1783,7 @@ expand_struct_value(char * in, DBZ_DML_COLUMN_VALUE * colval, ConnectorType conn
 	switch (conntype)
 	{
 		case TYPE_ORACLE:
+		case TYPE_POSTGRES:
 		{
 			/*
 			 * variable scale struct in Oracle looks like:
@@ -1611,17 +1810,22 @@ expand_struct_value(char * in, DBZ_DML_COLUMN_VALUE * colval, ConnectorType conn
 				}
 				PG_END_TRY();
 
-				getPathElementString(jb, "scale", &strinfo, true);
-				if (!strcasecmp(strinfo.data, "null"))
+				if (getPathElementString(jb, "scale", &strinfo, true))
 					colval->scale = 0;
 				else
 					colval->scale = atoi(strinfo.data);
 
 				elog(DEBUG1, "colval->scale is set to %d", colval->scale);
-				getPathElementString(jb, "value", &strinfo, true);
-				if (!strcasecmp(strinfo.data, "null"))
+
+				if (getPathElementString(jb, "value", &strinfo, true))
 				{
-					elog(WARNING, "JSON has scale but with no value");
+					elog(WARNING, "JSON has scale but with no value, defaulting to 0...");
+					pfree(colval->value);
+					colval->value = pstrdup("0");
+
+					/* make "in" points to colval->value for subsequent processing */
+					in = colval->value;
+					elog(DEBUG1, "colval->value is set to %s", colval->value);
 				}
 				else
 				{
@@ -1636,6 +1840,80 @@ expand_struct_value(char * in, DBZ_DML_COLUMN_VALUE * colval, ConnectorType conn
 				if(strinfo.data)
 					pfree(strinfo.data);
 			}
+			else if (colval->timerep == DATA_POINT)
+			{
+				/*
+				 * POINT struct in postgresql looks like:
+				 *	{
+				 *		"x": 1.0,
+				 *		"y": 2.0,
+				 *		"wkb": "AQEAAAAAAAAAAADwPwAAAAAAAABA",
+				 *		"srid": null
+				 *	}
+				 */
+				StringInfoData xinfo;
+				StringInfoData yinfo;
+
+				initStringInfo(&strinfo);
+				initStringInfo(&xinfo);
+				initStringInfo(&yinfo);
+
+				PG_TRY();
+				{
+					jsonb_datum = DirectFunctionCall1(jsonb_in, CStringGetDatum(in));
+					jb = DatumGetJsonbP(jsonb_datum);
+				}
+				PG_CATCH();
+				{
+					FlushErrorState();
+					elog(WARNING, "bad json struct to expand: %s", in);
+					return;
+				}
+				PG_END_TRY();
+
+				/*
+				 * todo: should have a default transform for complex data types
+				 * like point, line, geometry...etc. It makes more sense to just
+				 * call function point(x,y) to produce a proper point representation.
+				 * But for now, we will just manually build x and y into (x,y).
+				 */
+				if (getPathElementString(jb, "x", &xinfo, true))
+				{
+					elog(WARNING, "missing x value in point data: %s. Defaulting to 0", in);
+					appendStringInfo(&strinfo, "(0,");
+				}
+				else
+				{
+					elog(DEBUG1, "x value = %s", xinfo.data);
+					appendStringInfo(&strinfo, "(%s,", xinfo.data);
+				}
+
+				if (getPathElementString(jb, "y", &yinfo, true))
+				{
+					elog(WARNING, "missing y value in point data: %s. Defaulting to 0", in);
+					appendStringInfo(&strinfo, "0)");
+				}
+				else
+				{
+					elog(DEBUG1, "y value = %s", yinfo.data);
+					appendStringInfo(&strinfo, "%s)", yinfo.data);
+				}
+
+				/* replace colval->value */
+				pfree(colval->value);
+				colval->value = pstrdup(strinfo.data);
+
+				/* make "in" points to colval->value for subsequent processing */
+				in = colval->value;
+				elog(DEBUG1, "colval->value is set to %s", colval->value);
+
+				if (xinfo.data)
+					pfree(xinfo.data);
+				if (yinfo.data)
+					pfree(yinfo.data);
+				if(strinfo.data)
+					pfree(strinfo.data);
+			}
 			break;
 		}
 		case TYPE_MYSQL:
@@ -1643,8 +1921,8 @@ expand_struct_value(char * in, DBZ_DML_COLUMN_VALUE * colval, ConnectorType conn
 		default:
 		{
 			/* todo */
-			elog(WARNING, "struct expansion for mysql and sqlserver can be added here"
-					"once we come across them");
+			elog(WARNING, "struct expansion for %d can be added here"
+					"once we come across them", conntype);
 			break;
 		}
 	}
@@ -1675,6 +1953,9 @@ handle_base64_to_numeric_with_scale(const char * in, int scale)
 	}
 	else
 		snprintf(buffer, sizeof(buffer), "%s", value);
+
+	pfree(value);
+
 	if (scale > 0)
 	{
 		if (strlen(buffer) > scale)
@@ -1750,42 +2031,50 @@ handle_string_to_numeric(const char * in, bool addquote)
 }
 
 static char *
-handle_base64_to_bit(const char * in, bool addquote, int typemod)
+handle_base64_to_bit(const char * in, bool addquote, int typemod, bool padzero)
 {
 	int tmpoutlen = pg_b64_dec_len(strlen(in));
 	unsigned char * tmpout = (unsigned char *) palloc0(tmpoutlen);
 	char * out = NULL;
+	int extrazeros = 0;
 
 #if SYNCHDB_PG_MAJOR_VERSION >= 1800
 	tmpoutlen = pg_b64_decode(in, strlen(in), tmpout, tmpoutlen);
 #else
 	tmpoutlen = pg_b64_decode(in, strlen(in), (char*)tmpout, tmpoutlen);
 #endif
+
+	if (padzero)
+		extrazeros = (typemod - (tmpoutlen * 8));
+
 	if (addquote)
 	{
-		/* 8 bits per byte + 2 single quotes + b + terminating null */
-		char * tmp = NULL;
-		out = (char *) palloc0((tmpoutlen * 8) + 2 + 1 + 1);
-		tmp = out;
-		reverse_byte_array(tmpout, tmpoutlen);
-		strcat(tmp, "'b");
-		tmp += 2;
-		bytes_to_binary_string(tmpout, tmpoutlen, tmp);
-		trim_leading_zeros(tmp);
-		if (strlen(tmp) < typemod)
-			prepend_zeros(tmp, typemod - strlen(tmp));
+		/* 8 bits per byte + 2 single quotes + b + extra zeros + terminating null */
+		out = (char *) palloc0((tmpoutlen * 8) + 2 + 1 + extrazeros + 1);
 
-		strcat(tmp, "'");
+		strcat(out, "'b");
+		out += 2;
+
+		/* zeros */
+		memset(out, '0', extrazeros);
+
+		/* bit value */
+		reverse_byte_array(tmpout, tmpoutlen);
+		bytes_to_binary_string(tmpout, tmpoutlen, out + extrazeros, !padzero);
+
+		strcat(out, "'");
 	}
 	else
 	{
-		/* 8 bits per byte + terminating null */
-		out = (char *) palloc0(tmpoutlen * 8 + 1);
+		/* 8 bits per byte + extra zeros + terminating null */
+		out = (char *) palloc0((tmpoutlen * 8) + extrazeros + 1);
+
+		/* zeros */
+		memset(out, '0', extrazeros);
+
+		/* bit value */
 		reverse_byte_array(tmpout, tmpoutlen);
-		bytes_to_binary_string(tmpout, tmpoutlen, out);
-		trim_leading_zeros(out);
-		if (strlen(out) < typemod)
-			prepend_zeros(out, typemod - strlen(out));
+		bytes_to_binary_string(tmpout, tmpoutlen, out + extrazeros, !padzero);
 	}
 	pfree(tmpout);
 	return out;
@@ -2291,11 +2580,11 @@ construct_intervalstr(long long input, bool addquote, int timerep, int typemod)
 					(int) seconds / SECS_PER_DAY);
 			break;
 		case INTERVAL_MASK(HOUR):	/* hour */
-			snprintf(inter, sizeof(inter), "%d days",
+			snprintf(inter, sizeof(inter), "%d hours",
 					(int) seconds / SECS_PER_HOUR);
 			break;
 		case INTERVAL_MASK(MINUTE):	/* minute */
-			snprintf(inter, sizeof(inter), "%d days",
+			snprintf(inter, sizeof(inter), "%d minutes",
 					(int) seconds / SECS_PER_MINUTE);
 			break;
 		case INTERVAL_MASK(SECOND):	/* second */
@@ -2345,7 +2634,7 @@ construct_intervalstr(long long input, bool addquote, int timerep, int typemod)
 					(int) remains);
 			break;
 		case INTERVAL_FULL_RANGE:	/* full range */
-			snprintf(inter, sizeof(inter), "%d years %d months % days %02d:%02d:%02d.%06d",
+			snprintf(inter, sizeof(inter), "%d years %d months %d days %02d:%02d:%02d.%06d",
 					(int) seconds / SECS_PER_YEAR,
 					(int) (seconds / (SECS_PER_DAY * DAYS_PER_MONTH)) % MONTHS_PER_YEAR,
 					(int) (seconds / SECS_PER_DAY) % (SECS_PER_DAY * DAYS_PER_MONTH),
@@ -2531,12 +2820,14 @@ handle_data_by_type_category(char * in, DBZ_DML_COLUMN_VALUE * colval, Connector
 				case DBZTYPE_STRUCT:
 				{
 					expand_struct_value(in, colval, conntype);
-					out = handle_base64_to_bit(colval->value, addquote, colval->typemod);
+					out = handle_base64_to_bit(colval->value, addquote, colval->typemod,
+							conntype == TYPE_MYSQL ? true : false);
 					break;
 				}
 				case DBZTYPE_BYTES:
 				{
-					out = handle_base64_to_bit(in, addquote, colval->typemod);
+					out = handle_base64_to_bit(in, addquote, colval->typemod,
+							conntype == TYPE_MYSQL ? true : false);
 					break;
 				}
 				case DBZTYPE_STRING:
@@ -2631,14 +2922,15 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 	char * in = colval->value;
 	char * transformExpression = NULL;
 
-	if (!in || strlen(in) == 0)
-		return NULL;
-
-	if (!strcasecmp(in, "NULL"))
-		return NULL;
-
 	elog(DEBUG1, "%s: col %s typoid %d timerep %d dbztype %d category %c",__FUNCTION__,
 			colval->name, colval->datatype, colval->timerep, colval->dbztype, colval->typcategory);
+
+	if (!in || strlen(in) == 0 || !strcasecmp(in, "NULL"))
+	{
+		elog(DEBUG1,"NULL input value, returning NULL");
+		return NULL;
+	}
+
 	switch(colval->datatype)
 	{
 		case BOOLOID:
@@ -2651,7 +2943,7 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 		case MONEYOID:
 		{
 			/* special handling for MONEYOID to use scale 4 to account for cents */
-			if (colval->datatype == MONEYOID)
+			if (colval->datatype == MONEYOID && type != TYPE_POSTGRES)
 				colval->scale = 4;
 
 			switch (colval->dbztype)
@@ -2690,6 +2982,16 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 		case CSTRINGOID:
 		case JSONBOID:
 		case UUIDOID:
+		case INETOID:
+		case CIDROID:
+		case MACADDROID:
+		case MACADDR8OID:
+		case INT4RANGEOID:
+		case INT8RANGEOID:
+		case NUMRANGEOID:
+		case DATERANGEOID:
+		case TSRANGEOID:
+		case TSTZRANGEOID:
 		{
 			if (addquote)
 				out = escapeSingleQuote(in, addquote);
@@ -2705,12 +3007,14 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 				case DBZTYPE_STRUCT:
 				{
 					expand_struct_value(in, colval, type);
-					out = handle_base64_to_bit(colval->value, addquote, colval->typemod);
+					out = handle_base64_to_bit(colval->value, addquote, colval->typemod,
+							type == TYPE_MYSQL ? true : false);
 					break;
 				}
 				case DBZTYPE_BYTES:
 				{
-					out = handle_base64_to_bit(in, addquote, colval->typemod);
+					out = handle_base64_to_bit(in, addquote, colval->typemod,
+							type == TYPE_MYSQL ? true : false);
 					break;
 				}
 				case DBZTYPE_STRING:
@@ -2917,6 +3221,39 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 			}
 			break;
 		}
+		case POINTOID:
+		{
+			switch (colval->dbztype)
+			{
+				case DBZTYPE_STRUCT:
+				{
+					expand_struct_value(in, colval, type);
+					out = pstrdup(colval->value);
+					break;
+				}
+				case DBZTYPE_BYTES:
+				{
+					/* xxx: binary to point */
+					elog(ERROR," binary to point not supported");
+					break;
+				}
+				case DBZTYPE_STRING:
+				{
+					out = pstrdup(colval->value);
+					break;
+				}
+#ifdef WITH_OLR
+				case OLRTYPE_STRING:
+				case OLRTYPE_NUMBER:
+#endif
+				default:
+				{
+					elog(ERROR, "cannot convert source type %d to POINT type", colval->dbztype);
+					break;
+				}
+			}
+			break;
+		}
 		default:
 		{
 			/*
@@ -2975,14 +3312,12 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 			}
 			PG_END_TRY();
 
-			getPathElementString(jb, "wkb", &strinfo, true);
-			if (!strcasecmp(strinfo.data, "null"))
+			if (getPathElementString(jb, "wkb", &strinfo, true))
 				wkb = pstrdup("0");
 			else
 				wkb = pstrdup(strinfo.data);
 
-			getPathElementString(jb, "srid", &strinfo, true);
-			if (!strcasecmp(strinfo.data, "null"))
+			if (getPathElementString(jb, "srid", &strinfo, true))
 				srid = pstrdup("0");
 			else
 				srid = pstrdup(strinfo.data);
@@ -3074,15 +3409,29 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 		{
 			if (synchdb_dml_use_spi)
 			{
+				bool atleastone = false;
+
 				/* --- Convert to use SPI to handler DML --- */
 				appendStringInfo(&strinfo, "INSERT INTO %s(", dbzdml->mappedObjectId);
 				foreach(cell, dbzdml->columnValuesAfter)
 				{
 					DBZ_DML_COLUMN_VALUE * colval = (DBZ_DML_COLUMN_VALUE *) lfirst(cell);
 					appendStringInfo(&strinfo, "%s,", colval->name);
+					atleastone = true;
 				}
-				strinfo.data[strinfo.len - 1] = '\0';
-				strinfo.len = strinfo.len - 1;
+
+				if (atleastone)
+				{
+					strinfo.data[strinfo.len - 1] = '\0';
+					strinfo.len = strinfo.len - 1;
+				}
+				else
+				{
+					elog(WARNING, "no column data is provided for %s. Insert skipped", dbzdml->mappedObjectId);
+					pfree(strinfo.data);
+					destroyPGDML(pgdml);
+					return NULL;
+				}
 				appendStringInfo(&strinfo, ") VALUES (");
 
 				foreach(cell, dbzdml->columnValuesAfter)
@@ -3101,9 +3450,18 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 					}
 				}
 				/* remove extra "," */
-				strinfo.data[strinfo.len - 1] = '\0';
-				strinfo.len = strinfo.len - 1;
-
+				if (atleastone)
+				{
+					strinfo.data[strinfo.len - 1] = '\0';
+					strinfo.len = strinfo.len - 1;
+				}
+				else
+				{
+					elog(WARNING, "no column data is provided for %s. Insert skipped", dbzdml->mappedObjectId);
+					pfree(strinfo.data);
+					destroyPGDML(pgdml);
+					return NULL;
+				}
 				appendStringInfo(&strinfo, ");");
 			}
 			else
@@ -3237,10 +3595,22 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 					{
 						appendStringInfo(&strinfo, "%s,", "null");
 					}
+					atleastone = true;
 				}
-				/* remove extra "," */
-				strinfo.data[strinfo.len - 1] = '\0';
-				strinfo.len = strinfo.len - 1;
+
+				if (atleastone)
+				{
+					/* remove extra "," */
+					strinfo.data[strinfo.len - 1] = '\0';
+					strinfo.len = strinfo.len - 1;
+				}
+				else
+				{
+					elog(WARNING, "no column data is provided for %s. Update skipped", dbzdml->mappedObjectId);
+					pfree(strinfo.data);
+					destroyPGDML(pgdml);
+					return NULL;
+				}
 
 				appendStringInfo(&strinfo,  " WHERE ");
 				foreach(cell, dbzdml->columnValuesBefore)
@@ -3290,40 +3660,107 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 			}
 			else
 			{
-				/* --- Convert to use Heap AM to handler DML --- */
-				forboth(cell, dbzdml->columnValuesAfter, cell2, dbzdml->columnValuesBefore)
+				/*
+				 * special case: when running in postgres connector with replica identity =
+				 * DEFAULT. columnValuesBefore will be NULL, causing the forboth below to
+				 * not run at all, so we need to handle it separately by extracting all
+				 * primary key values from columnValuesAfter and put them in columnValuesBefore
+				 */
+				if (dbzdml->columnValuesAfter && !dbzdml->columnValuesBefore)
 				{
-					DBZ_DML_COLUMN_VALUE * colval_after = (DBZ_DML_COLUMN_VALUE *) lfirst(cell);
-					DBZ_DML_COLUMN_VALUE * colval_before = (DBZ_DML_COLUMN_VALUE *) lfirst(cell2);
-					PG_DML_COLUMN_VALUE * pgcolval_after = palloc0(sizeof(PG_DML_COLUMN_VALUE));
-					PG_DML_COLUMN_VALUE * pgcolval_before = palloc0(sizeof(PG_DML_COLUMN_VALUE));
-
-					char * data = processDataByType(colval_after, false, dbzdml->remoteObjectId, type);
-
-					if (data != NULL)
+					/* build pgcolval_before from dbzdml->columnValuesAfter */
+					foreach(cell, dbzdml->columnValuesAfter)
 					{
-						pgcolval_after->value = pstrdup(data);
-						pfree(data);
+						DBZ_DML_COLUMN_VALUE * colval_after = (DBZ_DML_COLUMN_VALUE *) lfirst(cell);
+						PG_DML_COLUMN_VALUE * pgcolval_before = palloc0(sizeof(PG_DML_COLUMN_VALUE));
+
+						if (colval_after->ispk)
+						{
+							/* this is a primary key, process its value */
+							char * data = processDataByType(colval_after, false, dbzdml->remoteObjectId, type);
+
+							if (data != NULL)
+							{
+								pgcolval_before->value = pstrdup(data);
+								pfree(data);
+							}
+							else
+								pgcolval_before->value = pstrdup("NULL");
+
+							elog(WARNING, "processed a PK");
+							pgcolval_before->datatype = colval_after->datatype;
+							pgcolval_before->position = colval_after->position;
+							pgdml->columnValuesBefore = lappend(pgdml->columnValuesBefore, pgcolval_before);
+						}
+						else
+						{
+							/* non-primary key, just put NULL */
+							elog(WARNING, "put a NULL");
+							pgcolval_before->value = pstrdup("NULL");
+							pgcolval_before->datatype = colval_after->datatype;
+							pgcolval_before->position = colval_after->position;
+							pgdml->columnValuesBefore = lappend(pgdml->columnValuesBefore, pgcolval_before);
+						}
 					}
-					else
-						pgcolval_after->value = pstrdup("NULL");
 
-					pgcolval_after->datatype = colval_after->datatype;
-					pgcolval_after->position = colval_after->position;
-					pgdml->columnValuesAfter = lappend(pgdml->columnValuesAfter, pgcolval_after);
-
-					data = processDataByType(colval_before, false, dbzdml->remoteObjectId, type);
-					if (data != NULL)
+					/* build pgcolval_after from dbzdml->columnValuesAfter */
+					foreach(cell, dbzdml->columnValuesAfter)
 					{
-						pgcolval_before->value = pstrdup(data);
-						pfree(data);
-					}
-					else
-						pgcolval_before->value = pstrdup("NULL");
+						DBZ_DML_COLUMN_VALUE * colval_after = (DBZ_DML_COLUMN_VALUE *) lfirst(cell);
+						PG_DML_COLUMN_VALUE * pgcolval_after = palloc0(sizeof(PG_DML_COLUMN_VALUE));
 
-					pgcolval_before->datatype = colval_before->datatype;
-					pgcolval_before->position = colval_before->position;
-					pgdml->columnValuesBefore = lappend(pgdml->columnValuesBefore, pgcolval_before);
+						char * data = processDataByType(colval_after, false, dbzdml->remoteObjectId, type);
+
+						if (data != NULL)
+						{
+							pgcolval_after->value = pstrdup(data);
+							pfree(data);
+						}
+						else
+							pgcolval_after->value = pstrdup("NULL");
+
+						pgcolval_after->datatype = colval_after->datatype;
+						pgcolval_after->position = colval_after->position;
+						pgdml->columnValuesAfter = lappend(pgdml->columnValuesAfter, pgcolval_after);
+					}
+				}
+				else
+				{
+					/* --- Convert to use Heap AM to handler DML --- */
+					forboth(cell, dbzdml->columnValuesAfter, cell2, dbzdml->columnValuesBefore)
+					{
+						DBZ_DML_COLUMN_VALUE * colval_after = (DBZ_DML_COLUMN_VALUE *) lfirst(cell);
+						DBZ_DML_COLUMN_VALUE * colval_before = (DBZ_DML_COLUMN_VALUE *) lfirst(cell2);
+						PG_DML_COLUMN_VALUE * pgcolval_after = palloc0(sizeof(PG_DML_COLUMN_VALUE));
+						PG_DML_COLUMN_VALUE * pgcolval_before = palloc0(sizeof(PG_DML_COLUMN_VALUE));
+
+						char * data = processDataByType(colval_after, false, dbzdml->remoteObjectId, type);
+
+						if (data != NULL)
+						{
+							pgcolval_after->value = pstrdup(data);
+							pfree(data);
+						}
+						else
+							pgcolval_after->value = pstrdup("NULL");
+
+						pgcolval_after->datatype = colval_after->datatype;
+						pgcolval_after->position = colval_after->position;
+						pgdml->columnValuesAfter = lappend(pgdml->columnValuesAfter, pgcolval_after);
+
+						data = processDataByType(colval_before, false, dbzdml->remoteObjectId, type);
+						if (data != NULL)
+						{
+							pgcolval_before->value = pstrdup(data);
+							pfree(data);
+						}
+						else
+							pgcolval_before->value = pstrdup("NULL");
+
+						pgcolval_before->datatype = colval_before->datatype;
+						pgcolval_before->position = colval_before->position;
+						pgdml->columnValuesBefore = lappend(pgdml->columnValuesBefore, pgcolval_before);
+					}
 				}
 			}
 			break;
@@ -3363,8 +3800,17 @@ fc_get_connector_type(const char * connector)
 		return TYPE_SQLSERVER;
 	else if (!strcasecmp(connector, "olr"))
 		return TYPE_OLR;
+	else if (!strcasecmp(connector, "postgres") ||
+			 !strcasecmp(connector, "postgresql"))
+		return TYPE_POSTGRES;
 	else
+	{
+		elog(ERROR, "failed to translate connector %s to a proper internal"
+				" connector type. Does synchdb support this type yet?", connector);
+		set_shm_connector_errmsg(myConnectorId, "failed to translate connector to a proper internal"
+				" connector type. Does synchdb support this type yet?");
 		return TYPE_UNDEF;
+	}
 }
 
 /*
@@ -3388,7 +3834,6 @@ updateSynchdbAttribute(DBZ_DDL * dbzddl, PG_DDL * pgddl, ConnectorType conntype,
 		(pgddl->type == DDL_ALTER_TABLE && pgddl->subtype == SUBTYPE_ADD_COLUMN) ||
 		(pgddl->type == DDL_ALTER_TABLE && pgddl->subtype == SUBTYPE_ALTER_COLUMN))
 	{
-		int j = 0;
 		Oid schemaoid, tableoid;
 
 		if (list_length(dbzddl->columns) <= 0 || list_length(pgddl->columns) <= 0)
@@ -3397,22 +3842,21 @@ updateSynchdbAttribute(DBZ_DDL * dbzddl, PG_DDL * pgddl, ConnectorType conntype,
 			return;
 		}
 
-		/* convert schema and table name to lowercase letters before lookup */
-		for (j = 0; j < strlen(pgddl->schema); j++)
-			pgddl->schema[j] = (char) pg_tolower((unsigned char) pgddl->schema[j]);
-
-		for (j = 0; j < strlen(pgddl->tbname); j++)
-			pgddl->tbname[j] = (char) pg_tolower((unsigned char) pgddl->tbname[j]);
-
-		schemaoid = get_namespace_oid(pgddl->schema, false);
+		schemaoid = get_namespace_oid(pgddl->schema, true);
 		if (!OidIsValid(schemaoid))
 		{
 			char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
 			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "no valid OID found for schema '%s'", pgddl->schema);
 			set_shm_connector_errmsg(myConnectorId, msg);
 
-			/* trigger pg's error shutdown routine */
-			elog(ERROR, "%s", msg);
+			if (synchdb_log_event_on_error && g_eventStr != NULL)
+				elog(LOG, "%s", g_eventStr);
+
+			/* act based on error strategy */
+			if (synchdb_error_strategy == STRAT_EXIT_ON_ERROR)
+				elog(ERROR, "%s", msg);
+			else
+				return;
 		}
 
 		tableoid = get_relname_relid(pgddl->tbname, schemaoid);
@@ -3422,8 +3866,14 @@ updateSynchdbAttribute(DBZ_DDL * dbzddl, PG_DDL * pgddl, ConnectorType conntype,
 			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "no valid OID found for table '%s'", pgddl->tbname);
 			set_shm_connector_errmsg(myConnectorId, msg);
 
-			/* trigger pg's error shutdown routine */
-			elog(ERROR, "%s", msg);
+			if (synchdb_log_event_on_error && g_eventStr != NULL)
+				elog(LOG, "%s", g_eventStr);
+
+			/* act based on error strategy */
+			if (synchdb_error_strategy == STRAT_EXIT_ON_ERROR)
+				elog(ERROR, "%s", msg);
+			else
+				return;
 		}
 
 		appendStringInfo(&strinfo, "INSERT INTO %s (name, type, attrelid, attnum, "
@@ -3438,7 +3888,7 @@ updateSynchdbAttribute(DBZ_DDL * dbzddl, PG_DDL * pgddl, ConnectorType conntype,
 			if (pgcol->attname == NULL || pgcol->atttype == NULL)
 				continue;
 
-			appendStringInfo(&strinfo, "(lower('%s'),lower('%s'),%d,%d,'%s','%s','%s'),",
+			appendStringInfo(&strinfo, "('%s',lower('%s'),%d,%d,'%s','%s','%s'),",
 					name,
 					connectorTypeToString(conntype),
 					tableoid,
@@ -3460,8 +3910,8 @@ updateSynchdbAttribute(DBZ_DDL * dbzddl, PG_DDL * pgddl, ConnectorType conntype,
 	else if (pgddl->type == DDL_DROP_TABLE)
 	{
 		appendStringInfo(&strinfo, "DELETE FROM %s "
-				"WHERE lower(ext_tbname) = lower('%s') AND "
-				"lower(name) = lower('%s') AND "
+				"WHERE ext_tbname = '%s' AND "
+				"name = '%s' AND "
 				"lower(type) = lower('%s');",
 				SYNCHDB_ATTRIBUTE_TABLE,
 				dbzddl->id,
@@ -3482,9 +3932,9 @@ updateSynchdbAttribute(DBZ_DDL * dbzddl, PG_DDL * pgddl, ConnectorType conntype,
 					"ext_attname = '........synchdb.dropped.%d........',"
 					"ext_atttypename = null WHERE "
 					"lower(ext_attname) = lower('%s') AND "
-					"lower(name) = lower('%s') AND "
+					"name = '%s' AND "
 					"lower(type) = lower('%s') AND "
-					"lower(ext_tbname) = lower('%s');",
+					"ext_tbname = '%s';",
 					SYNCHDB_ATTRIBUTE_TABLE,
 					pgcol->position,
 					pgcol->attname,
@@ -3506,6 +3956,8 @@ updateSynchdbAttribute(DBZ_DDL * dbzddl, PG_DDL * pgddl, ConnectorType conntype,
 	 */
 	appendStringInfo(&strinfo, "DELETE FROM %s WHERE attrelid NOT IN "
 			"(SELECT oid FROM pg_class);", SYNCHDB_ATTRIBUTE_TABLE);
+
+	elog(DEBUG1,"synchdb attribute update query: %s", strinfo.data);
 
 	/* execute the query using SPI */
 	ra_executeCommand(strinfo.data);
@@ -3535,6 +3987,11 @@ fc_initFormatConverter(ConnectorType connectorType)
 		case TYPE_SQLSERVER:
 		{
 			init_sqlserver();
+			break;
+		}
+		case TYPE_POSTGRES:
+		{
+			init_postgres();
 			break;
 		}
 		default:
@@ -3574,6 +4031,11 @@ fc_deinitFormatConverter(ConnectorType connectorType)
 		case TYPE_SQLSERVER:
 		{
 			hash_destroy(sqlserverDatatypeHash);
+			break;
+		}
+		case TYPE_POSTGRES:
+		{
+			/* xxx todo */
 			break;
 		}
 		default:
@@ -3625,7 +4087,7 @@ fc_load_objmap(const char * name, ConnectorType connectorType)
 	ObjectMap * objs = NULL;
 	int numobjs = 0;
 	int ret = -1;
-	int i = 0;
+	int i = 0, j = 0;
 	bool found = false;
 	ObjMapHashEntry objmapentry = {0};
 	ObjMapHashEntry * objmaplookup;
@@ -3648,6 +4110,9 @@ fc_load_objmap(const char * name, ConnectorType connectorType)
 			break;
 		case TYPE_SQLSERVER:
 			rulehash = sqlserverDatatypeHash;
+			break;
+		case TYPE_POSTGRES:
+			rulehash = postgresDatatypeHash;
 			break;
 		default:
 		{
@@ -3835,6 +4300,18 @@ fc_load_objmap(const char * name, ConnectorType connectorType)
 			}
 			memset(&hashentry, 0, sizeof(DatatypeHashEntry));
 
+			/*
+			 * special case: if srcobj is just a data type (ex. NUMBER - no dots) rather than
+			 * a fully qualified column identifier (ex. database.schema.table.column - with dots),
+			 * then we need to always convert srcobj to lowercase because all of our internal data
+			 * type lookup uses lowercase identifier
+			 */
+			if (!strstr(srccopy, "."))
+			{
+				for (j = 0; j < strlen(srccopy); j++)
+					srccopy[j] = (char) pg_tolower((unsigned char) srccopy[j]);
+			}
+
 			strlcpy(hashentry.key.extTypeName, strtok(srccopy, "|"), SYNCHDB_DATATYPE_NAME_SIZE);
 
 			tmp = strtok(NULL, "|");
@@ -4015,6 +4492,11 @@ transform_object_name(const char * objid, const char * objtype)
 	if (found)
 	{
 		res = pstrdup(entry->pgsqlObjName);
+		elog(DEBUG1, "transform object %s to %s", objid, res);
+	}
+	else
+	{
+		elog(DEBUG1, "no object transformation done for %s", objid);
 	}
 	return res;
 }
@@ -4085,7 +4567,10 @@ getPathElementString(Jsonb * jb, char * path, StringInfoData * strinfoout, bool 
     if (isnull)
     {
     	resetStringInfo(strinfoout);
-    	appendStringInfoString(strinfoout, "NULL");
+    	pfree(datum_elems);
+    	if (pathcopy != path)
+    		pfree(pathcopy);
+    	return -1;
     }
     else
     {
@@ -4221,17 +4706,17 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 			if (schema && table)
 			{
 				/* include create schema clause */
-				appendStringInfo(&strinfo, "CREATE SCHEMA IF NOT EXISTS %s; ", schema);
+				appendStringInfo(&strinfo, "CREATE SCHEMA IF NOT EXISTS \"%s\"; ", schema);
 
 				/* table stays as table under the schema */
-				appendStringInfo(&strinfo, "CREATE TABLE IF NOT EXISTS %s.%s (", schema, table);
+				appendStringInfo(&strinfo, "CREATE TABLE IF NOT EXISTS \"%s\".\"%s\" (", schema, table);
 				pgddl->schema = pstrdup(schema);
 				pgddl->tbname = pstrdup(table);
 			}
 			else if (!schema && table)
 			{
 				/* table stays as table but no schema */
-				appendStringInfo(&strinfo, "CREATE TABLE IF NOT EXISTS %s (", table);
+				appendStringInfo(&strinfo, "CREATE TABLE IF NOT EXISTS \"%s\" (", table);
 				pgddl->schema = pstrdup("public");
 				pgddl->tbname = pstrdup(table);
 			}
@@ -4251,6 +4736,10 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 			 * 	- table name stays
 			 */
 			char * idcopy = pstrdup(dbzddl->id);
+
+			/* we want to normalize according to letter casing strategy here */
+			fc_normalize_name(synchdb_letter_casing_strategy, idcopy, strlen(idcopy));
+
 			splitIdString(idcopy, &db, &schema, &table, true);
 
 			/* database and table must be present. schema is optional */
@@ -4389,6 +4878,10 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 		else
 		{
 			char * idcopy = pstrdup(dbzddl->id);
+
+			/* we want to normalize according to letter casing strategy here */
+			fc_normalize_name(synchdb_letter_casing_strategy, idcopy, strlen(idcopy));
+
 			splitIdString(idcopy, &db, &schema, &table, true);
 
 			/* database and table must be present. schema is optional */
@@ -4421,7 +4914,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 	}
 	else if (dbzddl->type == DDL_ALTER_TABLE)
 	{
-		int i = 0, attnum = 1, newcol = 0;
+		int attnum = 1, newcol = 0;
 		Oid schemaoid = 0;
 		Oid tableoid = 0;
 		Oid pkoid = 0;
@@ -4475,6 +4968,10 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 		{
 			/* by default, remote's db is mapped to schema in pg */
 			char * idcopy = pstrdup(dbzddl->id);
+
+			/* we want to normalize according to letter casing strategy here */
+			fc_normalize_name(synchdb_letter_casing_strategy, idcopy, strlen(idcopy));
+
 			splitIdString(idcopy, &db, &schema, &table, true);
 
 			/* database and table must be present. schema is optional */
@@ -4489,12 +4986,6 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 				/* trigger pg's error shutdown routine */
 				elog(ERROR, "%s", msg);
 			}
-
-			for (i = 0; i < strlen(db); i++)
-				db[i] = (char) pg_tolower((unsigned char) db[i]);
-
-			for (i = 0; i < strlen(table); i++)
-				table[i] = (char) pg_tolower((unsigned char) table[i]);
 
 			/* make schema points to db */
 			schema = db;
@@ -4577,7 +5068,12 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 								colNameObjId.data, mappedColumnName);
 					}
 					else
+					{
 						mappedColumnName = pstrdup(col->name);
+
+						/* we want to normalize according to letter casing strategy here */
+						fc_normalize_name(synchdb_letter_casing_strategy, mappedColumnName, strlen(mappedColumnName));
+					}
 
 					found = false;
 					for (attnum = 1; attnum <= tupdesc->natts; attnum++)
@@ -4588,7 +5084,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 						if (strstr(NameStr(attr->attname), "pg.dropped"))
 							continue;
 
-						if (!strcasecmp(mappedColumnName, NameStr(attr->attname)))
+						if (!strcmp(mappedColumnName, NameStr(attr->attname)))
 						{
 							found = true;
 							break;
@@ -4662,9 +5158,6 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 
 					if(mappedColumnName)
 						pfree(mappedColumnName);
-
-					if (colNameObjId.data)
-						pfree(colNameObjId.data);
 				}
 
 				if (altered)
@@ -4729,24 +5222,22 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 									colNameObjId.data, mappedColumnName);
 						}
 						else
+						{
 							mappedColumnName = pstrdup(col->name);
 
-						if (!strcasecmp(mappedColumnName, NameStr(attr->attname)))
+							/* we want to normalize according to letter casing strategy here */
+							fc_normalize_name(synchdb_letter_casing_strategy, mappedColumnName, strlen(mappedColumnName));
+						}
+
+						if (!strcmp(mappedColumnName, NameStr(attr->attname)))
 						{
 							found = true;
 							if (mappedColumnName)
 								pfree(mappedColumnName);
-
-							if (colNameObjId.data)
-								pfree(colNameObjId.data);
-
 							break;
 						}
 						if (mappedColumnName)
 							pfree(mappedColumnName);
-
-						if (colNameObjId.data)
-							pfree(colNameObjId.data);
 					}
 					if (!found)
 					{
@@ -4754,7 +5245,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 
 						pgcol = (PG_DDL_COLUMN *) palloc0(sizeof(PG_DDL_COLUMN));
 						altered = true;
-						appendStringInfo(&strinfo, "DROP COLUMN IF EXISTS %s,", NameStr(attr->attname));
+						appendStringInfo(&strinfo, "DROP COLUMN IF EXISTS \"%s\",", NameStr(attr->attname));
 						pgcol->attname = pstrdup(NameStr(attr->attname));
 						pgcol->position = attnum;
 						pgddl->columns = lappend(pgddl->columns, pgcol);
@@ -4845,7 +5336,12 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 								colNameObjId.data, mappedColumnName);
 					}
 					else
+					{
 						mappedColumnName = pstrdup(col->name);
+
+						/* we want to normalize according to letter casing strategy here */
+						fc_normalize_name(synchdb_letter_casing_strategy, mappedColumnName, strlen(mappedColumnName));
+					}
 
 					elog(DEBUG1, "adding new column %s", mappedColumnName);
 					altered = true;
@@ -4900,9 +5396,6 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 
 					if(mappedColumnName)
 						pfree(mappedColumnName);
-
-					if (colNameObjId.data)
-						pfree(colNameObjId.data);
 				}
 
 				if (altered)
@@ -4958,7 +5451,12 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 								colNameObjId.data, mappedColumnName);
 					}
 					else
+					{
 						mappedColumnName = pstrdup(col->name);
+
+						/* we want to normalize according to letter casing strategy here */
+						fc_normalize_name(synchdb_letter_casing_strategy, mappedColumnName, strlen(mappedColumnName));
+					}
 
 					/*
 					 * in order to update synchdb_attribute table correctly, we need to find
@@ -4972,11 +5470,11 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 						if (strstr(NameStr(attr->attname), "pg.dropped"))
 							continue;
 
-						if (!strcasecmp(mappedColumnName, NameStr(attr->attname)))
+						if (!strcmp(mappedColumnName, NameStr(attr->attname)))
 							break;
 					}
 
-					appendStringInfo(&strinfo, "DROP COLUMN IF EXISTS %s,", mappedColumnName);
+					appendStringInfo(&strinfo, "DROP COLUMN IF EXISTS \"%s\",", mappedColumnName);
 
 					elog(DEBUG1, "dropping old column %s", mappedColumnName);
 
@@ -4989,9 +5487,6 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 
 					if (mappedColumnName)
 						pfree(mappedColumnName);
-
-					if (colNameObjId.data)
-						pfree(colNameObjId.data);
 				}
 				if(altered)
 				{
@@ -5028,7 +5523,12 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 								colNameObjId.data, mappedColumnName);
 					}
 					else
+					{
 						mappedColumnName = pstrdup(col->name);
+
+						/* we want to normalize according to letter casing strategy here */
+						fc_normalize_name(synchdb_letter_casing_strategy, mappedColumnName, strlen(mappedColumnName));
+					}
 
 					/*
 					 * in order to update synchdb_attribute table correctly, we need to find
@@ -5042,13 +5542,13 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 						if (strstr(NameStr(attr->attname), "pg.dropped"))
 							continue;
 
-						if (!strcasecmp(mappedColumnName, NameStr(attr->attname)))
+						if (!strcmp(mappedColumnName, NameStr(attr->attname)))
 							break;
 					}
 
 					/* check data type */
 					elog(DEBUG1, "altering column %s", col->name);
-					appendStringInfo(&strinfo, "ALTER COLUMN %s SET DATA TYPE",
+					appendStringInfo(&strinfo, "ALTER COLUMN \"%s\" SET DATA TYPE",
 							mappedColumnName);
 
 					transformDDLColumns(dbzddl->id, col, type, true, &strinfo, pgcol);
@@ -5084,13 +5584,13 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 						 * synchdb can receive a default expression not supported in postgresql.
 						 * so for now, we always set to default null. todo
 						 */
-						appendStringInfo(&strinfo, "ALTER COLUMN %s SET DEFAULT %s",
+						appendStringInfo(&strinfo, "ALTER COLUMN \"%s\" SET DEFAULT %s",
 								mappedColumnName, "NULL");
 					}
 					else
 					{
 						/* remove default value */
-						appendStringInfo(&strinfo, "ALTER COLUMN %s DROP DEFAULT",
+						appendStringInfo(&strinfo, "ALTER COLUMN \"%s\" DROP DEFAULT",
 								mappedColumnName);
 					}
 
@@ -5099,12 +5599,12 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 					/* check if nullable or not nullable */
 					if (!col->optional)
 					{
-						appendStringInfo(&strinfo, "ALTER COLUMN %s SET NOT NULL",
+						appendStringInfo(&strinfo, "ALTER COLUMN \"%s\" SET NOT NULL",
 								mappedColumnName);
 					}
 					else
 					{
-						appendStringInfo(&strinfo, "ALTER COLUMN %s DROP NOT NULL",
+						appendStringInfo(&strinfo, "ALTER COLUMN \"%s\" DROP NOT NULL",
 								mappedColumnName);
 					}
 
@@ -5130,7 +5630,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 			{
 				if (pkoid == InvalidOid)
 				{
-					appendStringInfo(&strinfo, "ADD CONSTRAINT %s ", dbzddl->constraintName);
+					appendStringInfo(&strinfo, "ADD CONSTRAINT \"%s\" ", dbzddl->constraintName);
 					populate_primary_keys(&strinfo, dbzddl->id, dbzddl->primaryKeyColumnNames, true, false);
 				}
 				else
@@ -5143,7 +5643,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 			else if (dbzddl->subtype == SUBTYPE_DROP_CONSTRAINT)
 			{
 				if (dbzddl->constraintName)
-					appendStringInfo(&strinfo, "DROP CONSTRAINT %s ", dbzddl->constraintName);
+					appendStringInfo(&strinfo, "DROP CONSTRAINT \"%s\" ", dbzddl->constraintName);
 				else
 				{
 					elog(WARNING, "constaint name to drop is NULL. Skipping...");
@@ -5211,6 +5711,9 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 			char * idcopy = pstrdup(dbzddl->id);
 			splitIdString(idcopy, &db, &schema, &table, true);
 
+			/* we want to normalize according to letter casing strategy here */
+			fc_normalize_name(synchdb_letter_casing_strategy, idcopy, strlen(idcopy));
+
 			/* database and table must be present. schema is optional */
 			if (!db || !table)
 			{
@@ -5250,7 +5753,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 
 bool
 fc_translate_datatype(ConnectorType connectorType,
-		const char * ext_datatype, int ext_length, int ext_scale,
+		const char * ext_datatype, int * ext_length, int * ext_scale,
 		char ** pg_datatype, int * pg_datatype_len)
 {
 	DatatypeHashEntry * entry;
@@ -5270,6 +5773,9 @@ fc_translate_datatype(ConnectorType connectorType,
 		case TYPE_SQLSERVER:
 			thehash = sqlserverDatatypeHash;
 			break;
+		case TYPE_POSTGRES:
+			thehash = postgresDatatypeHash;
+			break;
 		default:
 		{
 			elog(WARNING, "unsupported connector type");
@@ -5286,18 +5792,45 @@ fc_translate_datatype(ConnectorType connectorType,
 
 	/* handle per-connector special cases */
 	if ((connectorType == TYPE_MYSQL || connectorType == TYPE_SQLSERVER) &&
-			ext_length == 1 && !strcasecmp(ext_datatype, "bit"))
+			*ext_length == 1 && !strcasecmp(ext_datatype, "bit"))
 	{
 		/* special case: bit with length 1 -> include length in lookup key */
 		snprintf(key.extTypeName, sizeof(key.extTypeName), "%s(%d)",
-				ext_datatype, ext_length);
+				ext_datatype, *ext_length);
 	}
-	else if (connectorType == TYPE_ORACLE && ext_scale == 0 &&
-			!strcasecmp(ext_datatype, "number"))
+	else if (connectorType == TYPE_ORACLE)
 	{
-		/* special case: NUMBER with scale 0 -> include both length and scale in lookup key */
-		snprintf(key.extTypeName, sizeof(key.extTypeName), "%s(%d,%d)",
-				ext_datatype, ext_length, ext_scale);
+		bool removed = false;
+		char * type = pstrdup(ext_datatype);
+		/*
+		 * oracle data type may contain length and scale information in the col->typeName,
+		 * but these are also available in col->length and col->scale. We need to remove
+		 * them here to ensure proper data type transforms. Known data type to have this
+		 * addition is INTERVAL DAY(3) TO SECOND(6)
+		 */
+		remove_precision(type, &removed);
+
+		/*
+		 * for INTERVAL DAY TO SECOND or if precision operators have been removed previously,
+		 * we need to make size = scale, and empty the scale to maintain compatibility in
+		 * PostgreSQL.
+		 */
+		if ((!strcasecmp(type, "interval day to second") && *ext_scale > 0) || removed)
+		{
+			*ext_length = *ext_scale;
+			*ext_scale = 0;
+		}
+
+		if (*ext_scale == 0 && !strcasecmp(type, "number"))
+		{
+			/* special case: NUMBER with scale 0 -> include both length and scale in lookup key */
+			snprintf(key.extTypeName, sizeof(key.extTypeName), "%s(%d,%d)",
+					type, *ext_length, *ext_scale);
+		}
+		else
+		{
+			snprintf(key.extTypeName, sizeof(key.extTypeName), "%s", type);
+		}
 	}
 	else
 		snprintf(key.extTypeName, sizeof(key.extTypeName), "%s", ext_datatype);
@@ -5310,4 +5843,34 @@ fc_translate_datatype(ConnectorType connectorType,
 		return true;
 	}
 	return false;
+}
+
+void
+fc_normalize_name(LetterCasingStrategy strategy, char * name, int len)
+{
+	int i = 0;
+
+	if (!name || len == 0)
+		return;
+
+	switch(strategy)
+	{
+		case LCS_NORMALIZE_LOWERCASE:
+		{
+			for (i = 0; i < len; i++)
+				name[i] = (char) pg_tolower((unsigned char) name[i]);
+			break;
+		}
+		case LCS_NORMALIZE_UPPERCASE:
+		{
+			for (i = 0; i < len; i++)
+				name[i] = (char) pg_toupper((unsigned char) name[i]);
+			break;
+		}
+		default:
+		case LCS_AS_IS:
+		{
+			break;
+		}
+	}
 }

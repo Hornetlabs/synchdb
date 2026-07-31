@@ -26,9 +26,10 @@ import java.io.FileInputStream;
 import java.io.ObjectInputStream;
 import java.io.FileOutputStream;
 import java.io.ObjectOutputStream;
-import org.apache.log4j.Logger;
-import org.apache.log4j.Level;
-import org.apache.log4j.*;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.core.config.Configurator;
 import java.lang.management.ManagementFactory;
 import java.lang.management.MemoryMXBean;
 import java.lang.management.MemoryUsage;
@@ -37,7 +38,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 
 public class DebeziumRunner {
-	private static Logger logger = Logger.getRootLogger();
+	private static Logger logger = LogManager.getRootLogger();
 	private List<String> changeEvents = new ArrayList<>();
 	private DebeziumEngine<ChangeEvent<String, String>> engine;
 	private ExecutorService executor;
@@ -52,6 +53,8 @@ public class DebeziumRunner {
 	final int TYPE_ORACLE = 2;
 	final int TYPE_SQLSERVER = 3;
 	final int TYPE_OPENLOG_REPLICATOR = 4;
+	final int TYPE_POSTGRES = 5;
+
 	final int BATCH_QUEUE_SIZE = 5;
 	
 	final int LOG_LEVEL_UNDEF = 0;
@@ -108,9 +111,10 @@ public class DebeziumRunner {
 		private int ispnMemorySize;
 		private String logminerStreamMode;
 		private int cdcDelay;
+		private String srcschema;
 
 		/* constructor requires all required parameters for a connector to work */
-		public MyParameters(String connectorName, int connectorType, String hostname, int port, String user, String password, String database, String table, String snapshottable,String snapshotMode, String dstdb)
+		public MyParameters(String connectorName, int connectorType, String hostname, int port, String user, String password, String database, String table, String snapshottable,String snapshotMode, String dstdb, String srcschema)
 		{
 			this.connectorName = connectorName;
 			this.connectorType = connectorType;
@@ -123,6 +127,7 @@ public class DebeziumRunner {
 			this.snapshottable = snapshottable;
 			this.snapshotMode = snapshotMode;
 			this.dstdb = dstdb;
+			this.srcschema = srcschema;
 		}
 		public MyParameters setBatchSize(int batchSize)
 		{
@@ -251,6 +256,7 @@ public class DebeziumRunner {
 			logger.warn("table = " + this.table);
 			logger.warn("snapshotMode = " + this.snapshotMode);
 			logger.warn("dstdb = " + this.dstdb);
+			logger.warn("srcschema = " + this.srcschema);
 
 			logger.warn("batchSize = " + this.batchSize);
 			logger.warn("queueSize = " + this.queueSize);
@@ -380,59 +386,52 @@ public class DebeziumRunner {
 		
 		Properties props = new Properties();
 
-		/* Initialize Logging */
-		if (logger.getAppender("Console") == null)
-		{
-			ConsoleAppender consoleAppender = new ConsoleAppender();
-			consoleAppender.setName("Console");
-        	consoleAppender.setLayout(new PatternLayout("%d{yyyy-MM-dd HH:mm:ss} %-5p %c{1}:%L - %m%n"));
-        	consoleAppender.setTarget(ConsoleAppender.SYSTEM_OUT);
-        	consoleAppender.activateOptions();
-			logger.addAppender(consoleAppender);
-		}
-
+		/*
+		 * Initialize Logging: console appender and pattern are declared in
+		 * src/main/resources/log4j2.xml; only the level is set at runtime
+		 */
 		switch (myParameters.logLevel)
 		{
 			case LOG_LEVEL_ALL:
 			{
-				logger.setLevel(Level.ALL);
+				Configurator.setRootLevel(Level.ALL);
 				break;
 			}
 			case LOG_LEVEL_DEBUG:
 			{
-				logger.setLevel(Level.DEBUG);
+				Configurator.setRootLevel(Level.DEBUG);
 				break;
 			}
 			case LOG_LEVEL_INFO:
 			{
-				logger.setLevel(Level.INFO);
+				Configurator.setRootLevel(Level.INFO);
 				break;
 			}
 			case LOG_LEVEL_ERROR:
 			{
-				logger.setLevel(Level.ERROR);
+				Configurator.setRootLevel(Level.ERROR);
 				break;
 			}
 			case LOG_LEVEL_FATAL:
 			{
-				logger.setLevel(Level.FATAL);
+				Configurator.setRootLevel(Level.FATAL);
 				break;
 			}
 			case LOG_LEVEL_OFF:
 			{
-				logger.setLevel(Level.OFF);
+				Configurator.setRootLevel(Level.OFF);
 				break;
 			}
 			case LOG_LEVEL_TRACE:
 			{
-				logger.setLevel(Level.TRACE);
+				Configurator.setRootLevel(Level.TRACE);
 				break;
 			}
-			default:	
+			default:
 			case LOG_LEVEL_UNDEF:
 			case LOG_LEVEL_WARN:
 			{
-				logger.setLevel(Level.WARN);
+				Configurator.setRootLevel(Level.WARN);
 				break;
 			}
 		}
@@ -490,10 +489,20 @@ public class DebeziumRunner {
                     logger.warn("database is null - skip setting database.include.list property");
                 else
                 {
-                    props.setProperty("database.dbname", myParameters.database);
+                    /* srcdb may be in "CDB/PDB" format; split if a slash is present */
+                    int slashIdx = myParameters.database.indexOf('/');
+                    if(slashIdx > 0){
+                        String cdb = myParameters.database.substring(0, slashIdx);
+                        String pdb = myParameters.database.substring(slashIdx + 1);
+                        props.setProperty("database.dbname", cdb);
+                        props.setProperty("database.pdb.name", pdb);
+                        logger.info("Oracle CDB/PDB mode: dbname=" + cdb + " pdb.name=" + pdb);
+                    }else{
+                        props.setProperty("database.dbname", myParameters.database);
+                    }
                 }
 				/* limit to this Oracle user's schema for now so we do not replicate tables from other schemas */
-				props.setProperty("schema.include.list", myParameters.user);
+				props.setProperty("schema.include.list", myParameters.srcschema);
 				props.setProperty("lob.enabled", "true");
 				props.setProperty("unavailable.value.placeholder", "__synchdb_unavailable_value");
 
@@ -634,10 +643,20 @@ public class DebeziumRunner {
                     logger.warn("database is null - skip setting database.include.list property");
                 else
                 {
-                    props.setProperty("database.dbname", myParameters.database);
+                    /* srcdb may be in "CDB/PDB" format; split if a slash is present */
+                    int slashIdx = myParameters.database.indexOf('/');
+                    if(slashIdx > 0){
+                        String cdb = myParameters.database.substring(0, slashIdx);
+                        String pdb = myParameters.database.substring(slashIdx + 1);
+                        props.setProperty("database.dbname", cdb);
+                        props.setProperty("database.pdb.name", pdb);
+                        logger.info("Oracle CDB/PDB mode: dbname=" + cdb + " pdb.name=" + pdb);
+                    }else{
+                        props.setProperty("database.dbname", myParameters.database);
+                    }
                 }
                 /* limit to this Oracle user's schema for now so we do not replicate tables from other schemas */
-                props.setProperty("schema.include.list", myParameters.user);
+                props.setProperty("schema.include.list", myParameters.srcschema);
                 props.setProperty("lob.enabled", "true");
                 props.setProperty("unavailable.value.placeholder", "__synchdb_unavailable_value");
                 break;
@@ -670,7 +689,50 @@ public class DebeziumRunner {
 					props.setProperty("database.ssl.truststore", myParameters.sslTruststore);
 				if (myParameters.sslTruststorePass != null)
 					props.setProperty("database.ssl.truststore.password", myParameters.sslTruststorePass);
+                
+				props.setProperty("schema.include.list", myParameters.srcschema);
 				break;
+			}
+			case TYPE_POSTGRES:
+			{
+				props.setProperty("connector.class", "io.debezium.connector.postgresql.PostgresConnector");
+				offsetfile = "pg_synchdb/postgres_" + myParameters.connectorName + "_" + myParameters.dstdb + "_offsets.dat";
+                schemahistoryfile = "pg_synchdb/postgres_" + myParameters.connectorName + "_" + myParameters.dstdb + "_schemahistory.dat";
+                signalfile = "pg_synchdb/pg_" + myParameters.connectorName + "_" + myParameters.dstdb + "_signal.dat";
+
+				props.setProperty("tasks.max", "1");
+				props.setProperty("plugin.name", "pgoutput");
+
+				/*
+				 * restore pre-3.x startup behavior: synchdb's fdw snapshot engine
+				 * writes an offset file before the replication slot exists, which
+				 * fails Debezium 3.x's valicateLogPosition() check. trust_slot skips
+				 * the check and lets Debezium create the slot and stream from it,
+				 * as Debezium 2.6 did
+				 *
+				 * TODO: https://github.com/Hornetlabs/synchdb/issues/256
+				 */
+				props.setProperty("offset.mismatch.strategy", "trust_slot");
+				props.setProperty("slot.name", myParameters.connectorName + "_" + myParameters.dstdb + "_" + "synchdb_slot");
+				props.setProperty("publication.name", myParameters.connectorName + "_" + myParameters.dstdb + "_" + "synchdb_pub");
+	
+				if (myParameters.table.equals("null"))
+					props.setProperty("publication.autocreate.mode", "all_tables");
+				else
+					props.setProperty("publication.autocreate.mode", "filtered");
+				props.setProperty("database.dbname", myParameters.database);
+				props.setProperty("schema.include.list", myParameters.srcschema);
+				
+				/* we only work with replica identity = FULL*/
+				props.setProperty("replica.identity.autoset.values", myParameters.srcschema + ".*:DEFAULT");
+
+                if (myParameters.database.equals("null"))
+                    logger.warn("database is null - skip setting database.include.list property");
+                else
+                {
+                    props.setProperty("database.dbname", myParameters.database);
+                }
+
 			}
 		}
 		
@@ -1106,6 +1168,11 @@ public class DebeziumRunner {
 				key = "[\"engine\",{\"server\":\"synchdb-connector\",\"database\":\"" + db + "\"}]";
 				break;
 			}
+			case TYPE_POSTGRES:
+			{
+				inputFile = new File("pg_synchdb/postgres_" + name + "_" + dstdb + "_offsets.dat");
+				key = "[\"engine\",{\"server\":\"synchdb-connector\"}]";
+			}
 		}
 
 		if (!inputFile.exists())
@@ -1157,6 +1224,10 @@ public class DebeziumRunner {
 			{
 				key = "[\"engine\",{\"server\":\"synchdb-connector\",\"database\":\"" + db + "\"}]";
 				break;
+			}
+			case TYPE_POSTGRES:
+			{
+				key = "[\"engine\",{\"server\":\"synchdb-connector\"}]";
 			}
 		}
 
@@ -1228,6 +1299,7 @@ public class DebeziumRunner {
 		{
 			case TYPE_MYSQL:
 			case TYPE_ORACLE:
+			case TYPE_POSTGRES:
 				/* Debezium key for mysql/oracle doesn’t include database */
 				key = "[\"engine\",{\"server\":\"synchdb-connector\"}]";
 				break;
@@ -1253,6 +1325,25 @@ public class DebeziumRunner {
 	{
 		checkMemoryStatus();
 	}
+
+	public void changeLogLevel(int level)
+	{
+      switch (level)
+      {
+          case LOG_LEVEL_ALL:   Configurator.setRootLevel(Level.ALL);   break;
+          case LOG_LEVEL_DEBUG: Configurator.setRootLevel(Level.DEBUG); break;
+          case LOG_LEVEL_INFO:  Configurator.setRootLevel(Level.INFO);  break;
+          case LOG_LEVEL_ERROR: Configurator.setRootLevel(Level.ERROR); break;
+          case LOG_LEVEL_FATAL: Configurator.setRootLevel(Level.FATAL); break;
+          case LOG_LEVEL_OFF:   Configurator.setRootLevel(Level.OFF);   break;
+          case LOG_LEVEL_TRACE: Configurator.setRootLevel(Level.TRACE); break;
+          default:
+          case LOG_LEVEL_UNDEF:
+          case LOG_LEVEL_WARN:  Configurator.setRootLevel(Level.WARN);  break;
+      }
+      logger.warn("DBZ log level changed to " + logger.getLevel());
+	}
+
 	public static void main(String[] args)
 	{
 		/* testing code can be put here */

@@ -21,6 +21,8 @@
 #include "synchdb/synchdb.h"
 #include "converter/debezium_event_handler.h"
 #include "converter/format_converter.h"
+#include "common/base64.h"
+#include "port/pg_bswap.h"
 #ifdef WITH_OLR
 #include "olr/olr_client.h"
 #endif
@@ -30,6 +32,8 @@ extern int myConnectorId;
 extern bool synchdb_log_event_on_error;
 extern char * g_eventStr;
 extern HTAB * dataCacheHash;
+extern int synchdb_letter_casing_strategy;
+extern int synchdb_error_strategy;
 
 static DdlType name_to_ddltype(const char * name);
 static DbzType getDbzTypeFromString(const char * typestring);
@@ -37,20 +41,21 @@ static TimeRep getTimerepFromString(const char * typestring);
 static HTAB * build_schema_jsonpos_hash(Jsonb * jb);
 static void destroyDBZDDL(DBZ_DDL * ddlinfo);
 static void destroyDBZDML(DBZ_DML * dmlinfo);
-static DBZ_DDL * parseDBZDDL(Jsonb * jb, bool isfirst, bool islast);
+static DBZ_DDL * parseDBZDDL(Jsonb * jb, bool isfirst, bool islast, bool deriveMsg);
 static DBZ_DML * parseDBZDML(Jsonb * jb, char op, ConnectorType type,
 		Jsonb * source, bool isfirst, bool islast);
+static int deriveLogicalMessage(Jsonb ** jb);
 
 static bool isInSnapshot = false;
 
 static DdlType
 name_to_ddltype(const char * name)
 {
-	if (!strcasecmp(name, "CREATE"))
+	if (!strcasecmp(name, "CREATE") || !strcasecmp(name, "CREATE TABLE"))
 		return DDL_CREATE_TABLE;
-	else if (!strcasecmp(name, "ALTER"))
+	else if (!strcasecmp(name, "ALTER") || !strcasecmp(name, "ALTER TABLE"))
 		return DDL_ALTER_TABLE;
-	else if (!strcasecmp(name, "DROP"))
+	else if (!strcasecmp(name, "DROP") || !strcasecmp(name, "DROP TABLE"))
 		return DDL_DROP_TABLE;
 	else
 		return DDL_UNDEF;
@@ -100,6 +105,8 @@ getTimerepFromString(const char * typestring)
 		return TIME_DATE;
 	else if (find_exact_string_match(typestring, "io.debezium.time.Time"))
 		return TIME_TIME;
+	else if (find_exact_string_match(typestring, "io.debezium.time.ZonedTime"))
+		return TIME_ZONEDTIME;
 	else if (find_exact_string_match(typestring, "io.debezium.time.MicroTime"))
 		return TIME_MICROTIME;
 	else if (find_exact_string_match(typestring, "io.debezium.time.NanoTime"))
@@ -116,10 +123,22 @@ getTimerepFromString(const char * typestring)
 		return TIME_MICRODURATION;
 	else if (find_exact_string_match(typestring, "io.debezium.data.VariableScaleDecimal"))
 		return DATA_VARIABLE_SCALE;
+	else if (find_exact_string_match(typestring, "org.apache.kafka.connect.data.Decimal"))
+		return DATA_VARIABLE_SCALE;
 	else if (find_exact_string_match(typestring, "io.debezium.data.geometry.Geometry"))
 		return DATA_VARIABLE_SCALE;
 	else if (find_exact_string_match(typestring, "io.debezium.data.Enum"))
 		return DATA_ENUM;
+	else if (find_exact_string_match(typestring, "io.debezium.data.Uuid"))
+		return DATA_UUID;
+	else if (find_exact_string_match(typestring, "io.debezium.data.Json"))
+		return DATA_JSON;
+	else if (find_exact_string_match(typestring, "io.debezium.data.Xml"))
+		return DATA_XML;
+	else if (find_exact_string_match(typestring, "io.debezium.data.Bits"))
+		return DATA_BITS;
+	else if (find_exact_string_match(typestring, "io.debezium.data.geometry.Point"))
+		return DATA_POINT;
 
 	elog(DEBUG1, "unhandled dbz type %s", typestring);
 	return TIME_UNDEF;
@@ -135,7 +154,7 @@ build_schema_jsonpos_hash(Jsonb * jb)
 	NameJsonposEntry * entry;
 	NameJsonposEntry tmprecord = {0};
 	bool found = false;
-	int i = 0, j = 0;
+	int i = 0;
 	unsigned int contsize = 0;
 	Datum datum_elems[4] ={CStringGetTextDatum("schema"), CStringGetTextDatum("fields"),
 			CStringGetTextDatum("0"), CStringGetTextDatum("fields")};
@@ -168,8 +187,7 @@ build_schema_jsonpos_hash(Jsonb * jb)
 				if (v2)
 				{
 					strncpy(tmprecord.name, v2->val.string.val, v2->val.string.len); /* todo check overflow */
-					for (j = 0; j < strlen(tmprecord.name); j++)
-						tmprecord.name[j] = (char) pg_tolower((unsigned char) tmprecord.name[j]);
+					fc_normalize_name(LCS_NORMALIZE_LOWERCASE, tmprecord.name, strlen(tmprecord.name));
 				}
 				else
 				{
@@ -291,6 +309,89 @@ destroyDBZDML(DBZ_DML * dmlinfo)
 	}
 }
 
+static int
+deriveLogicalMessage(Jsonb ** jb)
+{
+	int tmpoutlen = 0;
+	unsigned char * tmpout = NULL;
+	StringInfoData strinfo;
+	Jsonb * tableChanges = NULL;
+	Jsonb * ddl_jb = NULL;
+    JsonbParseState *state = NULL;
+    JsonbValue * out;
+    JsonbValue v;
+    ArrayType * path = NULL;
+    Datum elems[2] = { CStringGetTextDatum("payload"), CStringGetTextDatum("tableChanges") };
+    Datum newjb_d;
+
+	initStringInfo(&strinfo);
+
+	elog(WARNING, "deriving ddl message");
+    if (!getPathElementString(*jb, "payload.message.prefix", &strinfo, true))
+    {
+    	elog(WARNING, "message prefix %s", strinfo.data);
+    }
+    if (!getPathElementString(*jb, "payload.message.content", &strinfo, true))
+    {
+    	elog(WARNING, "message content %s", strinfo.data);
+    }
+    tmpoutlen = pg_b64_dec_len(strlen(strinfo.data));
+	tmpout = (unsigned char *) palloc0(tmpoutlen + 1);
+
+#if SYNCHDB_PG_MAJOR_VERSION >= 1800
+	tmpoutlen = pg_b64_decode(strinfo.data, strinfo.len, tmpout, tmpoutlen);
+#else
+	tmpoutlen = pg_b64_decode(strinfo.data, strinfo.len, (char *)tmpout, tmpoutlen);
+#endif
+	elog(WARNING, "decoded message %s", tmpout);
+	PG_TRY();
+	{
+		ddl_jb = DatumGetJsonbP(DirectFunctionCall1(jsonb_in, CStringGetDatum((char *) tmpout)));
+	}
+	PG_CATCH();
+	{
+		MemoryContext oldctx = MemoryContextSwitchTo(TopMemoryContext);
+		ErrorData *edata;
+		edata = CopyErrorData();
+		FlushErrorState();
+		elog(WARNING, "decoded DDL message is not valid JSON: %s", edata->message);
+		FreeErrorData(edata);
+		MemoryContextSwitchTo(oldctx);
+		if (tmpout)
+		    pfree(tmpout);
+		return -1;
+	}
+	PG_END_TRY();
+
+	/* tmpout not needed anymore */
+	if (tmpout)
+	    pfree(tmpout);
+
+	/* turn this ddl_jb to tableChanges array with just one value */
+	out = pushJsonbValue(&state, WJB_BEGIN_ARRAY, NULL);
+	v.type = jbvBinary;
+	v.val.binary.data = &ddl_jb->root;
+	v.val.binary.len  = VARSIZE_ANY_EXHDR(ddl_jb);  /* payload size, excluding varlena header */
+	out = pushJsonbValue(&state, WJB_ELEM, &v);
+	out = pushJsonbValue(&state, WJB_END_ARRAY, NULL);
+	tableChanges = JsonbValueToJsonb(out);
+
+	/* put tableChange array to original jb */
+	path = construct_array(elems, 2, TEXTOID, -1, false, TYPALIGN_INT);
+	newjb_d = DirectFunctionCall4
+	(
+		jsonb_set,
+		JsonbPGetDatum(*jb),            /* original Jsonb */
+		PointerGetDatum(path),         /* text[] path */
+		JsonbPGetDatum(tableChanges),  /* new value */
+		BoolGetDatum(true)             /* create_missing */
+	);
+	*jb = DatumGetJsonbP(newjb_d);
+	if (path)
+	    pfree(path);
+	return 0;
+}
+
 /*
  * parseDBZDDL
  *
@@ -299,7 +400,7 @@ destroyDBZDML(DBZ_DML * dmlinfo)
  * @return DBZ_DDL structure
  */
 static DBZ_DDL *
-parseDBZDDL(Jsonb * jb, bool isfirst, bool islast)
+parseDBZDDL(Jsonb * jb, bool isfirst, bool islast, bool deriveMsg)
 {
 	Jsonb * ddlpayload = NULL;
 	JsonbIterator *it;
@@ -307,7 +408,6 @@ parseDBZDDL(Jsonb * jb, bool isfirst, bool islast)
 	JsonbIteratorToken r;
 	char * key = NULL;
 	char * value = NULL;
-	int j = 0;
 
 	DBZ_DDL * ddlinfo = (DBZ_DDL*) palloc0(sizeof(DBZ_DDL));
 	DBZ_DDL_COLUMN * ddlcol = NULL;
@@ -322,41 +422,53 @@ parseDBZDDL(Jsonb * jb, bool isfirst, bool islast)
 	 */
 	if (isfirst || islast)
 	{
-		getPathElementString(jb, "payload.ts_ms", &strinfo, true);
-		if (!strcasecmp(strinfo.data, "NULL"))
+		if (getPathElementString(jb, "payload.ts_ms", &strinfo, true))
 			ddlinfo->dbz_ts_ms = 0;
 		else
 			ddlinfo->dbz_ts_ms = strtoull(strinfo.data, NULL, 10);
 
-		getPathElementString(jb, "payload.source.ts_ms", &strinfo, true);
-		if (!strcasecmp(strinfo.data, "NULL"))
+		if (getPathElementString(jb, "payload.source.ts_ms", &strinfo, true))
 			ddlinfo->src_ts_ms = 0;
 		else
 			ddlinfo->src_ts_ms = strtoull(strinfo.data, NULL, 10);
 	}
 
-    getPathElementString(jb, "payload.tableChanges.0.id", &strinfo, true);
-    ddlinfo->id = pstrdup(strinfo.data);
+	if (deriveMsg)
+	{
+		if (deriveLogicalMessage(&jb))
+		{
+			elog(WARNING, "failed to derive logical message. Skipping this event...");
+			destroyDBZDDL(ddlinfo);
+			return NULL;
+		}
+		elog(WARNING, "logical message derived");
+	}
 
-    getPathElementString(jb, "payload.tableChanges.0.table.primaryKeyColumnNames", &strinfo, false);
-    ddlinfo->primaryKeyColumnNames = pstrdup(strinfo.data);
+    if (getPathElementString(jb, "payload.tableChanges.0.id", &strinfo, true))
+    {
+    	elog(DEBUG1, "no id parameter in table change data. Stop parsing...");
+		destroyDBZDDL(ddlinfo);
+		return NULL;
+    }
+    else
+    	ddlinfo->id = pstrdup(strinfo.data);
 
-    getPathElementString(jb, "payload.tableChanges.0.type", &strinfo, true);
-    ddlinfo->type = name_to_ddltype(strinfo.data);
+    if (getPathElementString(jb, "payload.tableChanges.0.table.primaryKeyColumnNames", &strinfo, false))
+    	ddlinfo->primaryKeyColumnNames = NULL;
+    else
+    	ddlinfo->primaryKeyColumnNames = pstrdup(strinfo.data);
+
+    if (getPathElementString(jb, "payload.tableChanges.0.type", &strinfo, true))
+    {
+    	elog(DEBUG1, "unknown DDL type. Stop parsing...");
+		destroyDBZDDL(ddlinfo);
+		return NULL;
+    }
+    else
+    	ddlinfo->type = name_to_ddltype(strinfo.data);
 
     /* free the data inside strinfo as we no longer needs it */
     pfree(strinfo.data);
-
-    if (!strcmp(ddlinfo->id, "NULL") || ddlinfo->type == DDL_UNDEF)
-    {
-    	elog(DEBUG1, "no table change data or unknown DDL type. Stop parsing...");
-    	destroyDBZDDL(ddlinfo);
-    	return NULL;
-    }
-
-    /* once we are done checking ddlinfo->id, we turn it to lowercase */
-	for (j = 0; j < strlen(ddlinfo->id); j++)
-		ddlinfo->id[j] = (char) pg_tolower((unsigned char) ddlinfo->id[j]);
 
     if (ddlinfo->type == DDL_CREATE_TABLE || ddlinfo->type == DDL_ALTER_TABLE)
     {
@@ -492,10 +604,6 @@ parseDBZDDL(Jsonb * jb, bool isfirst, bool islast)
 					{
 						elog(DEBUG1, "consuming %s = %s", key, value);
 						ddlcol->name = pstrdup(value);
-
-						/* convert typeName to lowercase for consistency */
-						for (j = 0; j < strlen(ddlcol->name); j++)
-							ddlcol->name[j] = (char) pg_tolower(ddlcol->name[j]);
 					}
 					if (!strcmp(key, "length"))
 					{
@@ -517,9 +625,9 @@ parseDBZDDL(Jsonb * jb, bool isfirst, bool islast)
 						elog(DEBUG1, "consuming %s = %s", key, value);
 						ddlcol->typeName = pstrdup(value);
 
-						/* convert typeName to lowercase for consistency */
-						for (j = 0; j < strlen(ddlcol->typeName); j++)
-							ddlcol->typeName[j] = (char) pg_tolower(ddlcol->typeName[j]);
+						/* data type names always normalized to lower case */
+						fc_normalize_name(LCS_NORMALIZE_LOWERCASE, ddlcol->typeName,
+								strlen(ddlcol->typeName));
 					}
 					if (!strcmp(key, "enumValues"))
 					{
@@ -539,7 +647,7 @@ parseDBZDDL(Jsonb * jb, bool isfirst, bool islast)
 					if (!strcmp(key, "defaultValueExpression"))
 					{
 						elog(DEBUG1, "consuming %s = %s", key, value);
-						ddlcol->defaultValueExpression = pstrdup(value);
+						ddlcol->defaultValueExpression = strcmp(value, "NULL") == 0 ? NULL : pstrdup(value);
 					}
 					if (!strcmp(key, "scale"))
 					{
@@ -596,7 +704,7 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 	Oid schemaoid;
 	Relation rel;
 	TupleDesc tupdesc;
-	int attnum, j = 0;
+	int attnum = 0;
 	HTAB * typeidhash;
 	HTAB * namejsonposhash;
 	HASHCTL hash_ctl;
@@ -679,16 +787,11 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 	 */
 	if (isfirst || islast)
 	{
-		getPathElementString(jb, "payload.ts_ms", &strinfo, true);
-		if (!strcasecmp(strinfo.data, "NULL"))
+		if (getPathElementString(jb, "payload.ts_ms", &strinfo, true))
 			dbzdml->dbz_ts_ms = 0;
 		else
 			dbzdml->dbz_ts_ms = strtoull(strinfo.data, NULL, 10);
 	}
-
-	/* table name transformation and normalized objectid to lower case */
-	for (j = 0; j < objid.len; j++)
-		objid.data[j] = (char) pg_tolower((unsigned char) objid.data[j]);
 
 	dbzdml->remoteObjectId = pstrdup(objid.data);
 	dbzdml->mappedObjectId = transform_object_name(dbzdml->remoteObjectId, "table");
@@ -723,6 +826,9 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 		dbzdml->schema = pstrdup(db);
 		dbzdml->table = pstrdup(table);
 
+		fc_normalize_name(synchdb_letter_casing_strategy, dbzdml->schema, strlen(dbzdml->schema));
+		fc_normalize_name(synchdb_letter_casing_strategy, dbzdml->table, strlen(dbzdml->table));
+
 		resetStringInfo(&strinfo);
 		appendStringInfo(&strinfo, "%s.%s", dbzdml->schema, dbzdml->table);
 		dbzdml->mappedObjectId = pstrdup(strinfo.data);
@@ -753,11 +859,6 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 	 * created. However, catalog lookups are case sensitive so here we must
 	 * convert db and table to all lower case letters.
 	 */
-	for (j = 0; j < strlen(dbzdml->schema); j++)
-		dbzdml->schema[j] = (char) pg_tolower((unsigned char) dbzdml->schema[j]);
-
-	for (j = 0; j < strlen(dbzdml->table); j++)
-		dbzdml->table[j] = (char) pg_tolower((unsigned char) dbzdml->table[j]);
 
 	/* prepare cache key */
 	strlcpy(cachekey.schema, dbzdml->schema, sizeof(cachekey.schema));
@@ -774,15 +875,25 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 	}
 	else
 	{
-		schemaoid = get_namespace_oid(dbzdml->schema, false);
+		schemaoid = get_namespace_oid(dbzdml->schema, true);
 		if (!OidIsValid(schemaoid))
 		{
 			char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
 			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "no valid OID found for schema '%s'", dbzdml->schema);
 			set_shm_connector_errmsg(myConnectorId, msg);
 
-			/* trigger pg's error shutdown routine */
-			elog(ERROR, "%s", msg);
+			if (synchdb_log_event_on_error && g_eventStr != NULL)
+				elog(LOG, "%s", g_eventStr);
+
+			/* act based on error strategy */
+			if (synchdb_error_strategy == STRAT_EXIT_ON_ERROR)
+				elog(ERROR, "%s", msg);
+			else
+			{
+				destroyDBZDML(dbzdml);
+				dbzdml = NULL;
+				goto end;
+			}
 		}
 
 		dbzdml->tableoid = get_relname_relid(dbzdml->table, schemaoid);
@@ -792,8 +903,18 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "no valid OID found for table '%s'", dbzdml->table);
 			set_shm_connector_errmsg(myConnectorId, msg);
 
-			/* trigger pg's error shutdown routine */
-			elog(ERROR, "%s", msg);
+			if (synchdb_log_event_on_error && g_eventStr != NULL)
+				elog(LOG, "%s", g_eventStr);
+
+			/* act based on error strategy */
+			if (synchdb_error_strategy == STRAT_EXIT_ON_ERROR)
+				elog(ERROR, "%s", msg);
+			else
+			{
+				destroyDBZDML(dbzdml);
+				dbzdml = NULL;
+				goto end;
+			}
 		}
 
 		/* populate cached information */
@@ -842,7 +963,9 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 				entry->position = attnum;
 				entry->typemod = attr->atttypmod;
 				if (pkattrs && bms_is_member(attnum - FirstLowInvalidHeapAttributeNumber, pkattrs))
-					entry->ispk =true;
+					entry->ispk = true;
+				else
+					entry->ispk = false;
 				get_type_category_preferred(entry->oid, &entry->typcategory, &entry->typispreferred);
 				strlcpy(entry->typname, format_type_be(attr->atttypid), NAMEDATALEN);
 			}
@@ -926,26 +1049,56 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 									int pathsize = strlen("payload.after.") + strlen(key) + 1;
 									char * tmpPath = (char *) palloc0 (pathsize);
 									snprintf(tmpPath, pathsize, "payload.after.%s", key);
-									getPathElementString(jb, tmpPath, &strinfo, false);
-									value = pstrdup(strinfo.data);
+									if (getPathElementString(jb, tmpPath, &strinfo, false) == 0)
+										value = pstrdup(strinfo.data);
 									if(tmpPath)
 										pfree(tmpPath);
 								}
 							}
 							break;
 						case WJB_BEGIN_ARRAY:
+							if (key != NULL)
+							{
+								pause = 1;
+							}
+							break;
+						case WJB_END_ARRAY:
+							if (pause)
+							{
+								pause = 0;
+								if (key)
+								{
+									int pathsize = strlen("payload.after.") + strlen(key) + 1;
+									char * tmpPath = (char *) palloc0 (pathsize);
+									snprintf(tmpPath, pathsize, "payload.after.%s", key);
+									if (getPathElementString(jb, tmpPath, &strinfo, false) == 0)
+									{
+										/* postgres array is wrapped with curly brackets instead */
+										if (strinfo.len > 0 && strinfo.data[0] == '[')
+											strinfo.data[0] = '{';
+										if (strinfo.len > 0 && strinfo.data[strinfo.len - 1] == ']')
+											strinfo.data[strinfo.len - 1] = '}';
+
+										value = pstrdup(strinfo.data);
+									}
+									if(tmpPath)
+										pfree(tmpPath);
+								}
+							}
+							break;
+						case WJB_KEY:
+							if (pause)
+								break;
 							if (key)
 							{
 								pfree(key);
 								key = NULL;
 							}
-							break;
-						case WJB_END_ARRAY:
-							break;
-						case WJB_KEY:
-							if (pause)
-								break;
-
+							if (value)
+							{
+								pfree(value);
+								value = NULL;
+							}
 							key = pnstrdup(v.val.string.val, v.val.string.len);
 							break;
 						case WJB_VALUE:
@@ -985,22 +1138,21 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 					if (key != NULL && value != NULL)
 					{
 						char * mappedColumnName = NULL;
+						char * colname_lower = NULL;
 						StringInfoData colNameObjId;
 
 						colval = (DBZ_DML_COLUMN_VALUE *) palloc0(sizeof(DBZ_DML_COLUMN_VALUE));
 						colval->name = pstrdup(key);
 
-						/* convert to lower case column name */
-						for (j = 0; j < strlen(colval->name); j++)
-							colval->name[j] = (char) pg_tolower((unsigned char) colval->name[j]);
-
-						colval->value = pstrdup(value);
 						/* a copy of original column name for expression rule lookup at later stage */
 						colval->remoteColumnName = pstrdup(colval->name);
+						fc_normalize_name(synchdb_letter_casing_strategy, colval->name, strlen(colval->name));
+
+						colval->value = pstrdup(value);
 
 						/* transform the column name if needed */
 						initStringInfo(&colNameObjId);
-						appendStringInfo(&colNameObjId, "%s.%s", objid.data, colval->name);
+						appendStringInfo(&colNameObjId, "%s.%s", objid.data, colval->remoteColumnName);
 						mappedColumnName = transform_object_name(colNameObjId.data, "column");
 						if (mappedColumnName)
 						{
@@ -1024,9 +1176,12 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 							colval->typname = pstrdup(entry->typname);
 						}
 						else
-							elog(ERROR, "cannot find data type for column %s. None-existent column?", colval->name);
+							elog(ERROR, "cannot find data type for column %s. Non-existent column?", colval->name);
 
-						entry2 = (NameJsonposEntry *) hash_search(namejsonposhash, colval->remoteColumnName, HASH_FIND, &found);
+						/* jsonpos hash must be looked up using lower case names - todo */
+						colname_lower = pstrdup(colval->remoteColumnName);
+						fc_normalize_name(LCS_NORMALIZE_LOWERCASE, colname_lower, strlen(colname_lower));
+						entry2 = (NameJsonposEntry *) hash_search(namejsonposhash, colname_lower, HASH_FIND, &found);
 						if (found)
 						{
 							colval->dbztype = entry2->dbztype;
@@ -1035,7 +1190,8 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 						}
 						else
 							elog(ERROR, "cannot find json schema data for column %s(%s). invalid json event?",
-									colval->name, colval->remoteColumnName);
+									colval->name, colname_lower);
+						pfree(colname_lower);
 
 						dbzdml->columnValuesAfter = lappend(dbzdml->columnValuesAfter, colval);
 						pfree(key);
@@ -1085,26 +1241,56 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 									int pathsize = strlen("payload.before.") + strlen(key) + 1;
 									char * tmpPath = (char *) palloc0 (pathsize);
 									snprintf(tmpPath, pathsize, "payload.before.%s", key);
-									getPathElementString(jb, tmpPath, &strinfo, false);
-									value = pstrdup(strinfo.data);
+									if (getPathElementString(jb, tmpPath, &strinfo, false) == 0)
+										value = pstrdup(strinfo.data);
 									if(tmpPath)
 										pfree(tmpPath);
 								}
 							}
 							break;
 						case WJB_BEGIN_ARRAY:
+							if (key != NULL)
+							{
+								pause = 1;
+							}
+							break;
+						case WJB_END_ARRAY:
+							if (pause)
+							{
+								pause = 0;
+								if (key)
+								{
+									int pathsize = strlen("payload.after.") + strlen(key) + 1;
+									char * tmpPath = (char *) palloc0 (pathsize);
+									snprintf(tmpPath, pathsize, "payload.after.%s", key);
+									if (getPathElementString(jb, tmpPath, &strinfo, false) == 0)
+									{
+										/* postgres array is wrapped with curly brackets instead */
+										if (strinfo.len > 0 && strinfo.data[0] == '[')
+											strinfo.data[0] = '{';
+										if (strinfo.len > 0 && strinfo.data[strinfo.len - 1] == ']')
+											strinfo.data[strinfo.len - 1] = '}';
+
+										value = pstrdup(strinfo.data);
+									}
+									if(tmpPath)
+										pfree(tmpPath);
+								}
+							}
+							break;
+						case WJB_KEY:
+							if (pause)
+								break;
 							if (key)
 							{
 								pfree(key);
 								key = NULL;
 							}
-							break;
-						case WJB_END_ARRAY:
-							break;
-						case WJB_KEY:
-							if (pause)
-								break;
-
+							if (value)
+							{
+								pfree(value);
+								value = NULL;
+							}
 							key = pnstrdup(v.val.string.val, v.val.string.len);
 							break;
 						case WJB_VALUE:
@@ -1144,24 +1330,23 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 					if (key != NULL && value != NULL)
 					{
 						char * mappedColumnName = NULL;
+						char * colname_lower = NULL;
 						StringInfoData colNameObjId;
 
 						colval = (DBZ_DML_COLUMN_VALUE *) palloc0(sizeof(DBZ_DML_COLUMN_VALUE));
 						colval->name = pstrdup(key);
 
-						/* convert to lower case column name */
-						for (j = 0; j < strlen(colval->name); j++)
-							colval->name[j] = (char) pg_tolower((unsigned char) colval->name[j]);
-
-						colval->value = pstrdup(value);
 						/* a copy of original column name for expression rule lookup at later stage */
 						colval->remoteColumnName = pstrdup(colval->name);
 
+						fc_normalize_name(synchdb_letter_casing_strategy, colval->name, strlen(colval->name));
+
+						colval->value = pstrdup(value);
+
 						/* transform the column name if needed */
 						initStringInfo(&colNameObjId);
-						appendStringInfo(&colNameObjId, "%s.%s", objid.data, colval->name);
+						appendStringInfo(&colNameObjId, "%s.%s", objid.data, colval->remoteColumnName);
 						mappedColumnName = transform_object_name(colNameObjId.data, "column");
-
 						if (mappedColumnName)
 						{
 							/* replace the column name with looked up value here */
@@ -1184,9 +1369,12 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 							colval->typname = pstrdup(entry->typname);
 						}
 						else
-							elog(ERROR, "cannot find data type for column %s. None-existent column?", colval->name);
+							elog(ERROR, "cannot find data type for column %s. Non-existent column?", colval->name);
 
-						entry2 = (NameJsonposEntry *) hash_search(namejsonposhash, colval->remoteColumnName, HASH_FIND, &found);
+						/* jsonpos hash must be looked up using lower case names - todo */
+						colname_lower = pstrdup(colval->remoteColumnName);
+						fc_normalize_name(LCS_NORMALIZE_LOWERCASE, colname_lower, strlen(colname_lower));
+						entry2 = (NameJsonposEntry *) hash_search(namejsonposhash, colname_lower, HASH_FIND, &found);
 						if (found)
 						{
 							colval->dbztype = entry2->dbztype;
@@ -1195,7 +1383,8 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 						}
 						else
 							elog(ERROR, "cannot find json schema data for column %s(%s). invalid json event?",
-									colval->name, colval->remoteColumnName);
+									colval->name, colname_lower);
+						pfree(colname_lower);
 
 						dbzdml->columnValuesBefore = lappend(dbzdml->columnValuesBefore, colval);
 						pfree(key);
@@ -1230,6 +1419,13 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 			int i = 0;
 			for (i = 0; i < 2; i++)
 			{
+				/*
+				 * always initialize key, value to NULL before doing anything in case "before" at i = 0
+				 * is given as null in the case of postgres connector with replica identity = default
+				 */
+				key = NULL;
+				value = NULL;
+
 				/* need to parse before and after */
 				if (i == 0)
 				{
@@ -1268,26 +1464,60 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 											snprintf(tmpPath, pathsize, "payload.before.%s", key);
 										else
 											snprintf(tmpPath, pathsize, "payload.after.%s", key);
-										getPathElementString(jb, tmpPath, &strinfo, false);
-										value = pstrdup(strinfo.data);
+										if (getPathElementString(jb, tmpPath, &strinfo, false) == 0)
+											value = pstrdup(strinfo.data);
 										if(tmpPath)
 											pfree(tmpPath);
 									}
 								}
 								break;
 							case WJB_BEGIN_ARRAY:
+								if (key != NULL)
+								{
+									pause = 1;
+								}
+								break;
+							case WJB_END_ARRAY:
+								if (pause)
+								{
+									pause = 0;
+									if (key)
+									{
+										int pathsize = (i == 0 ? strlen("payload.before.") + strlen(key) + 1 :
+												strlen("payload.after.") + strlen(key) + 1);
+										char * tmpPath = (char *) palloc0 (pathsize);
+										if (i == 0)
+											snprintf(tmpPath, pathsize, "payload.before.%s", key);
+										else
+											snprintf(tmpPath, pathsize, "payload.after.%s", key);
+										if (getPathElementString(jb, tmpPath, &strinfo, false) == 0)
+										{
+											/* postgres array is wrapped with curly brackets instead */
+											if (strinfo.len > 0 && strinfo.data[0] == '[')
+												strinfo.data[0] = '{';
+											if (strinfo.len > 0 && strinfo.data[strinfo.len - 1] == ']')
+												strinfo.data[strinfo.len - 1] = '}';
+
+											value = pstrdup(strinfo.data);
+										}
+										if(tmpPath)
+											pfree(tmpPath);
+									}
+								}
+								break;
+							case WJB_KEY:
+								if (pause)
+									break;
 								if (key)
 								{
 									pfree(key);
 									key = NULL;
 								}
-								break;
-							case WJB_END_ARRAY:
-								break;
-							case WJB_KEY:
-								if (pause)
-									break;
-
+								if (value)
+								{
+									pfree(value);
+									value = NULL;
+								}
 								key = pnstrdup(v.val.string.val, v.val.string.len);
 								break;
 							case WJB_VALUE:
@@ -1327,22 +1557,22 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 						if (key != NULL && value != NULL)
 						{
 							char * mappedColumnName = NULL;
+							char * colname_lower = NULL;
 							StringInfoData colNameObjId;
 
 							colval = (DBZ_DML_COLUMN_VALUE *) palloc0(sizeof(DBZ_DML_COLUMN_VALUE));
 							colval->name = pstrdup(key);
 
-							/* convert to lower case column name */
-							for (j = 0; j < strlen(colval->name); j++)
-								colval->name[j] = (char) pg_tolower((unsigned char) colval->name[j]);
-
-							colval->value = pstrdup(value);
 							/* a copy of original column name for expression rule lookup at later stage */
 							colval->remoteColumnName = pstrdup(colval->name);
 
+							fc_normalize_name(synchdb_letter_casing_strategy, colval->name, strlen(colval->name));
+
+							colval->value = pstrdup(value);
+
 							/* transform the column name if needed */
 							initStringInfo(&colNameObjId);
-							appendStringInfo(&colNameObjId, "%s.%s", objid.data, colval->name);
+							appendStringInfo(&colNameObjId, "%s.%s", objid.data, colval->remoteColumnName);
 							mappedColumnName = transform_object_name(colNameObjId.data, "column");
 							if (mappedColumnName)
 							{
@@ -1366,9 +1596,12 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 								colval->typname = pstrdup(entry->typname);
 							}
 							else
-								elog(ERROR, "cannot find data type for column %s. None-existent column?", colval->name);
+								elog(ERROR, "cannot find data type for column %s. Non-existent column?", colval->name);
 
-							entry2 = (NameJsonposEntry *) hash_search(namejsonposhash, colval->remoteColumnName, HASH_FIND, &found);
+							/* jsonpos hash must be looked up using lower case names - todo */
+							colname_lower = pstrdup(colval->remoteColumnName);
+							fc_normalize_name(LCS_NORMALIZE_LOWERCASE, colname_lower, strlen(colname_lower));
+							entry2 = (NameJsonposEntry *) hash_search(namejsonposhash, colname_lower, HASH_FIND, &found);
 							if (found)
 							{
 								colval->dbztype = entry2->dbztype;
@@ -1377,7 +1610,8 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 							}
 							else
 								elog(ERROR, "cannot find json schema data for column %s(%s). invalid json event?",
-										colval->name, colval->remoteColumnName);
+										colval->name, colname_lower);
+							pfree(colname_lower);
 
 							if (i == 0)
 								dbzdml->columnValuesBefore = lappend(dbzdml->columnValuesBefore, colval);
@@ -1655,16 +1889,27 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
     }
 
     /* Check if it's a DDL or DML event */
-    getPathElementString(jb, "payload.op", &strinfo, true);
-    if (!strcmp(strinfo.data, "NULL"))
+    ret = getPathElementString(jb, "payload.op", &strinfo, true);
+    /*
+     * if payload.op exists and value equals 'm' or the entire payload.op missing,
+     * then it is about DDL.
+     */
+    if ((!ret && strinfo.data && strinfo.data[0] == 'm') || ret)
     {
         /* Process DDL event */
     	DBZ_DDL * dbzddl = NULL;
     	PG_DDL * pgddl = NULL;
+    	bool deriveMsg = false;
+
+    	if (strinfo.data && strinfo.data[0] == 'm')
+    	{
+        	elog(WARNING, "postgres connector's op = m");
+        	deriveMsg = true;
+    	}
 
     	/* (1) parse */
     	set_shm_connector_state(myConnectorId, STATE_PARSING);
-    	dbzddl = parseDBZDDL(jb, isfirst, islast);
+    	dbzddl = parseDBZDDL(jb, isfirst, islast, deriveMsg);
     	if (!dbzddl)
     	{
     		set_shm_connector_state(myConnectorId, STATE_SYNCING);

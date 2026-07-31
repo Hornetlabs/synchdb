@@ -36,6 +36,7 @@ typedef enum _timeRep
 	TIME_UNDEF = 0,
 	TIME_DATE,				/* number of days since epoch */
 	TIME_TIME,				/* number of milliseconds since epoch */
+	TIME_ZONEDTIME,			/* number of milliseconds since epoch with timezone */
 	TIME_MICROTIME,			/* number of microseconds since midnight */
 	TIME_NANOTIME,			/* number of nanoseconds since midnight */
 	TIME_TIMESTAMP,			/* number of milliseconds since epoch */
@@ -46,7 +47,12 @@ typedef enum _timeRep
 	DATA_VARIABLE_SCALE,	/* indication if scale is variable (for oracle) */
 	DATA_GEOMETRY,			/* indication of geometry data */
 	DATA_ENUM,				/* indication of enum data */
-} TimeRep;
+	DATA_UUID,				/* indication of uuid data */
+	DATA_JSON,				/* indication of json data */
+	DATA_XML,				/* indication of xml data */
+	DATA_BITS,				/* indication of bits data */
+	DATA_POINT,				/* indication of points data */
+	} TimeRep;
 
 /* Structure to represent a column in a DDL event */
 typedef struct dbz_ddl_column
@@ -211,7 +217,8 @@ PG_DDL * convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type);
 void updateSynchdbAttribute(DBZ_DDL * dbzddl, PG_DDL * pgddl, ConnectorType conntype, const char * name);
 PG_DML * convert2PGDML(DBZ_DML * dbzdml, ConnectorType type);
 bool fc_translate_datatype(ConnectorType connectorType,
-		const char * ext_datatype, int ext_length, int ext_scale,
+		const char * ext_datatype, int * ext_length, int * ext_scale,
 		char ** pg_datatype, int * pg_datatype_len);
+void fc_normalize_name(LetterCasingStrategy strategy, char * name, int len);
 
 #endif /* SYNCHDB_FORMAT_CONVERTER_H_ */

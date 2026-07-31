@@ -44,7 +44,8 @@
 #define SYNCHDB_INVALID_BATCH_ID -1
 #define SYNCHDB_MAX_TZ_LEN 16
 #define SYNCHDB_MAX_TIMESTAMP_LEN 64
-
+#define SYNCHDB_MAX_INT32_VAL (2147483647)
+#define SYNCHDB_MIN_INT32_VAL (-2147483647-1)
 #define INFINISPAN_TYPE_SIZE 32
 
 #define SYNCHDB_PG_MAJOR_VERSION  PG_VERSION_NUM / 100
@@ -67,7 +68,7 @@
  */
 
 #define SYNCHDB_METADATA_DIR "pg_synchdb"
-#define DBZ_ENGINE_JAR_FILE "dbz-engine-1.0.0.jar"
+#define DBZ_ENGINE_JAR_FILE "dbz-engine-1.1.0.jar"
 #define ORACLE_RAW_PARSER_LIB "libsynchdb_oracle_parser.so"
 #define MAX_PATH_LENGTH 1024
 #define MAX_JAVA_OPTION_LENGTH 256
@@ -99,6 +100,7 @@ typedef enum _connectorType
 	TYPE_ORACLE,
 	TYPE_SQLSERVER,
 	TYPE_OLR,
+	TYPE_POSTGRES
 } ConnectorType;
 
 /**
@@ -117,8 +119,9 @@ typedef enum _connectorState
 	STATE_OFFSET_UPDATE,/* in this state when user requests offset update */
 	STATE_RESTARTING,	/* connector is restarting with new snapshot mode */
 	STATE_MEMDUMP,		/* connector is dumping jvm heap memory info */
-	STATE_SCHEMA_SYNC_DONE, /* connect has completed schema sync as requested */
-	STATE_RELOAD_OBJMAP, /* connect is reloading object mapping */
+	STATE_SCHEMA_SYNC_DONE, /* connector has completed schema sync as requested */
+	STATE_RELOAD_OBJMAP, /* connector is reloading object mapping */
+	STATE_DBZ_LOGLEVEL_UPDATE, /* connector is updating debezium log4j log level */
 } ConnectorState;
 
 /**
@@ -228,6 +231,16 @@ typedef enum _SnapshotEngine
 	ENGINE_FDW
 } SnapshotEngine;
 
+/*
+ * letter casing strategies
+ */
+typedef enum _LetterCasingStrategy
+{
+	LCS_AS_IS,
+	LCS_NORMALIZE_LOWERCASE,
+	LCS_NORMALIZE_UPPERCASE,
+} LetterCasingStrategy;
+
 /**
  * BatchInfo - Structure containing the metadata of a batch change request
  */
@@ -292,6 +305,21 @@ typedef struct _OLRConnectionInfo
 } OLRConnectionInfo;
 
 /**
+ * FdwConnectionInfo - TLS certificate file paths for FDW-based snapshot connections.
+ * These are raw PEM file paths consumed by postgres_fdw / mysql_fdw.
+ * For oracle_fdw, ssl_rootcert is the Oracle Wallet directory path.
+ * Distinct from ExtraConnectionInfo which holds Java Keystore/Truststore
+ * paths used by the Debezium connector via JNI.
+ */
+typedef struct _FdwConnectionInfo
+{
+	char ssl_cert[SYNCHDB_CONNINFO_KEYSTORE_SIZE];
+	char ssl_key[SYNCHDB_CONNINFO_KEYSTORE_SIZE];
+	char ssl_rootcert[SYNCHDB_CONNINFO_KEYSTORE_SIZE];
+	char ssl_cipher[SYNCHDB_CONNINFO_NAME_SIZE];
+} FdwConnectionInfo;
+
+/**
  * Infinispan settings - alternative caching mechanism for oracle connector
  */
 typedef struct _IspnInfo
@@ -300,6 +328,30 @@ typedef struct _IspnInfo
 	char ispn_memory_type[INFINISPAN_TYPE_SIZE];
 	unsigned int ispn_memory_size;
 } IspnInfo;
+
+typedef struct
+{
+	ConnectorType type;
+	union
+	{
+		struct
+		{
+			char binlog_file[128];
+			unsigned long long binlog_pos;
+			char server_id[128];
+		} mysql;
+
+		struct
+		{
+			orascn oracle_scn;
+		} oracle;
+
+		struct
+		{
+			unsigned long long lsn;
+		} postgres;
+	} data;
+} OffsetData;
 
 /**
  * ConnectionInfo - DBZ Connection info. These are put in shared memory so
@@ -313,6 +365,7 @@ typedef struct _ConnectionInfo
     char user[SYNCHDB_CONNINFO_USERNAME_SIZE];
     char pwd[SYNCHDB_CONNINFO_PASSWORD_SIZE];
 	char srcdb[SYNCHDB_CONNINFO_DB_NAME_SIZE];
+	char srcschema[SYNCHDB_CONNINFO_DB_NAME_SIZE];
 	char dstdb[SYNCHDB_CONNINFO_DB_NAME_SIZE];
     char table[SYNCHDB_CONNINFO_TABLELIST_SIZE];
     char snapshottable[SYNCHDB_CONNINFO_TABLELIST_SIZE];
@@ -322,8 +375,10 @@ typedef struct _ConnectionInfo
     ExtraConnectionInfo extra;
     JMXConnectionInfo jmx;
     OLRConnectionInfo olr;
+    FdwConnectionInfo fdw;
     IspnInfo ispn;
     SnapshotEngine snapengine;
+    OffsetData offsetdata;
 } ConnectionInfo;
 
 /**

@@ -1,0 +1,63 @@
+name: docs-ci
+on:
+  push:
+    branches:
+      - synchdb-devel
+    tags:
+      - 'v*'
+    paths:
+      - 'doc/**'
+      - '.github/workflows/docs-ci.yml'
+jobs:
+  deploy-doc:
+    if: github.repository == 'hornetlabs/synchdb'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Install dependencies
+        working-directory: doc
+        run: |
+          pip install -r requirements.txt
+      - name: Configure Git
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+      - name: Add docs remote repo
+        run: |
+          git remote remove docsite 2>/dev/null || true
+          git remote add docsite https://x-access-token:${{ secrets.DOCS_PUSH_TOKEN }}@github.com/hornetlabs/synchdb-docs.git
+          git remote -v
+          git fetch docsite versioned-docs:versioned-docs || true
+
+      - name: Check DOCS_PUSH_TOKEN exists
+        run: |
+          if [ -z "${{ secrets.DOCS_PUSH_TOKEN }}" ]; then
+            echo "DOCS_PUSH_TOKEN is missing or not available"
+            exit 1
+          fi
+      - name: Deploy documentation
+        working-directory: doc
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" == "refs/heads/synchdb-devel" ]]; then
+            mike deploy --push --remote docsite --branch versioned-docs devel
+            exit 0
+          fi
+
+          if [[ "${GITHUB_REF}" =~ ^refs/tags/v ]]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+            mike deploy --push --remote docsite --branch versioned-docs "${VERSION}"
+            mike set-default --push --remote docsite --branch versioned-docs "${VERSION}"
+            exit 0
+          fi
+
+          echo "No matching ref for deployment: ${GITHUB_REF}"
+          exit 0

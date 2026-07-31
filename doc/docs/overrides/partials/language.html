@@ -1,0 +1,29 @@
+{% import "partials/language.html" as language %}
+<div class="md-select">
+  <button class="md-header__button md-icon" aria-label="{{ lang.t('select.language.title') }}">
+    {% include ".icons/material/translate.svg" %}
+  </button>
+  <div class="md-select__inner">
+    <ul class="md-select__list">
+      {% for alt in config.extra.alternate %}
+        <li class="md-select__item">
+          <a href="javascript:void(0);" onclick="switchLanguage('{{ alt.lang }}')" hreflang="{{ alt.lang }}" class="md-select__link">
+            {{ alt.name }}
+          </a>
+        </li>
+      {% endfor %}
+    </ul>
+  </div>
+</div>
+
+<script>
+function switchLanguage(lang) {
+  var currentPath = window.location.pathname;
+  var parts = currentPath.split('/');
+  var version = parts[1];  // Assuming version is always the second part of the URL
+  var newPath = '/' + version + '/' + lang + '/';
+  
+  // Redirect to the new language version
+  window.location.href = newPath;
+}
+</script>
