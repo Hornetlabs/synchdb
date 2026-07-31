@@ -37,12 +37,16 @@ extern HTAB * dataCacheHash;
 extern char * dbz_skipped_operations;
 extern bool synchdb_log_event_on_error;
 extern char * g_eventStr;
+extern int synchdb_letter_casing_strategy;
+extern int synchdb_error_strategy;
 
 /* Oracle raw parser function prototype */
 typedef List * (*oracle_raw_parser_fn)(const char *str, RawParseMode mode);
 static oracle_raw_parser_fn synchdb_oracle_raw_parser = NULL;
 static void * handle = NULL;
 
+static bool isalllower(const char *s);
+static bool isallupper(const char *s);
 static char * strtoupper(const char *input);
 static OlrType getOlrTypeFromString(const char * typestring);
 static void strip_after_column_def(StringInfoData *sql);
@@ -57,6 +61,29 @@ static OLR_DML * parseOLRDML(Jsonb * jb, char op, Jsonb * payload,
 		orascn * scn, orascn * c_scn, orascn * c_idx,
 		bool isfirst, bool islast);
 
+static bool
+isallupper(const char *s)
+{
+    const unsigned char *p = (const unsigned char *) s;
+    for (; *p; p++)
+    {
+        if (*p >= 'a' && *p <= 'z')
+            return false;
+    }
+    return true;
+}
+
+static bool
+isalllower(const char *s)
+{
+    const unsigned char *p = (const unsigned char *) s;
+    for (; *p; p++)
+    {
+        if (*p >= 'A' && *p <= 'Z')
+            return false;
+    }
+    return true;
+}
 
 static char *
 strtoupper(const char *input)
@@ -137,7 +164,7 @@ strip_after_column_def(StringInfoData *sql)
 			paren_level--;
 			if (paren_level == 0)
 			{
-				i++;  // include the closing ')'
+				i++;
 				break;
 			}
 		}
@@ -220,7 +247,7 @@ build_olr_schema_jsonpos_hash(Jsonb * jb)
 	NameJsonposEntry * entry;
 	NameJsonposEntry tmprecord = {0};
 	bool found = false;
-	int i = 0, j = 0;
+	int i = 0;
 	unsigned int contsize = 0;
 	Datum datum_elems[1] ={CStringGetTextDatum("columns")};
 
@@ -252,8 +279,7 @@ build_olr_schema_jsonpos_hash(Jsonb * jb)
 				if (v2)
 				{
 					strncpy(tmprecord.name, v2->val.string.val, v2->val.string.len); /* todo check overflow */
-					for (j = 0; j < strlen(tmprecord.name); j++)
-						tmprecord.name[j] = (char) pg_tolower((unsigned char) tmprecord.name[j]);
+					fc_normalize_name(LCS_NORMALIZE_LOWERCASE, tmprecord.name, strlen(tmprecord.name));
 				}
 				else
 				{
@@ -378,7 +404,6 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 	StringInfoData sql;
 	List * ptree = NULL;
 	ListCell * cell;
-	int j = 0;
 
 	/* scn - required */
 	v = getKeyJsonValueFromContainer(&jb->root, "scn", strlen("scn"), &vbuf);
@@ -473,7 +498,6 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 	}
 
 	appendBinaryStringInfo(&sql, v->val.string.val, v->val.string.len);
-	//remove_double_quotes(&sql);
 
 	if (!is_whitelist_sql(&sql))
 	{
@@ -567,10 +591,31 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 					elog(DEBUG1, "Column: %s", col->colname);
 					ddlcol->name = pstrdup(col->colname);
 
+					/*
+					 * OLR delivers the name in reverse letter casing. (all cap to all lower or all lower
+					 * to all cap), so for "as is" normalization strategy, we need to reverse it back to
+					 * get the original object name. If the name contains a mixture of upper and lower
+					 * case letters, it is delivered as is.
+					 */
+					if (synchdb_letter_casing_strategy == LCS_AS_IS)
+					{
+						if (isallupper(ddlcol->name))	/* need to normalize to lowercase */
+							fc_normalize_name(LCS_NORMALIZE_LOWERCASE, ddlcol->name, strlen(ddlcol->name));
+						else if (isalllower(ddlcol->name))
+							fc_normalize_name(LCS_NORMALIZE_UPPERCASE, ddlcol->name, strlen(ddlcol->name));
+						else
+							fc_normalize_name(LCS_AS_IS, ddlcol->name, strlen(ddlcol->name));
+					}
+					else
+						fc_normalize_name(synchdb_letter_casing_strategy, ddlcol->name, strlen(ddlcol->name));
+
 					/* data type */
 					if (col->typeName && col->typeName->names)
 						elog(DEBUG1, "Type: %s", NameListToString(col->typeName->names));
 					ddlcol->typeName = pstrdup(NameListToString(col->typeName->names));
+
+					/* data type always normalized to lower case */
+					fc_normalize_name(LCS_NORMALIZE_LOWERCASE, ddlcol->typeName, strlen(ddlcol->typeName));
 
 					/* is optional? */
 					if (col->is_not_null)
@@ -685,6 +730,24 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 				appendStringInfo(&pklist, "]");
 				elog(DEBUG1, "pks = %s", pklist.data);
 				olrddl->primaryKeyColumnNames = pstrdup(pklist.data);
+
+				/*
+				 * OLR delivers the name in reverse letter casing. (all cap to all lower or all lower
+				 * to all cap), so for "as is" normalization strategy, we need to reverse it back to
+				 * get the original object name. If the name contains a mixture of upper and lower
+				 * case letters, it is delivered as is.
+				 */
+				if (synchdb_letter_casing_strategy == LCS_AS_IS)
+				{
+					if (isallupper(olrddl->primaryKeyColumnNames))	/* need to normalize to lowercase */
+						fc_normalize_name(LCS_NORMALIZE_LOWERCASE, olrddl->primaryKeyColumnNames,strlen(olrddl->primaryKeyColumnNames));
+					else if (isalllower(olrddl->primaryKeyColumnNames))
+						fc_normalize_name(LCS_NORMALIZE_UPPERCASE, olrddl->primaryKeyColumnNames, strlen(olrddl->primaryKeyColumnNames));
+					else
+						fc_normalize_name(LCS_AS_IS, olrddl->primaryKeyColumnNames, strlen(olrddl->primaryKeyColumnNames));
+				}
+				else
+					fc_normalize_name(synchdb_letter_casing_strategy, olrddl->primaryKeyColumnNames, strlen(olrddl->primaryKeyColumnNames));
 			}
 
 			if (pklist.data)
@@ -694,7 +757,7 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 			 * special checking on potential table name mismatch, always use the table name
 			 * from the parser
 			 */
-			if (strcasecmp(tableName, table))
+			if (strcmp(tableName, table))
 			{
 				elog(WARNING, "table name mismatch, using %s instead of %s",
 						tableName, table);
@@ -732,6 +795,23 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 						/* column name */
 						elog(DEBUG1, "  ADD COLUMN: %s", col->colname);
 						ddlcol->name = pstrdup(col->colname);
+						/*
+						 * OLR delivers the name in reverse letter casing. (all cap to all lower or all lower
+						 * to all cap), so for "as is" normalization strategy, we need to reverse it back to
+						 * get the original object name. If the name contains a mixture of upper and lower
+						 * case letters, it is delivered as is.
+						 */
+						if (synchdb_letter_casing_strategy == LCS_AS_IS)
+						{
+							if (isallupper(ddlcol->name))	/* need to normalize to lowercase */
+								fc_normalize_name(LCS_NORMALIZE_LOWERCASE, ddlcol->name, strlen(ddlcol->name));
+							else if (isalllower(ddlcol->name))
+								fc_normalize_name(LCS_NORMALIZE_UPPERCASE, ddlcol->name, strlen(ddlcol->name));
+							else
+								fc_normalize_name(LCS_AS_IS, ddlcol->name, strlen(ddlcol->name));
+						}
+						else
+							fc_normalize_name(synchdb_letter_casing_strategy, ddlcol->name, strlen(ddlcol->name));
 
 						olrddl->subtype = SUBTYPE_ADD_COLUMN;
 
@@ -739,6 +819,9 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 						if (col->typeName && col->typeName->names)
 							elog(DEBUG1, "Type: %s", NameListToString(col->typeName->names));
 						ddlcol->typeName = pstrdup(NameListToString(col->typeName->names));
+
+						/* data type always normalized to lower case */
+						fc_normalize_name(LCS_NORMALIZE_LOWERCASE, ddlcol->typeName, strlen(ddlcol->typeName));
 
 						/* is optional? */
 						if (col->is_not_null)
@@ -831,6 +914,24 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 								pklist.len = pklist.len - 1;
 								appendStringInfo(&pklist, "]");
 								olrddl->primaryKeyColumnNames = pstrdup(pklist.data);
+
+								/*
+								 * OLR delivers the name in reverse letter casing. (all cap to all lower or all lower
+								 * to all cap), so for "as is" normalization strategy, we need to reverse it back to
+								 * get the original object name. If the name contains a mixture of upper and lower
+								 * case letters, it is delivered as is.
+								 */
+								if (synchdb_letter_casing_strategy == LCS_AS_IS)
+								{
+									if (isallupper(olrddl->primaryKeyColumnNames))	/* need to normalize to lowercase */
+										fc_normalize_name(LCS_NORMALIZE_LOWERCASE, olrddl->primaryKeyColumnNames,strlen(olrddl->primaryKeyColumnNames));
+									else if (isalllower(olrddl->primaryKeyColumnNames))
+										fc_normalize_name(LCS_NORMALIZE_UPPERCASE, olrddl->primaryKeyColumnNames, strlen(olrddl->primaryKeyColumnNames));
+									else
+										fc_normalize_name(LCS_AS_IS, olrddl->primaryKeyColumnNames, strlen(olrddl->primaryKeyColumnNames));
+								}
+								else
+									fc_normalize_name(synchdb_letter_casing_strategy, olrddl->primaryKeyColumnNames, strlen(olrddl->primaryKeyColumnNames));
 							}
 						}
 						if (pklist.data)
@@ -845,6 +946,24 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 						elog(DEBUG1, "DROP COLUMN: %s", cmd->name);
 						olrddl->subtype = SUBTYPE_DROP_COLUMN;
 						ddlcol->name = pstrdup(cmd->name);
+
+						/*
+						 * OLR delivers the name in reverse letter casing. (all cap to all lower or all lower
+						 * to all cap), so for "as is" normalization strategy, we need to reverse it back to
+						 * get the original object name. If the name contains a mixture of upper and lower
+						 * case letters, it is delivered as is.
+						 */
+						if (synchdb_letter_casing_strategy == LCS_AS_IS)
+						{
+							if (isallupper(ddlcol->name))	/* need to normalize to lowercase */
+								fc_normalize_name(LCS_NORMALIZE_LOWERCASE, ddlcol->name, strlen(ddlcol->name));
+							else if (isalllower(ddlcol->name))
+								fc_normalize_name(LCS_NORMALIZE_UPPERCASE, ddlcol->name, strlen(ddlcol->name));
+							else
+								fc_normalize_name(LCS_AS_IS, ddlcol->name, strlen(ddlcol->name));
+						}
+						else
+							fc_normalize_name(synchdb_letter_casing_strategy, ddlcol->name, strlen(ddlcol->name));
 						break;
 					}
 					case AT_AlterColumnType:
@@ -859,12 +978,35 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 						/* column name */
 						elog(DEBUG1, "MODIFY COLUMN: %s", cmd->name);
 						ddlcol->name = pstrdup(cmd->name);
+
+						/*
+						 * OLR delivers the name in reverse letter casing. (all cap to all lower or all lower
+						 * to all cap), so for "as is" normalization strategy, we need to reverse it back to
+						 * get the original object name. If the name contains a mixture of upper and lower
+						 * case letters, it is delivered as is.
+						 */
+						if (synchdb_letter_casing_strategy == LCS_AS_IS)
+						{
+							if (isallupper(ddlcol->name))	/* need to normalize to lowercase */
+								fc_normalize_name(LCS_NORMALIZE_LOWERCASE, ddlcol->name, strlen(ddlcol->name));
+							else if (isalllower(ddlcol->name))
+								fc_normalize_name(LCS_NORMALIZE_UPPERCASE, ddlcol->name, strlen(ddlcol->name));
+							else
+								fc_normalize_name(LCS_AS_IS, ddlcol->name, strlen(ddlcol->name));
+						}
+						else
+							fc_normalize_name(synchdb_letter_casing_strategy, ddlcol->name, strlen(ddlcol->name));
+
 						olrddl->subtype = SUBTYPE_ALTER_COLUMN;
 
 						/* data type */
 						if (col->typeName && col->typeName->names)
 							elog(DEBUG1, "Type: %s", NameListToString(col->typeName->names));
+
 						ddlcol->typeName = pstrdup(NameListToString(col->typeName->names));
+
+						/* data type always normalized to lower case */
+						fc_normalize_name(LCS_NORMALIZE_LOWERCASE, ddlcol->typeName, strlen(ddlcol->typeName));
 
 						/* is optional? */
 						if (col->is_not_null)
@@ -951,6 +1093,24 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 								pklist.len = pklist.len - 1;
 								appendStringInfo(&pklist, "]");
 								olrddl->primaryKeyColumnNames = pstrdup(pklist.data);
+
+								/*
+								 * OLR delivers the name in reverse letter casing. (all cap to all lower or all lower
+								 * to all cap), so for "as is" normalization strategy, we need to reverse it back to
+								 * get the original object name. If the name contains a mixture of upper and lower
+								 * case letters, it is delivered as is.
+								 */
+								if (synchdb_letter_casing_strategy == LCS_AS_IS)
+								{
+									if (isallupper(olrddl->primaryKeyColumnNames))	/* need to normalize to lowercase */
+										fc_normalize_name(LCS_NORMALIZE_LOWERCASE, olrddl->primaryKeyColumnNames,strlen(olrddl->primaryKeyColumnNames));
+									else if (isalllower(olrddl->primaryKeyColumnNames))
+										fc_normalize_name(LCS_NORMALIZE_UPPERCASE, olrddl->primaryKeyColumnNames, strlen(olrddl->primaryKeyColumnNames));
+									else
+										fc_normalize_name(LCS_AS_IS, olrddl->primaryKeyColumnNames, strlen(olrddl->primaryKeyColumnNames));
+								}
+								else
+									fc_normalize_name(synchdb_letter_casing_strategy, olrddl->primaryKeyColumnNames, strlen(olrddl->primaryKeyColumnNames));
 							}
 						}
 						break;
@@ -985,6 +1145,25 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 								pklist.len = pklist.len - 1;
 								appendStringInfo(&pklist, "]");
 								olrddl->primaryKeyColumnNames = pstrdup(pklist.data);
+
+								/*
+								 * OLR delivers the name in reverse letter casing. (all cap to all lower or all lower
+								 * to all cap), so for "as is" normalization strategy, we need to reverse it back to
+								 * get the original object name. If the name contains a mixture of upper and lower
+								 * case letters, it is delivered as is.
+								 */
+								if (synchdb_letter_casing_strategy == LCS_AS_IS)
+								{
+									if (isallupper(olrddl->primaryKeyColumnNames))	/* need to normalize to lowercase */
+										fc_normalize_name(LCS_NORMALIZE_LOWERCASE, olrddl->primaryKeyColumnNames,strlen(olrddl->primaryKeyColumnNames));
+									else if (isalllower(olrddl->primaryKeyColumnNames))
+										fc_normalize_name(LCS_NORMALIZE_UPPERCASE, olrddl->primaryKeyColumnNames, strlen(olrddl->primaryKeyColumnNames));
+									else
+										fc_normalize_name(LCS_AS_IS, olrddl->primaryKeyColumnNames, strlen(olrddl->primaryKeyColumnNames));
+								}
+								else
+									fc_normalize_name(synchdb_letter_casing_strategy, olrddl->primaryKeyColumnNames, strlen(olrddl->primaryKeyColumnNames));
+
 							}
 						}
 						else
@@ -999,6 +1178,24 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 						{
 							elog(DEBUG1, "dropping constraint: %s", cmd->name);
 							olrddl->constraintName = pstrdup(cmd->name);
+
+							/*
+							 * OLR delivers the name in reverse letter casing. (all cap to all lower or all lower
+							 * to all cap), so for "as is" normalization strategy, we need to reverse it back to
+							 * get the original object name. If the name contains a mixture of upper and lower
+							 * case letters, it is delivered as is.
+							 */
+							if (synchdb_letter_casing_strategy == LCS_AS_IS)
+							{
+								if (isallupper(olrddl->constraintName))	/* need to normalize to lowercase */
+									fc_normalize_name(LCS_NORMALIZE_LOWERCASE, olrddl->constraintName, strlen(olrddl->constraintName));
+								else if (isalllower(olrddl->constraintName))
+									fc_normalize_name(LCS_NORMALIZE_UPPERCASE, olrddl->constraintName, strlen(olrddl->constraintName));
+								else
+									fc_normalize_name(LCS_AS_IS, olrddl->constraintName, strlen(olrddl->constraintName));
+							}
+							else
+								fc_normalize_name(synchdb_letter_casing_strategy, olrddl->constraintName, strlen(olrddl->constraintName));
 						}
 						olrddl->subtype = SUBTYPE_DROP_CONSTRAINT;
 						break;
@@ -1032,6 +1229,18 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 
 				if (ddlcol != NULL)
 					olrddl->columns = lappend(olrddl->columns, ddlcol);
+			}
+
+			/*
+			 * special checking on potential table name mismatch, always use the table name
+			 * from the parser
+			 */
+			if (strcmp(alterStmt->relation->relname, table))
+			{
+				elog(WARNING, "table name mismatch, using %s instead of %s",
+						alterStmt->relation->relname, table);
+				pfree(table);
+				table = pstrdup(alterStmt->relation->relname);
 			}
 		}
 		else if (IsA(stmt, DropStmt))
@@ -1117,13 +1326,42 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 		}
 	}
 
+	/*
+	 * special case for OLR oracle parser. The names that come out of oracle parser
+	 * will be reversed in letter casing if they are all upper or lower cases. If
+	 * there is a mixed case, the oracle parser will leave it as is:
+	 */
+	if (table)
+	{
+		/*
+		 * OLR delivers the name in reverse letter casing. (all cap to all lower or all lower
+		 * to all cap), so for "as is" normalization strategy, we need to reverse it back to
+		 * get the original object name. If the name contains a mixture of upper and lower
+		 * case letters, it is delivered as is.
+		 */
+		if (synchdb_letter_casing_strategy == LCS_AS_IS)
+		{
+			if (isallupper(table))	/* need to normalize to lowercase */
+				fc_normalize_name(LCS_NORMALIZE_LOWERCASE, table, strlen(table));
+			else if (isalllower(table))
+				fc_normalize_name(LCS_NORMALIZE_UPPERCASE, table, strlen(table));
+			else
+				fc_normalize_name(LCS_AS_IS, db, strlen(db));
+		}
+		else
+		{
+			fc_normalize_name(synchdb_letter_casing_strategy, table, strlen(table));
+		}
+	}
+
+	fc_normalize_name(synchdb_letter_casing_strategy, db, strlen(db));
+	fc_normalize_name(synchdb_letter_casing_strategy, schema, strlen(schema));
+
 	if (db && schema && table)
 		olrddl->id = psprintf("%s.%s.%s", db, schema, table);
 	else
 		olrddl->id = psprintf("%s.%s", db, table);
 
-	for (j = 0; j < strlen(olrddl->id); j++)
-		olrddl->id[j] = (char) pg_tolower((unsigned char) olrddl->id[j]);
 end:
 
 	return olrddl;
@@ -1149,7 +1387,7 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 	Oid schemaoid;
 	Relation rel;
 	TupleDesc tupdesc;
-	int attnum, j = 0;
+	int attnum;
 	DataCacheKey cachekey = {0};
 	DataCacheEntry * cacheentry;
 	Bitmapset * pkattrs;
@@ -1251,10 +1489,6 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 
 	appendStringInfo(&objid, "%s", table);
 
-	/* table name transformation and normalized objectid to lower case */
-	for (j = 0; j < objid.len; j++)
-		objid.data[j] = (char) pg_tolower((unsigned char) objid.data[j]);
-
 	olrdml->remoteObjectId = pstrdup(objid.data);
 	olrdml->mappedObjectId = transform_object_name(olrdml->remoteObjectId, "table");
 	if (olrdml->mappedObjectId)
@@ -1288,23 +1522,13 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 		olrdml->schema = pstrdup(db);
 		olrdml->table = pstrdup(table);
 
+		fc_normalize_name(synchdb_letter_casing_strategy, olrdml->schema, strlen(olrdml->schema));
+		fc_normalize_name(synchdb_letter_casing_strategy, olrdml->table, strlen(olrdml->table));
+
 		resetStringInfo(&strinfo);
 		appendStringInfo(&strinfo, "%s.%s", olrdml->schema, olrdml->table);
 		olrdml->mappedObjectId = pstrdup(strinfo.data);
 	}
-
-	/*
-	 * before parsing, we need to make sure the target namespace and table
-	 * do exist in PostgreSQL, and also fetch their attribute type IDs. PG
-	 * automatically converts upper case letters to lower when they are
-	 * created. However, catalog lookups are case sensitive so here we must
-	 * convert db and table to all lower case letters.
-	 */
-	for (j = 0; j < strlen(olrdml->schema); j++)
-		olrdml->schema[j] = (char) pg_tolower((unsigned char) olrdml->schema[j]);
-
-	for (j = 0; j < strlen(olrdml->table); j++)
-		olrdml->table[j] = (char) pg_tolower((unsigned char) olrdml->table[j]);
 
 	/* prepare cache key */
 	strlcpy(cachekey.schema, olrdml->schema, sizeof(cachekey.schema));
@@ -1321,7 +1545,7 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 	}
 	else
 	{
-		schemaoid = get_namespace_oid(olrdml->schema, false);
+		schemaoid = get_namespace_oid(olrdml->schema, true);
 		if (!OidIsValid(schemaoid))
 		{
 			char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
@@ -1331,8 +1555,15 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 			if (synchdb_log_event_on_error && g_eventStr != NULL)
 				elog(LOG, "%s", g_eventStr);
 
-			/* trigger pg's error shutdown routine */
-			elog(ERROR, "%s", msg);
+			/* act based on error strategy */
+			if (synchdb_error_strategy == STRAT_EXIT_ON_ERROR)
+				elog(ERROR, "%s", msg);
+			else
+			{
+				destroyOLRDML(olrdml);
+				olrdml = NULL;
+				goto end;
+			}
 		}
 
 		olrdml->tableoid = get_relname_relid(olrdml->table, schemaoid);
@@ -1345,8 +1576,15 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 			if (synchdb_log_event_on_error && g_eventStr != NULL)
 				elog(LOG, "%s", g_eventStr);
 
-			/* trigger pg's error shutdown routine */
-			elog(ERROR, "%s", msg);
+			/* act based on error strategy */
+			if (synchdb_error_strategy == STRAT_EXIT_ON_ERROR)
+				elog(ERROR, "%s", msg);
+			else
+			{
+				destroyOLRDML(olrdml);
+				olrdml = NULL;
+				goto end;
+			}
 		}
 
 		/* populate cached information */
@@ -1456,8 +1694,8 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 									int pathsize = strlen("after.") + strlen(key) + 1;
 									char * tmpPath = (char *) palloc0 (pathsize);
 									snprintf(tmpPath, pathsize, "after.%s", key);
-									getPathElementString(payload, tmpPath, &strinfo, false);
-									value = pstrdup(strinfo.data);
+									if (getPathElementString(payload, tmpPath, &strinfo, false) == 0)
+										value = pstrdup(strinfo.data);
 									if(tmpPath)
 										pfree(tmpPath);
 								}
@@ -1515,22 +1753,21 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 					if (key != NULL && value != NULL)
 					{
 						char * mappedColumnName = NULL;
+						char * colname_lower = NULL;
 						StringInfoData colNameObjId;
 
 						colval = (DBZ_DML_COLUMN_VALUE *) palloc0(sizeof(DBZ_DML_COLUMN_VALUE));
 						colval->name = pstrdup(key);
 
-						/* convert to lower case column name */
-						for (j = 0; j < strlen(colval->name); j++)
-							colval->name[j] = (char) pg_tolower((unsigned char) colval->name[j]);
-
-						colval->value = pstrdup(value);
 						/* a copy of original column name for expression rule lookup at later stage */
 						colval->remoteColumnName = pstrdup(colval->name);
 
+						fc_normalize_name(synchdb_letter_casing_strategy, colval->name, strlen(colval->name));
+						colval->value = pstrdup(value);
+
 						/* transform the column name if needed */
 						initStringInfo(&colNameObjId);
-						appendStringInfo(&colNameObjId, "%s.%s", objid.data, colval->name);
+						appendStringInfo(&colNameObjId, "%s.%s", objid.data, colval->remoteColumnName);
 						mappedColumnName = transform_object_name(colNameObjId.data, "column");
 						if (mappedColumnName)
 						{
@@ -1554,9 +1791,11 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 							colval->typname = pstrdup(entry->typname);
 						}
 						else
-							elog(ERROR, "cannot find data type for column %s. None-existent column?", colval->name);
+							elog(ERROR, "cannot find data type for column %s. Non-existent column?", colval->name);
 
-						entry2 = (NameJsonposEntry *) hash_search(namejsonposhash, colval->remoteColumnName, HASH_FIND, &found);
+						colname_lower = pstrdup(colval->remoteColumnName);
+						fc_normalize_name(LCS_NORMALIZE_LOWERCASE, colname_lower, strlen(colname_lower));
+						entry2 = (NameJsonposEntry *) hash_search(namejsonposhash, colname_lower, HASH_FIND, &found);
 						if (found)
 						{
 							colval->dbztype = entry2->dbztype;
@@ -1565,7 +1804,8 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 						}
 						else
 							elog(ERROR, "cannot find olr json column schema data for column %s(%s). invalid json event?",
-									colval->name, colval->remoteColumnName);
+									colval->name, colname_lower);
+						pfree(colname_lower);
 
 						olrdml->columnValuesAfter = lappend(olrdml->columnValuesAfter, colval);
 						pfree(key);
@@ -1624,8 +1864,8 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 											snprintf(tmpPath, pathsize, "before.%s", key);
 										else
 											snprintf(tmpPath, pathsize, "after.%s", key);
-										getPathElementString(payload, tmpPath, &strinfo, false);
-										value = pstrdup(strinfo.data);
+										if (getPathElementString(payload, tmpPath, &strinfo, false) == 0)
+											value = pstrdup(strinfo.data);
 										if(tmpPath)
 											pfree(tmpPath);
 									}
@@ -1683,22 +1923,21 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 						if (key != NULL && value != NULL)
 						{
 							char * mappedColumnName = NULL;
+							char * colname_lower = NULL;
 							StringInfoData colNameObjId;
 
 							colval = (DBZ_DML_COLUMN_VALUE *) palloc0(sizeof(DBZ_DML_COLUMN_VALUE));
 							colval->name = pstrdup(key);
 
-							/* convert to lower case column name */
-							for (j = 0; j < strlen(colval->name); j++)
-								colval->name[j] = (char) pg_tolower((unsigned char) colval->name[j]);
-
-							colval->value = pstrdup(value);
 							/* a copy of original column name for expression rule lookup at later stage */
 							colval->remoteColumnName = pstrdup(colval->name);
 
+							fc_normalize_name(synchdb_letter_casing_strategy, colval->name, strlen(colval->name));
+							colval->value = pstrdup(value);
+
 							/* transform the column name if needed */
 							initStringInfo(&colNameObjId);
-							appendStringInfo(&colNameObjId, "%s.%s", objid.data, colval->name);
+							appendStringInfo(&colNameObjId, "%s.%s", objid.data, colval->remoteColumnName);
 							mappedColumnName = transform_object_name(colNameObjId.data, "column");
 							if (mappedColumnName)
 							{
@@ -1722,9 +1961,11 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 								colval->typname = pstrdup(entry->typname);
 							}
 							else
-								elog(ERROR, "cannot find data type for column %s. None-existent column?", colval->name);
+								elog(ERROR, "cannot find data type for column %s. Non-existent column?", colval->name);
 
-							entry2 = (NameJsonposEntry *) hash_search(namejsonposhash, colval->remoteColumnName, HASH_FIND, &found);
+							colname_lower = pstrdup(colval->remoteColumnName);
+							fc_normalize_name(LCS_NORMALIZE_LOWERCASE, colname_lower, strlen(colname_lower));
+							entry2 = (NameJsonposEntry *) hash_search(namejsonposhash, colname_lower, HASH_FIND, &found);
 							if (found)
 							{
 								colval->dbztype = entry2->dbztype;
@@ -1733,7 +1974,8 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 							}
 							else
 								elog(ERROR, "cannot find olr json column schema data for column %s(%s). invalid json event?",
-										colval->name, colval->remoteColumnName);
+										colval->name, colname_lower);
+							pfree(colname_lower);
 
 							if (i == 0)
 								olrdml->columnValuesBefore = lappend(olrdml->columnValuesBefore, colval);
@@ -1786,8 +2028,8 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 									int pathsize = strlen("before.") + strlen(key) + 1;
 									char * tmpPath = (char *) palloc0 (pathsize);
 									snprintf(tmpPath, pathsize, "before.%s", key);
-									getPathElementString(payload, tmpPath, &strinfo, false);
-									value = pstrdup(strinfo.data);
+									if (getPathElementString(payload, tmpPath, &strinfo, false))
+										value = pstrdup(strinfo.data);
 									if(tmpPath)
 										pfree(tmpPath);
 								}
@@ -1845,22 +2087,21 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 					if (key != NULL && value != NULL)
 					{
 						char * mappedColumnName = NULL;
+						char * colname_lower = NULL;
 						StringInfoData colNameObjId;
 
 						colval = (DBZ_DML_COLUMN_VALUE *) palloc0(sizeof(DBZ_DML_COLUMN_VALUE));
 						colval->name = pstrdup(key);
 
-						/* convert to lower case column name */
-						for (j = 0; j < strlen(colval->name); j++)
-							colval->name[j] = (char) pg_tolower((unsigned char) colval->name[j]);
-
-						colval->value = pstrdup(value);
 						/* a copy of original column name for expression rule lookup at later stage */
 						colval->remoteColumnName = pstrdup(colval->name);
 
+						fc_normalize_name(synchdb_letter_casing_strategy, colval->name, strlen(colval->name));
+						colval->value = pstrdup(value);
+
 						/* transform the column name if needed */
 						initStringInfo(&colNameObjId);
-						appendStringInfo(&colNameObjId, "%s.%s", objid.data, colval->name);
+						appendStringInfo(&colNameObjId, "%s.%s", objid.data, colval->remoteColumnName);
 						mappedColumnName = transform_object_name(colNameObjId.data, "column");
 						if (mappedColumnName)
 						{
@@ -1884,9 +2125,11 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 							colval->typname = pstrdup(entry->typname);
 						}
 						else
-							elog(ERROR, "cannot find data type for column %s. None-existent column?", colval->name);
+							elog(ERROR, "cannot find data type for column %s. Non-existent column?", colval->name);
 
-						entry2 = (NameJsonposEntry *) hash_search(namejsonposhash, colval->remoteColumnName, HASH_FIND, &found);
+						colname_lower = pstrdup(colval->remoteColumnName);
+						fc_normalize_name(LCS_NORMALIZE_LOWERCASE, colname_lower, strlen(colname_lower));
+						entry2 = (NameJsonposEntry *) hash_search(namejsonposhash, colname_lower, HASH_FIND, &found);
 						if (found)
 						{
 							colval->dbztype = entry2->dbztype;
@@ -1896,6 +2139,7 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 						else
 							elog(ERROR, "cannot find olr json column schema data for column %s(%s). invalid json event?",
 									colval->name, colval->remoteColumnName);
+						pfree(colname_lower);
 
 						olrdml->columnValuesBefore = lappend(olrdml->columnValuesBefore, colval);
 						pfree(key);
@@ -2195,8 +2439,14 @@ fc_processOLRChangeEvent(void * event, SynchdbStatistics * myBatchStats,
 
 			oralib_path = psprintf("%s/%s", pkglib_path, ORACLE_RAW_PARSER_LIB);
 
-			/* Load the shared library */
-			handle = dlopen(oralib_path, RTLD_NOW | RTLD_GLOBAL);
+			/*
+			 * RTLD_LOCAL keeps the parser's internal ora_* symbols private to
+			 * the library so they do not collide with IvorySQL's built-in
+			 * Oracle parser (which exports the same names).  We only use the
+			 * uniquely named synchdb_oracle_raw_parser entry via dlsym(), which
+			 * works through the explicit handle regardless of LOCAL/GLOBAL.
+			 */
+			handle = dlopen(oralib_path, RTLD_NOW | RTLD_LOCAL);
 			if (!handle)
 			{
 				set_shm_connector_errmsg(myConnectorId, "failed to load oracle_parser.so");

@@ -35,6 +35,14 @@ function teardown_oracle()
 	#docker-compose -f testenv/oracle/synchdb-oracle-test.yaml down
 }
 
+function teardown_oracle23ai()
+{
+	CONTAINER_NAME="eztest_oracle23ai"
+	echo "tearing down ${CONTAINER_NAME}..."
+	docker stop ${CONTAINER_NAME} >/dev/null 2>&1
+	docker rm ${CONTAINER_NAME} >/dev/null 2>&1
+}
+
 function teardown_ora19c()
 {
 	echo "tearing down ora19c..."
@@ -83,6 +91,13 @@ function teardown_synchdbnet()
 	docker network rm synchdbnet >/dev/null 2>&1
 }
 
+function teardown_postgres()
+{
+	echo "tearing down postgres..."
+	docker stop postgres
+	docker rm postgres
+}
+
 function teardown_remotedb()
 {
 	dbtype="$1"
@@ -96,6 +111,9 @@ function teardown_remotedb()
 			;;
 		"oracle")
 			teardown_oracle
+			;;
+		"oracle23ai")
+			teardown_oracle23ai
 			;;
 		"ora19c")
 			teardown_ora19c
@@ -112,6 +130,9 @@ function teardown_remotedb()
 			;;
 		"oradata")
 			teardown_oradata
+			;;
+		"postgres")
+			teardown_postgres
 			;;
 		*)
 			echo "$dbtype not supported"

@@ -2,6 +2,7 @@ import os
 import subprocess
 import socket
 import time
+from datetime import datetime
 
 def get_container_ip(name: str, network: str = "synchdbnet") -> str | None:
     # Go template with the specific network:
@@ -27,6 +28,27 @@ def get_container_ip(name: str, network: str = "synchdbnet") -> str | None:
     ip = proc.stdout.strip()
     return ip or None # None if not attached to that network
 
+
+# Canonical test cluster data dir.  Shared by conftest's TargetInstance (which
+# runs initdb/pg_ctl here) and update_guc_conf() below (which appends GUCs to
+# its postgresql.conf), so the two never drift apart.
+TEST_DATA_DIR = os.path.join("synchdb_testdir", "data")
+
+
+def resolve_host(container: str, max_tries: int = 20) -> str:
+    """Resolve a container's synchdbnet IP lazily (NOT at import time).
+
+    Replaces the old module-level get_container_ip() calls that ran
+    `docker inspect` on every import regardless of which vendor was tested.
+    """
+    for _ in range(max_tries):
+        ip = get_container_ip(name=container)
+        if ip:
+            return ip
+        time.sleep(1)
+    raise RuntimeError(f"could not resolve IP for container '{container}'")
+
+
 MYSQL_HOST="127.0.0.1"
 MYSQL_PORT=3306
 MYSQL_USER="mysqluser"
@@ -38,32 +60,54 @@ SQLSERVER_PORT=1433
 SQLSERVER_USER="sa"
 SQLSERVER_PASS="Password!"
 SQLSERVER_DB="testDB"
+SQLSERVER_SCHEMA="dbo"
 
-ORACLE_HOST=get_container_ip(name="ora19c")
+ORACLE_HOST=None  # resolved lazily via resolve_host("ora19c")
 ORACLE_PORT=1521
 ORACLE_USER="DBZUSER"
 ORACLE_PASS="dbz"
 ORACLE_DB="FREE"
+ORACLE_SCHEMA="DBZUSER"
 
 # ora19c and olr are put to a dedicated docker network called synchdb to test
-# so we need to resolve their container UPs
-ORA19C_HOST=get_container_ip(name="ora19c")
+# so we need to resolve their container IPs (lazily, on first use)
+ORA19C_HOST=None
 ORA19C_PORT=1521
 ORA19C_USER="DBZUSER"
 ORA19C_PASS="dbz"
 ORA19C_DB="FREE"
+ORA19C_SCHEMA="DBZUSER"
 
-OLR_HOST=get_container_ip(name="OpenLogReplicator")
+ORACLE23AI_HOST=None  # resolved lazily via resolve_host("eztest_oracle23ai")
+ORACLE23AI_PORT=1521
+ORACLE23AI_USER="DBZUSER"
+ORACLE23AI_PASS="dbz"
+ORACLE23AI_DB="FREEPDB1"
+ORACLE23AI_SCHEMA="DBZUSER"
+ORACLE23AI_CDB="FREE"
+ORACLE23AI_COMMON_USER="c##dbzuser"
+ORACLE23AI_COMMON_PASS="dbz"
+
+OLR_HOST=None  # resolved lazily via resolve_host("OpenLogReplicator")
 OLR_PORT="7070"
 OLR_SERVICE="ORACLE"
+
+POSTGRES_HOST="127.0.0.1"
+POSTGRES_PORT=5432
+POSTGRES_USER="postgres"
+POSTGRES_PASS="pass"
+POSTGRES_DB="postgres"
+POSTGRES_SCHEMA="public"
 
 def getConnectorName(dbvendor):
     if dbvendor == "mysql":
         return "mysqlconn"
     elif dbvendor == "sqlserver":
         return "sqlserverconn"
-    elif dbvendor == "oracle":
+    elif dbvendor in ("oracle", "oracle23ai"):
         return "oracleconn"
+    elif dbvendor == "postgres":
+        return "postgresconn"
     else:
         return "olrconn"
 
@@ -74,6 +118,10 @@ def getDbname(dbvendor):
         return SQLSERVER_DB
     elif dbvendor == "oracle":
         return ORACLE_DB
+    elif dbvendor == "oracle23ai":
+        return ORACLE23AI_DB
+    elif dbvendor == "postgres":
+        return POSTGRES_DB
     else:
         return ORA19C_DB
 
@@ -82,19 +130,25 @@ def getSchema(dbvendor):
     if dbvendor == "mysql":
         return None
     elif dbvendor == "sqlserver":
-        return "dbo"
+        return SQLSERVER_SCHEMA
     elif dbvendor == "oracle":
-        return ORACLE_USER
+        return ORACLE_SCHEMA
+    elif dbvendor == "oracle23ai":
+        return ORACLE23AI_SCHEMA
+    elif dbvendor == "postgres":
+        return POSTGRES_SCHEMA
     else:
-        return ORA19C_USER
+        return ORA19C_SCHEMA
 
 def run_pg_query(cursor, query):
+    # print(f"[{datetime.now().strftime('%H:%M:%S')}][run_pg_query] {query}")  # Debug: print the query being executed
     cursor.execute(query)
     if cursor.description:  # Only fetch if query returns results
         return cursor.fetchall()
     return None
 
 def run_pg_query_one(cursor, query):
+    # print(f"[{datetime.now().strftime('%H:%M:%S')}][run_pg_query_one] {query}")  # Debug: print the query being executed
     cursor.execute(query)
     if cursor.description:
         return cursor.fetchone()
@@ -186,8 +240,12 @@ def run_remote_query(where, query, srcdb=None):
         "mysql": MYSQL_DB,
         "sqlserver": SQLSERVER_DB,
         "oracle": ORACLE_DB,
-        "olr": ORA19C_DB
+        "oracle23ai": ORACLE23AI_DB,
+        "olr": ORA19C_DB,
+        "postgres": POSTGRES_DB
     }[where]
+
+    # print(f"[{datetime.now().strftime('%H:%M:%S')}][run_remote_query] Running on {db}: {query}")  # Debug: print the query being executed
 
     try:
         if where == "mysql":
@@ -207,6 +265,12 @@ def run_remote_query(where, query, srcdb=None):
                     continue  # skip empty lines and metadata
                 cols = line.split("\t")
                 rows.append(tuple(cols))
+        elif where == "postgres":
+            result = subprocess.check_output(["docker", "exec", "-i", "postgres", "psql", "-U", f"{POSTGRES_USER}", "-d", f"{POSTGRES_DB}", "-tA", "-c", f"{query}"], text=True , env={"LC_ALL": "C"}).strip()
+            rows = []
+            for line in result.splitlines():
+                cols = line.split("|")
+                rows.append(tuple(cols))
         else:
             sql = f"""
             SET HEADING OFF;
@@ -220,18 +284,14 @@ def run_remote_query(where, query, srcdb=None):
             exit
             """
             if where == "oracle":
-                result = subprocess.check_output(["docker", "exec", "-i", "ora19c", "sqlplus", "-S", f"{ORACLE_USER}/{ORACLE_PASS}@//{ORACLE_HOST}:{ORACLE_PORT}/{db}"], input=sql, text=True).strip()
+                host = resolve_host("ora19c")
+                result = subprocess.check_output(["docker", "exec", "-i", "ora19c", "sqlplus", "-S", f"{ORACLE_USER}/{ORACLE_PASS}@//{host}:{ORACLE_PORT}/{db}"], input=sql, text=True).strip()
+            elif where == "oracle23ai":
+                host = resolve_host("eztest_oracle23ai")
+                result = subprocess.check_output(["docker", "exec", "-i", "eztest_oracle23ai", "sqlplus", "-S", f"{ORACLE23AI_USER}/{ORACLE23AI_PASS}@//{host}:{ORACLE23AI_PORT}/{db}"], input=sql, text=True).strip()
             else:
-                global ORA19C_HOST
-                max_tries = 20
-                tries = 0
-
-                while ORA19C_HOST is None and tries < max_tries:
-                    ORA19C_HOST = get_container_ip(name="ora19c")
-                    tries += 1
-                    time.sleep(1)
-
-                result = subprocess.check_output(["docker", "exec", "-i", "ora19c", "sqlplus", "-S", f"{ORA19C_USER}/{ORA19C_PASS}@//{ORA19C_HOST}:{ORA19C_PORT}/{db}"], input=sql, text=True).strip()
+                host = resolve_host("ora19c")
+                result = subprocess.check_output(["docker", "exec", "-i", "ora19c", "sqlplus", "-S", f"{ORA19C_USER}/{ORA19C_PASS}@//{host}:{ORA19C_PORT}/{db}"], input=sql, text=True).strip()
                 
             rows = []
             for line in result.splitlines():
@@ -251,52 +311,45 @@ def run_remote_query(where, query, srcdb=None):
     
     return rows
 
-def create_synchdb_connector(cursor, vendor, name, srcdb=None):
+def create_synchdb_connector(cursor, vendor, name, srcdb=None, srcschema=None):
     db = srcdb or {
         "mysql": MYSQL_DB,
         "sqlserver": SQLSERVER_DB,
         "oracle": ORACLE_DB,
-        "olr": ORA19C_DB
+        "oracle23ai": ORACLE23AI_DB,
+        "olr": ORA19C_DB,
+        "postgres": POSTGRES_DB
+    }[vendor]
+    
+    schema = srcschema or {
+        "mysql": "null",
+        "sqlserver": SQLSERVER_SCHEMA,
+        "oracle": ORACLE_SCHEMA,
+        "oracle23ai": ORACLE23AI_SCHEMA,
+        "olr": ORA19C_SCHEMA,
+        "postgres": POSTGRES_SCHEMA
     }[vendor]
 
     if vendor == "mysql":
-        result = run_pg_query_one(cursor, f"SELECT synchdb_add_conninfo('{name}','{MYSQL_HOST}', {MYSQL_PORT}, '{MYSQL_USER}', '{MYSQL_PASS}', '{db}', 'postgres', 'null', 'null', 'mysql');")
+        result = run_pg_query_one(cursor, f"SELECT synchdb_add_conninfo('{name}','{MYSQL_HOST}', {MYSQL_PORT}, '{MYSQL_USER}', '{MYSQL_PASS}', '{db}', '{schema}', 'null', 'null', 'mysql');")
 
     elif vendor == "sqlserver":
-        result = run_pg_query_one(cursor, f"SELECT synchdb_add_conninfo('{name}','{SQLSERVER_HOST}', {SQLSERVER_PORT}, '{SQLSERVER_USER}', '{SQLSERVER_PASS}', '{db}', 'postgres', 'null', 'null', 'sqlserver');")
+        result = run_pg_query_one(cursor, f"SELECT synchdb_add_conninfo('{name}','{SQLSERVER_HOST}', {SQLSERVER_PORT}, '{SQLSERVER_USER}', '{SQLSERVER_PASS}', '{db}', '{schema}', 'null', 'null', 'sqlserver');")
 
     elif vendor == "oracle":
-        global ORACLE_HOST
-        max_tries = 20
-        tries = 0
+        host = resolve_host("ora19c")
+        result = run_pg_query_one(cursor, f"SELECT synchdb_add_conninfo('{name}','{host}', {ORACLE_PORT}, '{ORACLE_USER}', '{ORACLE_PASS}', '{db}', '{schema}', 'null', 'null', 'oracle');")
+    elif vendor == "oracle23ai":
+        host = resolve_host("eztest_oracle23ai")
+        result = run_pg_query_one(cursor, f"SELECT synchdb_add_conninfo('{name}','{host}', {ORACLE23AI_PORT}, '{ORACLE23AI_COMMON_USER}', '{ORACLE23AI_COMMON_PASS}', '{ORACLE23AI_CDB}/{db}', '{schema}', 'null', 'null', 'oracle');")
+    elif vendor == "postgres":
+        result = run_pg_query_one(cursor, f"SELECT synchdb_add_conninfo('{name}','{POSTGRES_HOST}', {POSTGRES_PORT}, '{POSTGRES_USER}', '{POSTGRES_PASS}', '{db}', '{schema}', 'null', 'null', 'postgres');")
 
-        while ORACLE_HOST is None and tries < max_tries:
-            ORACLE_HOST = get_container_ip(name="ora19c")
-            tries += 1
-            time.sleep(1)
-
-        assert ORACLE_HOST != None
-        result = run_pg_query_one(cursor, f"SELECT synchdb_add_conninfo('{name}','{ORACLE_HOST}', {ORACLE_PORT}, '{ORACLE_USER}', '{ORACLE_PASS}', '{db}', 'postgres', 'null', 'null', 'oracle');")
     else:
-        global ORA19C_HOST
-        global OLR_HOST
-        max_tries = 20
-        tries = 0
-
-        while ORA19C_HOST is None and tries < max_tries:
-            ORA19C_HOST = get_container_ip(name="ora19c")
-            tries += 1
-            time.sleep(1)
-        
-        tries = 0
-        while OLR_HOST is None and tries < max_tries:
-            OLR_HOST = get_container_ip(name="OpenLogReplicator")
-            tries += 1
-            time.sleep(1)
-        
-        assert ORA19C_HOST != None and OLR_HOST != None
-        result = run_pg_query_one(cursor, f"SELECT synchdb_add_conninfo('{name}','{ORA19C_HOST}', {ORA19C_PORT}, '{ORA19C_USER}', '{ORA19C_PASS}', '{db}', 'postgres', 'null', 'null', 'olr');")
-        result = run_pg_query_one(cursor, f"SELECT synchdb_add_olr_conninfo('{name}','{OLR_HOST}', {OLR_PORT}, '{OLR_SERVICE}');")
+        ora_host = resolve_host("ora19c")
+        olr_host = resolve_host("OpenLogReplicator")
+        result = run_pg_query_one(cursor, f"SELECT synchdb_add_conninfo('{name}','{ora_host}', {ORA19C_PORT}, '{ORA19C_USER}', '{ORA19C_PASS}', '{db}', '{schema}', 'null', 'null', 'olr');")
+        result = run_pg_query_one(cursor, f"SELECT synchdb_add_olr_conninfo('{name}','{olr_host}', {OLR_PORT}, '{OLR_SERVICE}');")
 
     return result
 
@@ -313,15 +366,25 @@ def stop_and_delete_synchdb_connector(cursor, name):
 def drop_default_pg_schema(cursor, vendor):
     if vendor == "mysql":
         row = run_pg_query_one(cursor, f"DROP SCHEMA IF EXISTS inventory CASCADE")
+        row = run_pg_query_one(cursor, f"DROP SCHEMA IF EXISTS \"INVENTORY\" CASCADE")
     elif vendor == "sqlserver":
         row = run_pg_query_one(cursor, f"DROP SCHEMA IF EXISTS testdb CASCADE")
+        row = run_pg_query_one(cursor, f"DROP SCHEMA IF EXISTS \"TESTDB\" CASCADE")
+        row = run_pg_query_one(cursor, f"DROP SCHEMA IF EXISTS \"testDB\" CASCADE")
+    elif vendor == "postgres":
+        row = run_pg_query_one(cursor, f"DROP SCHEMA IF EXISTS postgres CASCADE")
+        row = run_pg_query_one(cursor, f"DROP SCHEMA IF EXISTS \"POSTGRES\" CASCADE")
+    elif vendor == "oracle23ai":
+        row = run_pg_query_one(cursor, f"DROP SCHEMA IF EXISTS freepdb1 CASCADE")
+        row = run_pg_query_one(cursor, f"DROP SCHEMA IF EXISTS \"FREEPDB1\" CASCADE")
     else:
         row = run_pg_query_one(cursor, f"DROP SCHEMA IF EXISTS free CASCADE")
+        row = run_pg_query_one(cursor, f"DROP SCHEMA IF EXISTS \"FREE\" CASCADE")
 
 def update_guc_conf(cursor, key, val, reload_conf=False):
-    temp_dir = "synchdb_testdir"
-    data_dir = os.path.join(temp_dir, "data")
-    conf_file = os.path.join(data_dir, "postgresql.conf")
+    # TEST_DATA_DIR is the same dir conftest's TargetInstance ran initdb in,
+    # so this appends to the live cluster's postgresql.conf.
+    conf_file = os.path.join(TEST_DATA_DIR, "postgresql.conf")
 
     # Append parameter
     with open(conf_file, "a") as f:
@@ -331,3 +394,38 @@ def update_guc_conf(cursor, key, val, reload_conf=False):
     if reload_conf:
         cursor.execute("SELECT pg_reload_conf()")
 
+def drop_repslot_and_pub(dbvendor, name, dstdb):
+    if dbvendor != "postgres":
+        return
+
+    run_remote_query(dbvendor, f"SELECT pg_drop_replication_slot('{name}_{dstdb}_synchdb_slot')")
+    run_remote_query(dbvendor, f"DROP PUBLICATION IF EXISTS {name}_{dstdb}_synchdb_pub")
+
+
+def restart_remote_db(dbvendor, wait_time=30):
+    """
+    TODO: Upgrade Debezium, and remove this workaround.
+    BUG WORKAROUND: Restart the remote database container.
+
+    Restart the remote database container.
+    This is mainly used for oracle23ai, because it seems
+    to have some stability issue after running for a while,
+    and restart can help recover it.
+    """
+    if dbvendor == "mysql":
+        subprocess.run(["docker", "restart", "mysql"], check=True)
+    elif dbvendor == "sqlserver":
+        subprocess.run(["docker", "restart", "sqlserver"], check=True)
+    elif dbvendor == "oracle":
+        subprocess.run(["docker", "restart", "ora19c"], check=True)
+    elif dbvendor == "oracle23ai":
+        subprocess.run(["docker", "restart", "eztest_oracle23ai"], check=True)
+    elif dbvendor == "olr":
+        subprocess.run(["docker", "restart", "OpenLogReplicator"], check=True)
+    else:
+        print(f"restart not supported for {dbvendor}")
+        return
+
+    if wait_time > 0:
+        print(f"waiting {wait_time} seconds for {dbvendor} to restart...")
+        time.sleep(wait_time)

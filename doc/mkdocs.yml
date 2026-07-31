@@ -1,0 +1,224 @@
+site_name: SynchDB Documentation
+repo_url: https://github.com/hornetlabs/synchdb
+site_url: https://docs.synchdb.com/
+edit_uri: https://github.com/hornetlabs/synchdb
+site_description: SynchDB is a PostgreSQL extension for synchronizing data from different database sources..
+site_author: Hornetlabs Technology Inc.
+copyright: Copyright &copy; 2024 Maintained by <a href="https://github.com/hornetlabs">Hornetlabs Technology </a>. <a href="https://www.netlify.com/"><img src="https://www.netlify.com/img/global/badges/netlify-color-accent.svg" alt="Deployed by Netlify" width="114" height="51"></a>
+
+theme:
+  name: material
+  language: en
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.tabs.link
+    - content.code.annotation
+    - content.code.copy
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+plugins:
+  - search
+  - i18n:
+      docs_structure: folder
+      languages:
+        - locale: en
+          default: true
+          name: English
+          build: true
+        - locale: es
+          name: Español
+          site_name: Documentación de SynchDB
+          build: true
+          nav_translations:
+            User guide: Guía del usuario
+            Home: Inicio
+            Architecture: Arquitectura
+            Architecture Overview: Descripción general de la arquitectura
+            SynchDB Components: Arquitectura de componentes de SynchDB
+            Debezium Runner Components: Arquitectura de componentes de Debezium Runner
+            Non-Native Data Type Processing: Procesamiento de tipos de datos no nativos
+            Native Data Type Processing: Procesamiento de tipos de datos nativos
+            Overview: Visión General
+            Batch Processing: Manejo de Cambios por Lotes
+            Debezium Metadata Files: Debezium Archivos de Metadatos
+            User guide: Guía del usuario
+            Source Database Setup: configuración de base de datos remota
+            Installation: Instalación
+            Prepare Sample Databases: Preparar Bases de Datos de Ejemplo
+            Quick Start: Inicio Rápido
+            SynchDB Configuration: SynchDB Configuración
+            Default Data Type Mapping: Mapeo de Tipos de Datos Predeterminado
+            Object Transformation: Personalizar la asignación y transformación de objetos
+            Automatic Connector Launcher: Lanzador Automático de Conectores
+            DDL Replication: Replicación DDL
+            Set Offset: Establecer Desplazamiento
+            Utility Functions: Funciones de Utilidad
+            Changelog: Registro de Cambios
+            Error Strategies: estrategias de error
+            Create a Connector: Crear un conector
+            Statistic View: Vista de estadísticas
+            State View: Vista de estado
+            Start/Stop a Connector: Iniciar/Detener un conector
+            Object Mapping Workflow: Flujo de trabajo de mapeo de objetos
+            MySQL Connector: Conector MySQL
+            SQL Server Connector: Conector SQL Server
+            Oracle Connector: Conector Oracle
+            Postgres Connector: Conector Postgres
+            JMX Monitor Settings: Configuración del monitor JMX
+            JVM Memory Usage: Uso de memoria de JVM
+            Attribute View: Vista de atributos
+            JMX Exporter Settings: Configuración del exportador JMX
+            Openlog Replicator Event Processor: Procesador de eventos del replicador Openlog
+            Getting Started: Empezando
+            Monitoring: escucha
+            Tutorial: Tutorial
+            Snapshot Engine: Configurar el motor de instantáneas
+            FDW Based Snapshot: Instantánea basada en FDW
+            Letter Casing Strategy: Estrategia de mayúsculas y minúsculas
+            Native Openlog Replicator Connector: Conector nativo de replicador Openlog
+        - locale: zh
+          name: 中文
+          site_name: SynchDB 文档
+          build: true
+          nav_translations:
+            User guide: 用户指南
+            Architecture: 架构
+            Architecture Overview: 架构概述
+            SynchDB Components: SynchDB组件架构
+            Debezium Runner Components: Debezium Runner组件架构
+            Non-Native Data Type Processing: 非原生数据类型处理
+            Native Data Type Processing: 原生数据类型处理
+            Home: 主页
+            Overview: 概述
+            Batch Processing: 批量处理
+            Debezium Metadata Files: Debezium 元数据文件
+            User guide: 用户指南
+            Installation: 安装
+            Source Database Setup: 源数据库设置
+            Prepare Sample Databases: 准备示例数据库
+            Quick Start: 快速入门
+            SynchDB Configuration: SynchDB 配置
+            Default Data Type Mapping: 默认数据类型映射
+            Object Transformation: 对象映射和转换
+            Automatic Connector Launcher: 连接器自动启动器
+            DDL Replication: DDL复制
+            Set Offset: 设置偏移量
+            Utility Functions: 实用函数
+            Changelog: 变更日志
+            Error Strategies: 错误处理策略
+            Create a Connector: 创建连接器
+            Statistic View: 统计视图
+            State View: 状态视图
+            Start/Stop a Connector: 启动/停止连接器
+            Object Mapping Workflow: 对象映射工作流程
+            MySQL Connector: MySQL 連接器
+            SQL Server Connector: SQL Server 連接器
+            Oracle Connector: Oracle 連接器
+            Postgres Connector: Postgres 連接器
+            JMX Monitor Settings: JMX 监视器设置
+            JVM Memory Usage: JVM 内存使用情况
+            Attribute View: 属性视图
+            JMX Exporter Settings: JMX exporter 设置
+            Openlog Replicator Event Processor: Openlog Replicator 事件处理器
+            Debezium Event Processor: Debezium 事件处理器
+            Getting Started: 快速入门
+            Monitoring: 监控
+            Tutorial: 教程
+            Snapshot Engine: 配置快照引擎
+            FDW Based Snapshot: 基於FDW的快照
+            Letter Casing Strategy: 字母大小寫規則
+            Native Openlog Replicator Connector: 原生 Openlog Replicator 连接器
+  - mike:
+      version_selector: true
+      css_dir: css
+      javascript_dir: js
+      canonical_version: latest
+  - awesome-pages
+  - print-site
+
+extra:
+  version:
+    provider: mike
+
+nav:
+ - Home: index.md
+ - Architecture:
+   - Architecture Overview: architecture/architecture.md
+   - Debezium Event Processor: architecture/debezium_event_processor.md
+   - Debezium Runner Components: architecture/debezium_runner_components.md
+   - Openlog Replicator Event Processor: architecture/openlog_replicator_event_processor.md
+   - Batch Processing: architecture/batch_change_handling.md
+   - Non-Native Data Type Processing: architecture/non_native_datatype_handling.md
+   - Native Data Type Processing: architecture/native_datatype_handling.md
+   - Debezium Metadata Files: architecture/metadata_files.md
+   - DDL Replication: architecture/ddl_replication.md
+   - FDW Based Snapshot: architecture/fdw_based_snapshot.md
+ - Getting Started:
+   - Installation: getting-started/installation.md
+   - Source Database Setup: getting-started/remote_database_setups.md   
+   - SynchDB Configuration: getting-started/configuration.md     
+   - Quick Start: getting-started/quick_start.md
+ - Monitoring:
+   - Statistic View: monitoring/stats_view.md
+   - State View: monitoring/state_view.md
+   - Attribute View: monitoring/attr_view.md
+   - JVM Memory Usage: monitoring/jvm_mem.md
+   - JMX Monitor Settings: monitoring/jmx_monitor.md
+   - JMX Exporter Settings: monitoring/jmx_exporter.md
+ - Tutorial:
+   - MySQL Connector: tutorial/mysql_cdc_to_postgresql.md
+   - SQL Server Connector: tutorial/sqlserver_cdc_to_postgresql.md
+   - Oracle Connector: tutorial/oracle_cdc_to_postgresql.md
+   - Postgres Connector: tutorial/postgresql_cdc_to_postgresql.md
+   - Native Openlog Replicator Connector: tutorial/native_olr_cdc_to_postgresql.md
+ - User guide:
+   - Create a Connector: user-guide/create_a_connector.md
+   - Start/Stop a Connector: user-guide/start_stop_connector.md
+   - Automatic Connector Launcher: user-guide/connector_auto_launcher.md  
+   - Default Data Type Mapping: user-guide/default_datatype_mapping.md
+   - Object Transformation: user-guide/object_mapping_rules.md
+   - Letter Casing Strategy: user-guide/letter_casing_strategy.md
+   - Error Strategies: user-guide/configure_error_strategies.md
+   - Snapshot Engine: user-guide/configure_snapshot_engine.md
+ - Changelog: changelog.md
+ # - Homepage: https://www.synchdb.com
+
+markdown_extensions:
+  - admonition
+  - codehilite
+  - footnotes
+  - attr_list
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - toc:
+      permalink: true
+  - pymdownx.arithmatex
+  - pymdownx.betterem
+  - pymdownx.caret
+  - pymdownx.critic
+  - pymdownx.details
+  - pymdownx.emoji
+  - pymdownx.inlinehilite
+  - pymdownx.magiclink
+  - pymdownx.mark
+  - pymdownx.smartsymbols
+  - pymdownx.superfences
+  - pymdownx.tasklist
+  - pymdownx.tilde

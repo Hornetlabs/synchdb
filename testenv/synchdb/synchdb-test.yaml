@@ -6,7 +6,7 @@
 services:
   synchdb:
     container_name: synchdb
-    image: hgneon/synchdbtest:pg17
+    image: hgneon/synchdbtest:pg18
     networks:
       - synchdbnet
 

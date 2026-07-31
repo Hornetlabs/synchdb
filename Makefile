@@ -138,44 +138,69 @@ install_oracle_parser:
 	@echo "installing against pgmajor ${PG_MAJOR}"
 	make install -C src/backend/olr/oracle_parser${PG_MAJOR}
 
-.PHONY: dbcheck mysqlcheck sqlservercheck oraclecheck dbcheck-tpcc mysqlcheck-tpcc sqlservercheck-tpcc oraclecheck-tpcc
+# SOURCE: source DB key  (mysql, sqlserver, oracle, oracle23ai, olr, postgres)
+# TARGET: target DB key  (pg16/pg17/pg18/ivorysql4/ivorysql5; inferred if empty)
+# TARGET_BIN: bin dir of the target's initdb/pg_ctl (else $SYNCHDB_TARGET_BIN, else PATH)
+# DB: legacy alias for SOURCE
+SOURCE ?= $(DB)
+TARGET ?=
+TARGET_BIN ?=
+
+_PYTEST_SEL = $(if $(SOURCE),--source=$(SOURCE)) $(if $(TARGET),--target=$(TARGET)) $(if $(TARGET_BIN),--target-bin=$(TARGET_BIN))
+
+.PHONY: dbcheck dbcheck-tpcc mysqlcheck sqlservercheck oraclecheck oracle23aicheck olrcheck postgrescheck \
+        mysqlcheck-benchmark sqlservercheck-benchmark oraclecheck-benchmark olrcheck-benchmark
 dbcheck:
 	@command -v pytest >/dev/null 2>&1 || { echo >&2 "❌ pytest not found in PATH."; exit 1; }
 	@command -v docker >/dev/null 2>&1 || { echo >&2 "❌ docker not found in PATH."; exit 1; }
 	@command -v docker-compose >/dev/null 2>&1 || command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1 || { echo >&2 "❌ docker-compose not found in PATH"; exit 1; }
-	@echo "Running tests against dbvendor=$(DB)"
-	PYTHONPATH=./src/test/pytests/synchdbtests/ pytest -x -v -s --dbvendor=$(DB) --capture=tee-sys ./src/test/pytests/synchdbtests/
+	@echo "Running tests: source=$(SOURCE) target=$(TARGET)"
+	PYTHONPATH=./src/test/pytests/synchdbtests/ pytest -x -v -s $(_PYTEST_SEL) --capture=tee-sys ./src/test/pytests/synchdbtests/
 	rm -r .pytest_cache ./src/test/pytests/synchdbtests/__pycache__ ./src/test/pytests/synchdbtests/t/__pycache__
 
 dbcheck-tpcc:
 	@command -v pytest >/dev/null 2>&1 || { echo >&2 "❌ pytest not found in PATH."; exit 1; }
 	@command -v docker >/dev/null 2>&1 || { echo >&2 "❌ docker not found in PATH."; exit 1; }
 	@command -v docker-compose >/dev/null 2>&1 || command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1 || { echo >&2 "❌ docker-compose not found in PATH"; exit 1; }
-	@echo "Running hammerdb based tpcc tests against dbvendor=$(DB)"
-	PYTHONPATH=./src/test/pytests/synchdbtests/ pytest -x -v -s --dbvendor=$(DB) --tpccmode=serial --capture=tee-sys ./src/test/pytests/hammerdb/
+	@echo "Running hammerdb based tpcc tests: source=$(SOURCE) target=$(TARGET)"
+	PYTHONPATH=./src/test/pytests/synchdbtests/ pytest -x -v -s $(_PYTEST_SEL) --tpccmode=serial --capture=tee-sys ./src/test/pytests/hammerdb/
 	rm -r .pytest_cache ./src/test/pytests/hammerdb/__pycache__
 
+# convenience targets (source only; pass TARGET=... to override the target,
+# e.g. make oraclecheck TARGET=ivorysql4 TARGET_BIN=/path/to/ivorysql/bin)
 mysqlcheck:
-	$(MAKE) dbcheck DB=mysql
+	$(MAKE) dbcheck SOURCE=mysql
 
 sqlservercheck:
-	$(MAKE) dbcheck DB=sqlserver
+	$(MAKE) dbcheck SOURCE=sqlserver
 
 oraclecheck:
-	$(MAKE) dbcheck DB=oracle
+	$(MAKE) dbcheck SOURCE=oracle
+
+oracle23aicheck:
+	$(MAKE) dbcheck SOURCE=oracle23ai
 
 olrcheck:
-	$(MAKE) dbcheck DB=olr
+	$(MAKE) dbcheck SOURCE=olr
+
+postgrescheck:
+	$(MAKE) dbcheck SOURCE=postgres
 
 mysqlcheck-benchmark:
-	$(MAKE) dbcheck-tpcc DB=mysql
+	$(MAKE) dbcheck-tpcc SOURCE=mysql
 
 sqlservercheck-benchmark:
-	$(MAKE) dbcheck-tpcc DB=sqlserver
+	$(MAKE) dbcheck-tpcc SOURCE=sqlserver
 
 oraclecheck-benchmark:
-	$(MAKE) dbcheck-tpcc DB=oracle
+	$(MAKE) dbcheck-tpcc SOURCE=oracle
 
 olrcheck-benchmark:
-	$(MAKE) dbcheck-tpcc DB=olr
+	$(MAKE) dbcheck-tpcc SOURCE=olr
 
+.PHONY: clean_bc
+clean_bc:
+	rm -rf $(patsubst %.o,%.bc, $(OBJS))
+
+# TODO: Always need to set WITH_OLR ... 
+clean: clean_bc clean_dbz clean_oracle_parser

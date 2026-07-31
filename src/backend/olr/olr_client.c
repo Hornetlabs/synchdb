@@ -113,6 +113,7 @@ olr_client_start_or_cont_replication(char * source, bool which)
 		if (response)
 		{
 			retcode = response->code;
+			open_log_replicator__pb__redo_response__free_unpacked(response, NULL);
 			return retcode;
 		}
 		else
