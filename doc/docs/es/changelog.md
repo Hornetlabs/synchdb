@@ -10,18 +10,18 @@ SynchDB 1.4 extiende el soporte de Bases de Datos en Contenedor de Oracle (CDB/P
 
 ### **Añadido**
 
-#### [Soporte de Bases de Datos en Contenedor de Oracle (CDB/PDB)]((https://docs.synchdb.com/user-guide/create_a_connector/#create-a-connector_1))
+#### [Soporte de Bases de Datos en Contenedor de Oracle (CDB/PDB)](../user-guide/create_a_connector/)
 
 * El conector de Oracle basado en Debezium ahora acepta un nombre de base de datos con formato `CDB/PDB` y lo asigna automáticamente a las propiedades `database.dbname` y `database.pdb.name` de Debezium.
 * La ruta de instantánea basada en FDW mediante [oracle_fdw](https://github.com/laurenz/oracle_fdw) ahora soporta la arquitectura de Bases de Datos en Contenedor de Oracle.
 * Se añadió cobertura de pruebas dedicada para CDB/PDB contra Oracle 23ai (Free PDB1).
 
-#### [TLS / Conexiones Seguras](https://docs.synchdb.com/user-guide/configure_snapshot_engine/#synchdb_add_fdw_conninfo)
+#### [TLS / Conexiones Seguras](../user-guide/configure_snapshot_engine/)
 
 * Se añadió soporte de conexión TLS para los conectores de MySQL y PostgreSQL mediante parámetros adicionales de conninfo.
 * Los conectores de Oracle y OLR ahora usan Oracle Wallet para conexiones seguras en lugar de parámetros TLS estándar.
 
-#### [Nivel de Registro de Debezium Ajustable en Tiempo de Ejecución](https://docs.synchdb.com/getting-started/configuration/#synchdb-configuration)
+#### [Nivel de Registro de Debezium Ajustable en Tiempo de Ejecución](../getting-started/configuration/)
 
 * El nivel de registro del runner de Debezium ahora puede cambiarse mientras un conector está en ejecución, sin necesidad de reiniciarlo. ([#106](https://github.com/Hornetlabs/synchdb/issues/106))
 
