@@ -4,7 +4,7 @@
 本文格式基于 [Keep a Changelog](http://keepachangelog.com/)，
 且本项目遵循 [语义化版本](http://semver.org/)。
 
-## **[SynchDB 1.4](https://github.com/Hornetlabs/synchdb/releases/tag/v1.4) - 待发布**
+## **[SynchDB 1.4](https://github.com/Hornetlabs/synchdb/releases/tag/v1.4) - 2026-08-04**
 
 SynchDB 1.4 将 Oracle 容器数据库（CDB/PDB）支持扩展到了 Debezium、oracle_fdw 与 OLR 三条执行路径；为 MySQL 和 PostgreSQL 连接器新增了 TLS 安全连接支持（Oracle/OLR 连接器则使用 Oracle Wallet）；并支持在连接器运行期间动态调整 Debezium 运行器的日志级别，无需重启。此版本还包含一轮稳定性修复（JNI 引用泄漏、format converter 中的二次释放问题、IvorySQL 下的符号冲突），并将 CI 构建与测试矩阵扩展到以 IvorySQL 作为宿主平台。
 

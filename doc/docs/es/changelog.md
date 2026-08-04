@@ -4,7 +4,7 @@ Todos los cambios notables de este proyecto serán documentados en este archivo.
 El formato está basado en [Keep a Changelog](http://keepachangelog.com/)
 y este proyecto se adhiere a [Versionado Semántico](http://semver.org/).
 
-## **[SynchDB 1.4](https://github.com/Hornetlabs/synchdb/releases/tag/v1.4) - No publicado**
+## **[SynchDB 1.4](https://github.com/Hornetlabs/synchdb/releases/tag/v1.4) - 2026-08-04**
 
 SynchDB 1.4 extiende el soporte de Bases de Datos en Contenedor de Oracle (CDB/PDB) a las rutas de ejecución de Debezium, oracle_fdw y OLR; añade conexiones seguras mediante TLS para los conectores de MySQL y PostgreSQL (con soporte de Oracle Wallet para Oracle/OLR); y permite ajustar el nivel de registro (log level) del runner de Debezium en tiempo de ejecución, sin necesidad de reiniciar. Esta versión también incluye una ronda de correcciones de estabilidad (fugas de referencias JNI, una doble liberación de memoria en el conversor de formato, un conflicto de símbolos bajo IvorySQL) y amplía la cobertura de CI para compilar y probar contra IvorySQL como plataforma anfitriona.
 
