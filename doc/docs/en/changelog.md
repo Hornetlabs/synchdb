@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](http://keepachangelog.com/)
 and this project adheres to [Semantic Versioning](http://semver.org/).
 
-## **[SynchDB 1.4](https://github.com/Hornetlabs/synchdb/releases/tag/v1.4) - Unreleased**
+## **[SynchDB 1.4](https://github.com/Hornetlabs/synchdb/releases/tag/v1.4) - 2026-08-04**
 
 SynchDB 1.4 extends Oracle Container Database (CDB/PDB) support across the Debezium, oracle_fdw and OLR execution paths, adds TLS-secured connections for the MySQL and PostgreSQL connectors (with Oracle Wallet support for Oracle/OLR), and allows the Debezium runner's log level to be changed at runtime without a restart. This release also includes a round of stability fixes (JNI reference leaks, a double-free in the format converter, a symbol collision under IvorySQL) and broadens CI coverage to build and test against IvorySQL as the host platform.
 
