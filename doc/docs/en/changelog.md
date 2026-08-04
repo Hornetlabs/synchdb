@@ -10,18 +10,18 @@ SynchDB 1.4 extends Oracle Container Database (CDB/PDB) support across the Debez
 
 ### **Added**
 
-#### [Oracle Container Database (CDB/PDB) Support](../user-guide/create_a_connector.md)
+#### [Oracle Container Database (CDB/PDB) Support](../user-guide/create_a_connector/)
 
 * The Debezium-based Oracle connector now accepts a `CDB/PDB` formatted database name and automatically maps it to Debezium's `database.dbname` and `database.pdb.name` properties.
 * [oracle_fdw](https://github.com/laurenz/oracle_fdw) based FDW snapshot path now supports Oracle Container Database architecture.
 * Added dedicated CDB/PDB test coverage against Oracle 23ai (Free PDB1).
 
-#### [TLS / Secure Connections](../user-guide/configure_snapshot_engine.md)
+#### [TLS / Secure Connections](../user-guide/configure_snapshot_engine/)
 
 * Added TLS connection support for MySQL and PostgreSQL connectors via extra conninfo parameters.
 * Oracle and OLR connectors now use Oracle Wallet for secure connections instead of standard TLS parameters.
 
-#### [Runtime-Adjustable Debezium Log Level](../getting-started/configuration.md)
+#### [Runtime-Adjustable Debezium Log Level](../getting-started/configuration/)
 
 * The Debezium runner's log level can now be changed while a connector is running, without requiring a restart. ([#106](https://github.com/Hornetlabs/synchdb/issues/106))
 
