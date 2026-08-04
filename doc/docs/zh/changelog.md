@@ -10,18 +10,18 @@ SynchDB 1.4 将 Oracle 容器数据库（CDB/PDB）支持扩展到了 Debezium�
 
 ### **新增**
 
-#### Oracle 容器数据库（CDB/PDB）支持
+#### [Oracle 容器数据库（CDB/PDB）支持](https://docs.synchdb.com/user-guide/create_a_connector/#create-a-connector_1)
 
 * 基于 Debezium 的 Oracle 连接器现在可以接受 `CDB/PDB` 格式的数据库名，并自动映射为 Debezium 的 `database.dbname` 与 `database.pdb.name` 属性。
 * 基于 [oracle_fdw](https://github.com/laurenz/oracle_fdw) 的 FDW 快照路径现已支持 Oracle 容器数据库架构。
 * 新增了针对 Oracle 23ai（Free PDB1）的 CDB/PDB 专项测试覆盖。
 
-#### TLS / 安全连接
+#### [TLS / 安全连接](https://docs.synchdb.com/user-guide/configure_snapshot_engine/#synchdb_add_fdw_conninfo)
 
 * 通过 extra conninfo 参数为 MySQL 和 PostgreSQL 连接器新增了 TLS 连接支持。
 * Oracle 与 OLR 连接器改为使用 Oracle Wallet 实现安全连接，而非标准 TLS 参数。
 
-#### 运行时动态调整 Debezium 日志级别
+#### [运行时动态调整 Debezium 日志级别](https://docs.synchdb.com/getting-started/configuration/#synchdb-configuration)
 
 * 现在可以在连接器运行期间调整 Debezium 运行器的日志级别，无需重启连接器。（[#106](https://github.com/Hornetlabs/synchdb/issues/106)）
 
