@@ -94,6 +94,8 @@ sudo make install PG_CONFIG=/usr/local/pgsql/bin/pg_config
 
 oracle_fdw 已準備就緒。正常啟動連接器，並將 synchdb.olr_snapshot_engine 設定為 'fdw'。如果需要快照，SynchDB 將透過 FDW 完成。您無需在使用基於 FDW 的初始快照之前執行 `CREATE EXTENSION oracle_fdw`，也無需執行 `CREATE SERVER` 或 `CREATE USER MAPPING`。 SynchDB 在執行快照時會自動處理所有這些操作。
 
+<**注意**> 若目標為 Oracle 容器資料庫（CDB/PDB），在 `synchdb_add_conninfo()` 建立連接器時，將來源資料庫（srcdb）指定為 `CDB/PDB` 格式（例如 `FREE/FREEPDB1`）即可，SynchDB 會自動連線到對應的 PDB 服務。
+
 ## **MySQL 連接器的 FDW 快照**
 
 可以使用 mysql_fdw 為 MySQL 連接器執行初始快照，其速度遠遠超過 Debezium 的同類工具。 SynchDB 整合了 [mysql_fdw](https://github.com/EnterpriseDB/mysql_fdw) 2.9.3 版本，並以 libmysqlclient v8 作為其底層驅動程式。這只是經過測試的版本，更舊或更新的版本可能也適用。
@@ -145,3 +147,46 @@ sudo make install
 ```
 
 postgres_fdw 已準備就緒。正常啟動連接器，並將 synchdb.olr_snapshot_engine 設定為 'fdw'。如果需要快照，SynchDB 將透過 FDW 完成。您無需在使用基於 FDW 的初始快照之前執行 `CREATE EXTENSION postgres_fdw`，也無需執行 `CREATE SERVER` 或 `CREATE USER MAPPING`。 SynchDB 在執行快照時會自動處理所有這些操作。
+
+## **FDW 快照的 TLS 安全連接**
+
+基於 FDW 的快照在連線遠端資料庫時，可以依連接器類型設定 TLS（MySQL、Postgres）或 Oracle Wallet（Oracle、OLR）以確保連線安全。這與 [`synchdb_add_extra_conninfo()`](../../tutorial/mysql_cdc_to_postgresql/#synchdb_add_extra_conninfo) 為 Debezium JDBC 連線設定的 Java Keystore/Truststore 是相互獨立的兩套機制。
+
+### **synchdb_add_fdw_conninfo**
+
+用途：為指定連接器設定 FDW 連線所需的 TLS 憑證檔案路徑（客戶端憑證、私鑰、CA/根憑證）以及可選的加密套件清單。
+
+```sql
+SELECT synchdb_add_fdw_conninfo(name, ssl_cert, ssl_key, ssl_rootcert, ssl_cipher);
+```
+
+| 參數 | 說明 |
+|-|-|
+| `ssl_cert` | 客戶端憑證檔案路徑（PEM 格式）。不需要時可留空字串 `''` |
+| `ssl_key` | 客戶端私鑰檔案路徑（PEM 格式）。不需要時可留空字串 `''` |
+| `ssl_rootcert` | CA / 根憑證檔案路徑（PEM 格式）。**對 Oracle 和 OLR 連接器而言，此參數改為 Oracle Wallet 所在的目錄路徑**。不需要時可留空字串 `''` |
+| `ssl_cipher` | 加密套件清單（僅 mysql_fdw 支援）。不需要時可留空字串 `''` |
+
+各連接器類型的實際行為：
+
+* **MySQL（mysql_fdw）**：`ssl_cert`、`ssl_key`、`ssl_rootcert`（對應 mysql_fdw 的 `ssl_ca`）、`ssl_cipher` 會直接套用到 `CREATE SERVER ... OPTIONS (...)` 中。
+* **Postgres（postgres_fdw）**：`ssl_cert`、`ssl_key`、`ssl_rootcert` 分別對應 postgres_fdw 的 `sslcert`、`sslkey`、`sslrootcert` 選項；`sslmode` 則透過 [`synchdb_add_extra_conninfo()`](../../tutorial/mysql_cdc_to_postgresql/#synchdb_add_extra_conninfo) 設定（keystore/truststore 相關參數在此情況下可留空）。
+* **Oracle 和 OLR（oracle_fdw）**：僅使用 `ssl_rootcert`，其值為 Oracle Wallet 所在的目錄路徑；SynchDB 會自動將連線字串切換為 Easy Connect Plus 格式（`tcps://host:port/service?wallet_location=...&ssl_server_dn_match=yes`）。`ssl_cert`／`ssl_key` 對 oracle_fdw 無效——若需要用戶端憑證，須事先透過 `orapki` 或 `openssl pkcs12` 將其匯入到指定的 Wallet 目錄中。
+
+範例（MySQL）：
+```sql
+SELECT synchdb_add_fdw_conninfo('mysqlconn', '/path/to/client-cert.pem', '/path/to/client-key.pem', '/path/to/ca.pem', '');
+```
+
+範例（Oracle / OLR，使用 Oracle Wallet）：
+```sql
+SELECT synchdb_add_fdw_conninfo('oracleconn', '', '', '/path/to/wallet_dir', '');
+```
+
+### **synchdb_del_fdw_conninfo**
+
+用途：刪除由 `synchdb_add_fdw_conninfo` 設定的所有 TLS 憑證路徑。
+
+```sql
+SELECT synchdb_del_fdw_conninfo('mysqlconn');
+```

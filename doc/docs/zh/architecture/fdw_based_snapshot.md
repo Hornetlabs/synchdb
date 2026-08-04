@@ -32,6 +32,8 @@
 * 在同一個 repeatable read 事务中，使用正確的類型轉換遷移所有目標表的架構和資料。
 * 完成後，CDC 可以從截止點恢復，處理快照期間發生的資料變更。
 
+<**注意**> 由於 FDW 快照引擎會在複寫槽（replication slot）建立之前先寫入 offset 檔案，這與 Debezium 3.x 新增的 `validateLogPosition()` 檢查衝突。目前透過將 `offset.mismatch.strategy` 設為 `trust_slot` 繞過此檢查，恢復 Debezium 3.x 之前（如 2.6）的啟動行為。這是暫時的因應措施，後續會有更完整的修復，詳見 [Issue #256](https://github.com/Hornetlabs/synchdb/issues/256)。
+
 ### **Oracle 和 Openlog Replicator 連接器**
 
 * 在快照開始之前，讀取目前 SCN 值，它作為快照的「截止點」。
@@ -41,6 +43,8 @@
 * 完成後，CDC 可以從截止點恢復運行，並處理快照期間發生的資料變更。
 
 警告：**取得「截止點」參數需要 FLASHBACK 權限**
+
+<**注意**> Oracle 和 Openlog Replicator 連接器現已支援容器資料庫（CDB/PDB）架構：只要在建立連接器時將來源資料庫指定為 `CDB/PDB` 格式（例如 `FREE/FREEPDB1`），基於 FDW 的快照將自動連線到對應的 PDB 服務名稱。
 
 ## **基於 FDW 的快照如何運作**
 

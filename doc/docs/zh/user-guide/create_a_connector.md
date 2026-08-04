@@ -15,7 +15,7 @@ synchdb_add_conninfo 接受以下参数：
 | port | 连接到异构数据库的端口号。|
 | username | 用于与异构数据库进行身份验证的用户名。|
 | password | 用于验证用户名的密码 |
-| source database | 这是我们要从中复制更改的异构数据库中的源数据库的名称。|
+| source database | 这是我们要从中复制更改的异构数据库中的源数据库的名称。对于 Oracle 和 OLR 连接器，如果目标是容器数据库（CDB/PDB）架构，可以使用 `CDB/PDB` 的格式指定该参数（例如 `FREE/FREEPDB1`），SynchDB 会自动将其正确映射到基于 Debezium 和基于 FDW 的快照路径中所需的 CDB、PDB 名称。若不涉及 CDB/PDB，只需填写数据库名（如 `FREE`）即可。|
 | source schema | 這是來源資料庫中來源模式的名稱，我們要從中複製變更。 |
 | table |（可选）- 以 `[database].[table]` 或 `[database].[schema].[table]` 的形式表示，该参数必须存在于异构数据库中，因此引擎将仅复制指定的表。如果留空，则复制所有表。或者，可以使用 `file:` 前缀指定表列表文件 |
 | snapshot table |（可选）- 以 `[database].[table]` 或 `[database].[schema].[table]` 的形式表示，该参数必须存在于上述 `table` 设置中，因此引擎仅在快照模式设置为 `always` 时才会重建这些表的快照。如果留空或为 null，则当快照模式设置为 `always` 时，将重建上述 `table` 设置中指定的所有表。或者，可以使用 `file:` 前缀指定快照表列表文件 |

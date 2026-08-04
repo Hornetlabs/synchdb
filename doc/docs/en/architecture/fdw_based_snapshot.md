@@ -32,6 +32,8 @@ WARNING: **BACKUP_ADMIN permission is required to obtain the "cut-point" paramet
 * In the same repeatable read transaction, migrate all desired tables schema and data with proper type translations
 * Once done, the CDC can resume from the cut-off point, which will handle the data changes that happened during the snapshot.
 
+<**NOTE**> Because the FDW snapshot engine writes an offset file before the replication slot exists, this conflicts with the `validateLogPosition()` check introduced in Debezium 3.x. This is currently worked around by setting `offset.mismatch.strategy` to `trust_slot`, which restores the pre-3.x (e.g. 2.6) startup behavior. This is a temporary workaround pending a more complete fix — see [Issue #256](https://github.com/Hornetlabs/synchdb/issues/256).
+
 ### **Oracle and Openlog Replicator Connectors**
 
 * Before snapshot begins, read the current SCN value, which serves as a "cut-off" point for the snapshot
@@ -41,6 +43,8 @@ WARNING: **BACKUP_ADMIN permission is required to obtain the "cut-point" paramet
 * Once done, the CDC can resume from the cut-off point, which will handle the data changes that happened during the snapshot.
 
 WARNING: **FLASHBACK permission is required to obtain the "cut-point" parameters.**
+
+<<**NOTE**>> Oracle and Openlog Replicator connectors now support Container Database (CDB/PDB) architecture: as long as the source database is specified in the `CDB/PDB` format (e.g. `FREE/FREEPDB1`) when creating the connector, the FDW-based snapshot will automatically connect to the corresponding PDB service name.
 
 ## **How does FDW Based Snapshot Work**
 

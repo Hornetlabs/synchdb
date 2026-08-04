@@ -4,6 +4,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](http://keepachangelog.com/)
 and this project adheres to [Semantic Versioning](http://semver.org/).
 
+## **[SynchDB 1.4](https://github.com/Hornetlabs/synchdb/releases/tag/v1.4) - Unreleased**
+
+SynchDB 1.4 extends Oracle Container Database (CDB/PDB) support across the Debezium, oracle_fdw and OLR execution paths, adds TLS-secured connections for the MySQL and PostgreSQL connectors (with Oracle Wallet support for Oracle/OLR), and allows the Debezium runner's log level to be changed at runtime without a restart. This release also includes a round of stability fixes (JNI reference leaks, a double-free in the format converter, a symbol collision under IvorySQL) and broadens CI coverage to build and test against IvorySQL as the host platform.
+
+### **Added**
+
+#### Oracle Container Database (CDB/PDB) Support
+
+* The Debezium-based Oracle connector now accepts a `CDB/PDB` formatted database name and automatically maps it to Debezium's `database.dbname` and `database.pdb.name` properties.
+* [oracle_fdw](https://github.com/laurenz/oracle_fdw) based FDW snapshot path now supports Oracle Container Database architecture.
+* Added dedicated CDB/PDB test coverage against Oracle 23ai (Free PDB1).
+
+#### TLS / Secure Connections
+
+* Added TLS connection support for MySQL and PostgreSQL connectors via extra conninfo parameters.
+* Oracle and OLR connectors now use Oracle Wallet for secure connections instead of standard TLS parameters.
+
+#### Runtime-Adjustable Debezium Log Level
+
+* The Debezium runner's log level can now be changed while a connector is running, without requiring a restart. ([#106](https://github.com/Hornetlabs/synchdb/issues/106))
+
+### **Changed**
+
+* Snapshot mode `never` is now restricted to the MySQL connector only. Other connectors that previously accepted `never` should use `no_data` instead; `schemasync` now implements this uniformly under the hood.
+* Debezium was upgraded from 2.6.2.Final to 3.5.2.Final (a major version jump; 3.6.0.Final was tried first but reverted after discovering known bugs in that release), along with Kafka Connect (3.6.2 → 4.1.2), Jackson, and Log4j2.
+* The data type translator now correctly captures and transfers `tsvector` values (previously synchronized as NULL).
+* CI build and test matrix extended to cover IvorySQL as the host platform, in addition to PostgreSQL.
+
+### **Fixed**
+
+* Fixed the Auto Launcher, which previously only started connectors for the default `postgres` database due to a hardcoded connection. It now correctly enumerates every connectable, non-template database and spawns a per-database launcher, so connectors are auto-started regardless of which database SynchDB was installed in. ([#71](https://github.com/Hornetlabs/synchdb/issues/71))
+* Fixed JNI local reference leaks in the Debezium bridge that could lead to crashes under sustained load.
+* Fixed a double-free of `StringInfoData` in the format converter. ([#252](https://github.com/Hornetlabs/synchdb/issues/252))
+* Fixed a symbol collision between SynchDB's bundled Oracle raw parser and IvorySQL's own built-in Oracle parser when the OLR connector's parser library is loaded under an IvorySQL host; the parser library is now loaded with `RTLD_LOCAL`.
+* `synchdb_del_conninfo()` now correctly clears a connector's leftover state data from shared memory.
+* Fixed a potential memory-handling issue in the replication agent and OLR client.
+
+### **Known Issues and Additional Info**
+
+* mysql_fdw cannot currently be built or used under IvorySQL 5.x. The FDW-based snapshot path for MySQL is unavailable in that specific combination until upstream compatibility is resolved.
+* FDW-based snapshot for SQL Server is still not supported.
+* Because the FDW snapshot engine writes an offset file before the replication slot exists, this conflicts with the `validateLogPosition()` check introduced in Debezium 3.x. This is currently worked around by setting `offset.mismatch.strategy` to `trust_slot`, restoring the pre-3.x (e.g. 2.6) startup behavior as a temporary measure pending a more complete fix. See [Issue #256](https://github.com/Hornetlabs/synchdb/issues/256).
+
 ## **[SynchDB 1.3](https://github.com/Hornetlabs/synchdb/releases/tag/v1.3) - 2025-11-25**
 
 SynchDB 1.3 delivers a major performance enhancement with the new FDW-based snapshot engine, offering significantly faster initial snapshot performance over Debezium. This advancement makes OpenLog Replicator (OLR) connector a fully native snapshot + CDC pipeline (no Debezium is used) with significantly reduced latency and overhead for large Oracle datasets. Platform support has been broadened as well. SynchDB now runs on PostgreSQL 18 and IvorySQL 5, accompanied by a series of performance optimizations and I/O improvements across the system.

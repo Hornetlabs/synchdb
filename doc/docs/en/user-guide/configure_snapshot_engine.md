@@ -94,6 +94,8 @@ sudo make install PG_CONFIG=/usr/local/pgsql/bin/pg_config
 
 Oralce_fdw is ready to go. Start a connector normally with synchdb.olr_snapshot_engine set to 'fdw'. If a snapshot is required, SynchDB will complete it via FDW. You do not have to run `CREATE EXTENSION oracle_fdw` prior to using FDW based initial snapshot, nor do you have to `CREATE SERVER` or `CREATE USER MAPPING`. SynchDB takes care of all of these when it performs the snapshot..
 
+<**NOTE**> If the target is an Oracle Container Database (CDB/PDB), specify the source database (srcdb) in the `CDB/PDB` format (e.g. `FREE/FREEPDB1`) when creating the connector with `synchdb_add_conninfo()`, and SynchDB will automatically connect to the corresponding PDB service.
+
 
 ## **FDW Snapshot for MySQL Connectors**
 
@@ -146,3 +148,46 @@ sudo make install
 ```
 
 postgres is ready to go. Start a connector normally with synchdb.olr_snapshot_engine set to 'fdw'. If a snapshot is required, SynchDB will complete it via FDW. You do not have to run `CREATE EXTENSION mysql_fdw` prior to using FDW based initial snapshot, nor do you have to `CREATE SERVER` or `CREATE USER MAPPING`. SynchDB takes care of all of these when it performs the snapshot..
+
+## **TLS Secure Connections for FDW Snapshot**
+
+FDW-based snapshots can be secured with TLS (MySQL, Postgres) or an Oracle Wallet (Oracle, OLR) depending on the connector type. This is a separate mechanism from [`synchdb_add_extra_conninfo()`](../../tutorial/mysql_cdc_to_postgresql/#synchdb_add_extra_conninfo), which configures the Java Keystore/Truststore used for the Debezium JDBC connection.
+
+### **synchdb_add_fdw_conninfo**
+
+Purpose: configure the TLS certificate file paths (client certificate, private key, CA/root certificate) and an optional cipher list used by the FDW connection for the specified connector.
+
+```sql
+SELECT synchdb_add_fdw_conninfo(name, ssl_cert, ssl_key, ssl_rootcert, ssl_cipher);
+```
+
+| argument | description |
+|-|-|
+| `ssl_cert` | Client certificate file path (PEM format). Leave as an empty string `''` if not needed |
+| `ssl_key` | Client private key file path (PEM format). Leave as an empty string `''` if not needed |
+| `ssl_rootcert` | CA / root certificate file path (PEM format). **For Oracle and OLR connectors, this is instead the directory path of the Oracle Wallet**. Leave as an empty string `''` if not needed |
+| `ssl_cipher` | Cipher suite list (mysql_fdw only). Leave as an empty string `''` if not needed |
+
+Actual behavior per connector type:
+
+* **MySQL (mysql_fdw)**: `ssl_cert`, `ssl_key`, `ssl_rootcert` (mapped to mysql_fdw's `ssl_ca`), and `ssl_cipher` are applied directly to `CREATE SERVER ... OPTIONS (...)`.
+* **Postgres (postgres_fdw)**: `ssl_cert`, `ssl_key`, and `ssl_rootcert` map to postgres_fdw's `sslcert`, `sslkey`, and `sslrootcert` options respectively; `sslmode` is instead configured via [`synchdb_add_extra_conninfo()`](../../tutorial/mysql_cdc_to_postgresql/#synchdb_add_extra_conninfo) (the keystore/truststore arguments can be left empty in this case).
+* **Oracle and OLR (oracle_fdw)**: only `ssl_rootcert` is used, and its value is the directory path of the Oracle Wallet. SynchDB automatically switches the connection string to Easy Connect Plus format (`tcps://host:port/service?wallet_location=...&ssl_server_dn_match=yes`). `ssl_cert`/`ssl_key` have no effect for oracle_fdw — if a client certificate is required, it must be imported into the specified Wallet directory beforehand using `orapki` or `openssl pkcs12`.
+
+Example (MySQL):
+```sql
+SELECT synchdb_add_fdw_conninfo('mysqlconn', '/path/to/client-cert.pem', '/path/to/client-key.pem', '/path/to/ca.pem', '');
+```
+
+Example (Oracle / OLR, using an Oracle Wallet):
+```sql
+SELECT synchdb_add_fdw_conninfo('oracleconn', '', '', '/path/to/wallet_dir', '');
+```
+
+### **synchdb_del_fdw_conninfo**
+
+Purpose: remove all TLS certificate paths configured by `synchdb_add_fdw_conninfo`.
+
+```sql
+SELECT synchdb_del_fdw_conninfo('mysqlconn');
+```
