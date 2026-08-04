@@ -4,6 +4,49 @@
 本文格式基于 [Keep a Changelog](http://keepachangelog.com/)，
 且本项目遵循 [语义化版本](http://semver.org/)。
 
+## **[SynchDB 1.4](https://github.com/Hornetlabs/synchdb/releases/tag/v1.4) - 待发布**
+
+SynchDB 1.4 将 Oracle 容器数据库（CDB/PDB）支持扩展到了 Debezium、oracle_fdw 与 OLR 三条执行路径；为 MySQL 和 PostgreSQL 连接器新增了 TLS 安全连接支持（Oracle/OLR 连接器则使用 Oracle Wallet）；并支持在连接器运行期间动态调整 Debezium 运行器的日志级别，无需重启。此版本还包含一轮稳定性修复（JNI 引用泄漏、format converter 中的二次释放问题、IvorySQL 下的符号冲突），并将 CI 构建与测试矩阵扩展到以 IvorySQL 作为宿主平台。
+
+### **新增**
+
+#### Oracle 容器数据库（CDB/PDB）支持
+
+* 基于 Debezium 的 Oracle 连接器现在可以接受 `CDB/PDB` 格式的数据库名，并自动映射为 Debezium 的 `database.dbname` 与 `database.pdb.name` 属性。
+* 基于 [oracle_fdw](https://github.com/laurenz/oracle_fdw) 的 FDW 快照路径现已支持 Oracle 容器数据库架构。
+* 新增了针对 Oracle 23ai（Free PDB1）的 CDB/PDB 专项测试覆盖。
+
+#### TLS / 安全连接
+
+* 通过 extra conninfo 参数为 MySQL 和 PostgreSQL 连接器新增了 TLS 连接支持。
+* Oracle 与 OLR 连接器改为使用 Oracle Wallet 实现安全连接，而非标准 TLS 参数。
+
+#### 运行时动态调整 Debezium 日志级别
+
+* 现在可以在连接器运行期间调整 Debezium 运行器的日志级别，无需重启连接器。（[#106](https://github.com/Hornetlabs/synchdb/issues/106)）
+
+### **变更**
+
+* Snapshot 模式 `never` 现已限定为仅 MySQL 连接器可用。此前依赖该模式的其他连接器应改用 `no_data`；`schemasync` 现已在底层统一实现为 `no_data` 语义。
+* Debezium 版本从 2.6.2.Final 大版本升级至 3.5.2.Final（期间曾尝试 3.6.0.Final，但发现该版本存在已知缺陷，因此改用 3.5.2.Final），同时一并升级了 Kafka Connect（3.6.2 → 4.1.2）、Jackson 与 Log4j2 等依赖。
+* 数据类型转换器现已正确捕获并传输 `tsvector` 类型的值（此前会被同步为 NULL）。
+* CI 构建与测试矩阵已扩展，除 PostgreSQL 外还覆盖以 IvorySQL 作为宿主平台的场景。
+
+### **已修复**
+
+* 修复了 Auto Launcher 此前由于硬编码连接、只能为默认的 `postgres` 数据库启动连接器的问题；现已正确枚举所有可连接的非模板数据库，并为每个数据库派生独立的启动进程，不再受限于 SynchDB 实际安装在哪个数据库。（[#71](https://github.com/Hornetlabs/synchdb/issues/71)）
+* 修复了 Debezium 桥接层中的 JNI 局部引用（local reference）泄漏问题，该问题在持续高负载下可能导致崩溃。
+* 修复了 format converter 中 `StringInfoData` 的二次释放（double-free）问题。（[#252](https://github.com/Hornetlabs/synchdb/issues/252)）
+* 修复了在 IvorySQL 宿主环境下，OLR 连接器加载解析器库时，SynchDB 自带的 Oracle 原始解析器与 IvorySQL 内建 Oracle 解析器之间的符号冲突问题；解析器库现改为以 `RTLD_LOCAL` 方式加载。
+* `synchdb_del_conninfo()` 现在会正确清理共享内存中残留的连接器状态数据。
+* 修复了 replication agent 与 OLR client 中一处潜在的内存处理问题。
+
+### **已知問題和其他信息**
+
+* mysql_fdw 目前无法在 IvorySQL 5.x 下编译或使用，因此该组合下基于 FDW 的 MySQL 快照路径暂不可用，待上游兼容性问题解决后再支持。
+* 基于 FDW 的 SQL Server 快照仍不支持。
+* 由于 FDW 快照引擎会在复制槽（replication slot）建立之前先写入 offset 文件，这与 Debezium 3.x 新增的 `validateLogPosition()` 检查冲突。目前通过将 `offset.mismatch.strategy` 设为 `trust_slot` 绕过此检查，恢复到 Debezium 3.x 之前（如 2.6）的启动行为，这是临时方案，后续会有更完整的修复。详见 [Issue #256](https://github.com/Hornetlabs/synchdb/issues/256)。
+
 ## **[SynchDB 1.3](https://github.com/Hornetlabs/synchdb/releases/tag/v1.3) - 2025-11-25**
 
 SynchDB 1.3 憑藉全新的基於 FDW 的快照引擎，顯著提升了效能，初始快照速度遠超 Debezium。這項改進使得 OpenLog Replicator (OLR) 連接器成為一個完全原生的快照 + CDC 管線（無需使用 Debezium），從而顯著降低了大型 Oracle 資料集的延遲和開銷。平台支援也得到了擴展。 SynchDB 現在可在 PostgreSQL 18 和 IvorySQL 5 上運行，並針對整個系統進行了一系列效能最佳化和 I/O 改進。

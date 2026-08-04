@@ -15,7 +15,7 @@ synchdb_add_conninfo takes these arguments:
 | port                  | the port number to connect to the heterogeneous database. |
 | username              | user name to use to authenticate with heterogeneous database.|
 | password              | password to authenticate the username |
-| source database       | this is the name of source database that we want to replicate changes from.|
+| source database       | this is the name of source database that we want to replicate changes from. For Oracle and OLR connectors, if the target is a Container Database (CDB/PDB) architecture, this parameter can be specified in the format `CDB/PDB` (e.g. `FREE/FREEPDB1`), and SynchDB will automatically map it correctly for both the Debezium-based and FDW-based snapshot paths. If CDB/PDB is not applicable, simply provide the database name (e.g. `FREE`).|
 | source schema  | this is the name of source schema under source database that we want to replicate changes from  |
 | table                 | (optional) - expressed in the form of `[database].[table]` or `[schema].[table]` that must exists in source database / schema so the engine will only replicate the specified tables. If left empty, all tables are replicated. Alternatively, a table list file can be specified with `file:` prefix  |
 | snapshot table        | (optional) - expressed in the form of `[database].[table]` or `[schema].[table]` that must exists in the `table` setting above, so the engine will only rebuild the snapshot of these tables if snapshot mode is set to `always`. If left empty or null, all tables specified in `table` setting above will be rebuilt when snapshot mode is set to `always`. Alternatively, a snapshot table list file can be specified with `file:` prefix|
