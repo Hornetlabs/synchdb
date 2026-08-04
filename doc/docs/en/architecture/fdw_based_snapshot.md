@@ -42,9 +42,9 @@ WARNING: **BACKUP_ADMIN permission is required to obtain the "cut-point" paramet
 * Migrate all desired tables schema and data with proper type translations with FLASHBACK query.
 * Once done, the CDC can resume from the cut-off point, which will handle the data changes that happened during the snapshot.
 
-WARNING: **FLASHBACK permission is required to obtain the "cut-point" parameters.**
+<**WARNING**> **FLASHBACK permission is required to obtain the "cut-point" parameters.**
 
-<<**NOTE**>> Oracle and Openlog Replicator connectors now support Container Database (CDB/PDB) architecture: as long as the source database is specified in the `CDB/PDB` format (e.g. `FREE/FREEPDB1`) when creating the connector, the FDW-based snapshot will automatically connect to the corresponding PDB service name.
+<**NOTE**> Oracle and Openlog Replicator connectors now support Container Database (CDB/PDB) architecture: as long as the source database is specified in the `CDB/PDB` format (e.g. `FREE/FREEPDB1`) when creating the connector, the FDW-based snapshot will automatically connect to the corresponding PDB service name.
 
 ## **How does FDW Based Snapshot Work**
 
