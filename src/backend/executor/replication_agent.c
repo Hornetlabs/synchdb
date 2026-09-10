@@ -50,17 +50,16 @@ extern char * g_eventStr;
 static char *
 swap_tokens(const char * expression, const char * data, const char * wkb, const char * srid)
 {
-	char		filledexpression[SYNCHDB_TRANSFORM_EXPRESSION_SIZE];
-	char	   *dp;
-	char	   *endp;
+	StringInfoData strinfo;
 	const char *sp;
 
 	/*
-	 * construct the expression to run
+	 * construct the expression to run. Note, we must not use a fixed size
+	 * buffer here because the substituted data can be arbitrarily large
+	 * (ex. a long base64 geometry value) and truncating it would produce an
+	 * invalid SQL expression.
 	 */
-	dp = filledexpression;
-	endp = filledexpression + SYNCHDB_TRANSFORM_EXPRESSION_SIZE - 1;
-	*endp = '\0';
+	initStringInfo(&strinfo);
 
 	for (sp = expression; *sp; sp++)
 	{
@@ -71,43 +70,34 @@ swap_tokens(const char * expression, const char * data, const char * wkb, const 
 				case 'd':
 					/* %d: data */
 					sp++;
-					strlcpy(dp, data == NULL ? "null" : data, endp - dp);
-					dp += strlen(dp);
+					appendStringInfoString(&strinfo, data == NULL ? "null" : data);
 					break;
 				case 'w':
 					/* %w: well-known-binary for geometry, aka wkb */
 					sp++;
-					strlcpy(dp, wkb == NULL ? "null" : wkb, endp - dp);
-					dp += strlen(dp);
+					appendStringInfoString(&strinfo, wkb == NULL ? "null" : wkb);
 					break;
 				case 's':
 					/* %s: srid for geometry */
 					sp++;
-					strlcpy(dp, srid == NULL ? "null" : srid, endp - dp);
-					dp += strlen(dp);
+					appendStringInfoString(&strinfo, srid == NULL ? "null" : srid);
 					break;
 				case '%':
 					/* convert %% to a single % */
 					sp++;
-					if (dp < endp)
-						*dp++ = *sp;
+					appendStringInfoChar(&strinfo, *sp);
 					break;
 				default:
 					/* otherwise treat the % as not special */
-					if (dp < endp)
-						*dp++ = *sp;
+					appendStringInfoChar(&strinfo, *sp);
 					break;
 			}
 		}
 		else
-		{
-			if (dp < endp)
-				*dp++ = *sp;
-		}
+			appendStringInfoChar(&strinfo, *sp);
 	}
-	*dp = '\0';
 
-	return pstrdup(filledexpression);
+	return strinfo.data;
 }
 /*
  * spi_execute_select_one
