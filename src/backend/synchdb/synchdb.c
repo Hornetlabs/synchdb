@@ -1067,6 +1067,7 @@ dbz_engine_start(const ConnectionInfo *connInfo, ConnectorType connectorType, co
 	}
 
 	elog(LOG, "Debezium engine started successfully for %s connector", connectorTypeToString(connectorType));
+	ret = 0;
 
 cleanup:
 	/* Clean up local references */
@@ -1095,7 +1096,7 @@ cleanup:
 	if (myParametersClass)
 		(*env)->DeleteLocalRef(env, myParametersClass);
 
-	return exception ? -1 : 0;
+	return ret;
 }
 
 /*
