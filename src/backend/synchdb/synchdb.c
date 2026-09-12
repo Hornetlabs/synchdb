@@ -4834,7 +4834,7 @@ synchdb_start_engine_bgw_snapshot_mode(PG_FUNCTION_ARGS)
 	if (ret)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("[synchdb_start_engine_bgw_snapshot_mode] connection name does not exist: %s", name),
+				 errmsg("[synchdb_start_engine_bgw_snapshot_mode] connection name does not exist: %s", NameStr(*name)),
 				 errhint("use synchdb_add_conninfo to add one first")));
 
 	_snapshotMode = NameStr(*snapshotmode);
@@ -4943,7 +4943,7 @@ synchdb_start_engine_bgw(PG_FUNCTION_ARGS)
 	if (ret)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("[synchdb_start_engine_bgw] connection name does not exist: %s", name),
+				 errmsg("[synchdb_start_engine_bgw] connection name does not exist: %s", NameStr(*name)),
 				 errhint("use synchdb_add_conninfo to add one first")));
 
 #ifdef WITH_OLR
@@ -5679,7 +5679,7 @@ synchdb_restart_connector(PG_FUNCTION_ARGS)
 	if (ret)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("[synchdb_restart_connector] connection name does not exist: %s", name),
+				 errmsg("[synchdb_restart_connector] connection name does not exist: %s", NameStr(*name)),
 				 errhint("use synchdb_add_conninfo to add one first")));
 
 	/*
