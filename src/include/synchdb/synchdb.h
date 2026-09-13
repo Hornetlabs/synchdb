@@ -25,7 +25,12 @@
 #define SYNCHDB_CONNINFO_HOSTNAME_SIZE 256
 #define SYNCHDB_CONNINFO_USERNAME_SIZE 64
 #define SYNCHDB_CONNINFO_PASSWORD_SIZE 128
-#define SYNCHDB_CONNINFO_TABLELIST_SIZE 256
+/*
+ * Max size of the "table" and "snapshot table" list fields of ConnectionInfo.
+ * Both fields live in shared memory, hence they have to be of fixed size.
+ * 8192 bytes is enough to hold roughly 250 fully qualified table names.
+ */
+#define SYNCHDB_CONNINFO_TABLELIST_SIZE 8192
 #define SYNCHDB_CONNINFO_RULEFILENAME_SIZE 64
 #define SYNCHDB_CONNINFO_DB_NAME_SIZE 64
 #define SYNCHDB_CONNINFO_KEYSTORE_SIZE 128

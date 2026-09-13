@@ -917,6 +917,26 @@ ra_executePGDML(PG_DML * pgdml, ConnectorType type, SynchdbStatistics * myBatchS
 }
 
 /*
+ * ra_copy_conninfo_field
+ *
+ * Copy a string value into one of the fixed size fields of ConnectionInfo and
+ * raise a WARNING if it does not fit. These fields live in shared memory so
+ * they cannot grow dynamically, but silently dropping the tail of a table list
+ * (or of any other field) is much worse than a loud warning.
+ */
+static void
+ra_copy_conninfo_field(char * dst, const char * src, Size dstsize, const char * fieldname)
+{
+	if (src != NULL && strlen(src) >= dstsize)
+		elog(WARNING, "value of \"%s\" is too long (%d bytes) for synchdb conninfo "
+				"field of %d bytes and has been truncated",
+				fieldname, (int) strlen(src), (int) dstsize - 1);
+
+	if (src != NULL)
+		strlcpy(dst, src, dstsize);
+}
+
+/*
  * ra_getConninfoByName
  *
  * This function executes a SELECT query on synchdb_conninfo table with the given
@@ -990,8 +1010,10 @@ ra_getConninfoByName(const char * name, ConnectionInfo * conninfo, char ** conne
 	strlcpy(conninfo->pwd, TextDatumGetCString(res[3]), SYNCHDB_CONNINFO_PASSWORD_SIZE);
 	strlcpy(conninfo->srcdb, TextDatumGetCString(res[4]), SYNCHDB_CONNINFO_DB_NAME_SIZE);
 	strlcpy(conninfo->dstdb, TextDatumGetCString(res[5]), SYNCHDB_CONNINFO_DB_NAME_SIZE);
-	strlcpy(conninfo->table, TextDatumGetCString(res[6]) ,SYNCHDB_CONNINFO_TABLELIST_SIZE);
-	strlcpy(conninfo->snapshottable, TextDatumGetCString(res[7]) ,SYNCHDB_CONNINFO_TABLELIST_SIZE);
+	ra_copy_conninfo_field(conninfo->table, TextDatumGetCString(res[6]),
+			SYNCHDB_CONNINFO_TABLELIST_SIZE, "table");
+	ra_copy_conninfo_field(conninfo->snapshottable, TextDatumGetCString(res[7]),
+			SYNCHDB_CONNINFO_TABLELIST_SIZE, "snapshottable");
 	*connector = pstrdup(TextDatumGetCString(res[8]));
 	conninfo->active = DatumGetBool(res[9]);
 	strlcpy(conninfo->extra.ssl_mode, TextDatumGetCString(res[10]), SYNCHDB_CONNINFO_NAME_SIZE);
