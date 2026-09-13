@@ -134,9 +134,11 @@ However, it is possible to select partial tables to redo the initial snapshot by
 This example makes the connector only redo the initial snapshot of `public.customers` table. All other tables will have their snapshot skipped.
 ```sql
 UPDATE synchdb_conninfo 
-SET data = jsonb_set(data, '{snapshottable}', '"public.customers"') 
+SET data = jsonb_set(data, '{snapshottable}', '"postgres.public.customers"') 
 WHERE name = 'pgconn';
 ```
+
+<<**IMPORTANT**>> For the PostgreSQL connector, `snapshot table` must be written in the form of `[database].[schema].[table]` (such as `postgres.public.customers`) while the `table` option uses `[schema].[table]` (such as `public.customers`). A wrong value does not raise any error, but no table will be re-snapshotted at all. See the *Snapshot Table Format* section in [Create a Connector](../../user-guide/create_a_connector/) for more details.
 
 After the initial snapshot, CDC will begin. Restarting a connector in `always` mode will repeat the same process described above.
 
@@ -350,7 +352,7 @@ WHERE name = 'pgconn';
 3. Configure the snapshot table parameter to include only the new table `public.customers` to that SynchDB does not try to rebuild the 2 tables that have already finished the snapshot.
 ```sql
 UPDATE synchdb_conninfo 
-SET data = jsonb_set(data, '{snapshottable}', '"public.customers"') 
+SET data = jsonb_set(data, '{snapshottable}', '"postgres.public.customers"') 
 WHERE name = 'pgconn';
 ``` 
 4. Restart the connector with the snapshot mode set to `always` to perform another initial snapshot:
