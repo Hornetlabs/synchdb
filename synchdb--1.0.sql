@@ -329,7 +329,7 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 AS $$
 DECLARE
-	v_connector   text;      -- 'oracle' | 'olr' | 'mysql' (lowercased)
+	v_connector   text;      -- 'oracle' | 'olr' | 'mysql' | 'postgres' | 'sqlserver' (lowercased)
     v_hostname    text;
     v_port        int;
     v_srcdb       text;   -- from data->>'srcdb'
@@ -393,6 +393,16 @@ BEGIN
             EXCEPTION WHEN OTHERS THEN
                 RAISE EXCEPTION 'Failed to install postgres_fdw: % [%]', SQLERRM, SQLSTATE
                     USING HINT = 'Install postgres_fdw as a superuser, then retry.';
+            END;
+        END IF;
+	ELSIF v_connector = 'sqlserver' THEN
+		IF NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'tds_fdw') THEN
+            RAISE NOTICE 'tds_fdw not found; attempting CREATE EXTENSION';
+            BEGIN
+                EXECUTE 'CREATE EXTENSION tds_fdw';
+            EXCEPTION WHEN OTHERS THEN
+                RAISE EXCEPTION 'Failed to install tds_fdw: % [%]', SQLERRM, SQLSTATE
+                    USING HINT = 'Install tds_fdw (and FreeTDS client libs) as a superuser, then retry.';
             END;
         END IF;
 	END IF;
@@ -516,6 +526,22 @@ BEGIN
 
         EXECUTE format(
             'CREATE USER MAPPING FOR CURRENT_USER SERVER %I OPTIONS (user %L, password %L)',
+            v_server, v_user, v_pwd
+        );
+	ELSIF v_connector = 'sqlserver' THEN
+		-- tds_fdw has no SSL-related server options; encryption (if any) is configured
+		-- via FreeTDS itself (freetds.conf), not through CREATE SERVER OPTIONS.
+		IF v_ssl_mode IS NOT NULL OR v_ssl_cert IS NOT NULL OR v_ssl_key IS NOT NULL OR v_ssl_rootcert IS NOT NULL THEN
+			RAISE NOTICE 'fdw_ssl_* options are ignored for tds_fdw: configure TLS via FreeTDS (freetds.conf) instead.';
+		END IF;
+
+		EXECUTE format(
+            'CREATE SERVER %I FOREIGN DATA WRAPPER tds_fdw OPTIONS (servername %L, port %L, database %L)',
+            v_server, v_hostname, v_port::text, v_srcdb
+        );
+
+        EXECUTE format(
+            'CREATE USER MAPPING FOR CURRENT_USER SERVER %I OPTIONS (username %L, password %L)',
             v_server, v_user, v_pwd
         );
 	ELSE
@@ -1383,6 +1409,171 @@ $synchdb_create_current_binlog_pos_ft$;
 
 COMMENT ON FUNCTION synchdb_create_current_binlog_pos_ft(name, name) IS
    'create MySQL foreign tables to obtain binlog file, pos and server id';
+
+-----------------------------------------------------------------------------------------------------------------
+    -- SQLSERVER: functions to map SQL Server objects to PostgreSQL via FDW (tds_fdw)
+-----------------------------------------------------------------------------------------------------------------
+CREATE FUNCTION synchdb_create_sqlserver_objs(
+   server      name,
+   schema      name    DEFAULT NAME 'public',
+   options     jsonb   DEFAULT NULL
+) RETURNS void
+   LANGUAGE plpgsql VOLATILE CALLED ON NULL INPUT SET search_path = pg_catalog AS
+$synchdb_create_sqlserver_objs$
+DECLARE
+   old_msglevel text;
+BEGIN
+   /* remember old setting */
+   old_msglevel := current_setting('client_min_messages');
+
+   /* make the output less verbose */
+   SET LOCAL client_min_messages = warning;
+
+   EXECUTE format('CREATE SCHEMA IF NOT EXISTS %I', schema);
+
+   /*
+    * SynchDB only needs "tables", "columns" and "keys" to construct the destination
+    * tables (same minimal contract as the mysql/oracle builders above) - see
+    * doc/docs/en/architecture/fdw_based_snapshot.md. SQL Server implements the ANSI
+    * INFORMATION_SCHEMA views, so these are built directly against them via tds_fdw's
+    * "query" pass-through option, rather than importing raw catalog tables first.
+    */
+
+   /*
+    * NOTE: tds_fdw defaults to matching result columns to local foreign-table
+    * columns BY NAME (option "match_column_names", default true), and the match
+    * is case-sensitive. Every query below therefore aliases each result column
+    * to the exact (lowercase) local column name.
+    */
+
+   /* tables */
+   EXECUTE format('DROP FOREIGN TABLE IF EXISTS %I.tables CASCADE', schema);
+   EXECUTE format($SQL$
+      CREATE FOREIGN TABLE %1$I.tables (
+         schema     text,
+         table_name text
+      ) SERVER %2$I OPTIONS (query $query$
+         SELECT TABLE_SCHEMA AS [schema], TABLE_NAME AS [table_name]
+         FROM INFORMATION_SCHEMA.TABLES
+         WHERE TABLE_TYPE = 'BASE TABLE'
+      $query$);
+      COMMENT ON FOREIGN TABLE %1$I.tables IS 'SQL Server tables (via tds_fdw)';
+   $SQL$, schema, server);
+
+   /* columns */
+   EXECUTE format('DROP FOREIGN TABLE IF EXISTS %I.columns CASCADE', schema);
+   EXECUTE format($SQL$
+      CREATE FOREIGN TABLE %1$I.columns (
+         schema        text,
+         table_name    text,
+         column_name   text,
+         position      integer,
+         type_name     text,
+         length        integer,
+         precision     integer,
+         scale         integer,
+         nullable      boolean,
+         default_value text
+      ) SERVER %2$I OPTIONS (query $query$
+         SELECT c.TABLE_SCHEMA AS [schema],
+                c.TABLE_NAME AS [table_name],
+                c.COLUMN_NAME AS [column_name],
+                CAST(c.ORDINAL_POSITION AS int) AS [position],
+                c.DATA_TYPE AS [type_name],
+                CAST(c.CHARACTER_MAXIMUM_LENGTH AS int) AS [length],
+                CAST(c.NUMERIC_PRECISION AS int) AS [precision],
+                CAST(c.NUMERIC_SCALE AS int) AS [scale],
+                CASE WHEN c.IS_NULLABLE = 'YES' THEN CAST(1 AS bit) ELSE CAST(0 AS bit) END AS [nullable],
+                c.COLUMN_DEFAULT AS [default_value]
+         FROM INFORMATION_SCHEMA.COLUMNS c
+         JOIN INFORMATION_SCHEMA.TABLES t
+           ON t.TABLE_SCHEMA = c.TABLE_SCHEMA AND t.TABLE_NAME = c.TABLE_NAME
+         WHERE t.TABLE_TYPE = 'BASE TABLE'
+      $query$);
+      COMMENT ON FOREIGN TABLE %1$I.columns IS 'columns of SQL Server tables (via tds_fdw)';
+   $SQL$, schema, server);
+
+   /* keys (primary and unique) */
+   EXECUTE format('DROP FOREIGN TABLE IF EXISTS %I.keys CASCADE', schema);
+   EXECUTE format($SQL$
+      CREATE FOREIGN TABLE %1$I.keys (
+         schema          text,
+         table_name      text,
+         constraint_name text,
+         "deferrable"    boolean,
+         deferred        boolean,
+         column_name     text,
+         position        integer,
+         is_primary      boolean
+      ) SERVER %2$I OPTIONS (query $query$
+         SELECT tc.TABLE_SCHEMA AS [schema],
+                tc.TABLE_NAME AS [table_name],
+                tc.CONSTRAINT_NAME AS [constraint_name],
+                CAST(0 AS bit) AS [deferrable],
+                CAST(0 AS bit) AS [deferred],
+                kcu.COLUMN_NAME AS [column_name],
+                CAST(kcu.ORDINAL_POSITION AS int) AS [position],
+                CASE WHEN tc.CONSTRAINT_TYPE = 'PRIMARY KEY' THEN CAST(1 AS bit) ELSE CAST(0 AS bit) END AS [is_primary]
+         FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
+         JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
+           ON tc.CONSTRAINT_SCHEMA = kcu.CONSTRAINT_SCHEMA
+          AND tc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
+         WHERE tc.CONSTRAINT_TYPE IN ('PRIMARY KEY', 'UNIQUE')
+      $query$);
+      COMMENT ON FOREIGN TABLE %1$I.keys IS 'SQL Server primary/unique key columns (via tds_fdw)';
+   $SQL$, schema, server);
+
+   /* restore old setting */
+   PERFORM set_config('client_min_messages', old_msglevel, true);
+
+   RETURN;
+END;
+$synchdb_create_sqlserver_objs$;
+
+COMMENT ON FUNCTION synchdb_create_sqlserver_objs(name, name, jsonb) IS
+   'create SQL Server foreign tables (tables/columns/keys) via tds_fdw for FDW-based snapshot';
+
+CREATE OR REPLACE FUNCTION synchdb_create_current_sqlserver_lsn_ft(
+    p_schema name,  -- e.g. 'sqlserver_obj'
+    p_server name   -- e.g. '<connector_name>_sqlserver'
+) RETURNS void
+LANGUAGE plpgsql
+AS $synchdb_create_current_sqlserver_lsn_ft$
+DECLARE
+  /*
+   * sys.fn_cdc_get_max_lsn() returns a varbinary(10). Format it here as Debezium's
+   * Lsn.toString() hex-group representation ("%08x:%08x:%04x") so the value returned
+   * by this foreign table can be used directly as the commit_lsn offset - this exact
+   * shape is already used/observed for the non-FDW SQL Server connector in this
+   * project (see doc/docs/en/monitoring/state_view.md).
+   */
+  v_subqry text := $q$
+     SELECT LOWER(
+        CONVERT(varchar(8), CONVERT(varbinary(4), SUBSTRING(sys.fn_cdc_get_max_lsn(), 1, 4)), 2)
+        + ':' +
+        CONVERT(varchar(8), CONVERT(varbinary(4), SUBSTRING(sys.fn_cdc_get_max_lsn(), 5, 4)), 2)
+        + ':' +
+        CONVERT(varchar(4), CONVERT(varbinary(2), SUBSTRING(sys.fn_cdc_get_max_lsn(), 9, 2)), 2)
+     ) AS [max_lsn]
+  $q$;
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_foreign_server WHERE srvname = p_server) THEN
+    RAISE EXCEPTION 'Foreign server "%" does not exist', p_server
+      USING HINT = 'Create it first: CREATE SERVER ... FOREIGN DATA WRAPPER tds_fdw OPTIONS(...);';
+  END IF;
+  EXECUTE format('CREATE SCHEMA IF NOT EXISTS %I', p_schema);
+  EXECUTE format('DROP FOREIGN TABLE IF EXISTS %I.%I', p_schema, 'current_lsn');
+  EXECUTE format(
+    'CREATE FOREIGN TABLE %I.%I (max_lsn text) ' ||
+    'SERVER %I OPTIONS (query %L)',
+    p_schema, 'current_lsn', p_server, v_subqry
+  );
+  RAISE NOTICE 'Recreated foreign table %.% on server %', p_schema, 'current_lsn', p_server;
+END;
+$synchdb_create_current_sqlserver_lsn_ft$;
+
+COMMENT ON FUNCTION synchdb_create_current_sqlserver_lsn_ft(name, name) IS
+   'create SQL Server foreign table to obtain the current CDC max LSN (formatted as Debezium''s Lsn string)';
 
 -----------------------------------------------------------------------------------------------------------------
     -- ORACLE: functions to map Oracle objects to PostgreSQL via FDW (originated from oracle_migrator project)
@@ -2336,7 +2527,7 @@ BEGIN
 
         -- 3c) Materialize as UNLOGGED table (structure+data)
         EXECUTE format(
-            'CREATE UNLOGGED TABLE %I.%I AS TABLE %I.%I',
+            'CREATE UNLOGGED TABLE %I.%I AS SELECT * FROM %I.%I',
             p_dest_schema, rname, p_source_schema, rname
         );
 
@@ -2828,6 +3019,30 @@ BEGIN
       )
       INTO v_cols_sql;
 
+	ELSIF v_conn_type = 'sqlserver' THEN
+	  -- tds_fdw matches columns by name and does so case-sensitively.  Keep
+	  -- normalized local names while mapping every column to its exact remote
+	  -- SQL Server identifier.
+	  EXECUTE format(
+	    'SELECT string_agg(
+	              quote_ident(%s) || '' '' ||
+	              synchdb_translate_datatype(%L::name, lower(c.type_name)::name,
+	                                         COALESCE(c.length, -1)::bigint,
+	                                         COALESCE(c.scale, -1)::bigint,
+	                                         COALESCE(c.precision, -1)::bigint) ||
+	              '' OPTIONS (column_name '' || quote_literal(c.column_name) || '')'' ||
+	              CASE WHEN lower(coalesce(c.nullable::text, '''')) IN (''no'', ''n'', ''0'', ''false'', ''f'')
+	                   THEN '' NOT NULL'' ELSE '''' END,
+	              '', '' ORDER BY c.position)
+	       FROM %I.columns c
+	      WHERE c."schema" = %L
+	        AND c.table_name = %L',
+	    v_colname_expr,
+	    v_conn_type,
+	    p_source_schema, r.ora_owner, r.table_name
+	  )
+	  INTO v_cols_sql;
+
 	ELSE
     -- Build PG column list using translator, honoring case strategy
     EXECUTE format(
@@ -2916,6 +3131,44 @@ BEGIN
 
 		RAISE NOTICE 'Created MySQL FT %.% -> %.% on %',
 				   p_stage_schema, v_tbl_pg, p_desired_db, r.table_name, p_server_name;
+	ELSIF v_conn_type = 'sqlserver' THEN
+		/*
+		 * DB-Library renders SQL Server DATE values using a locale-dependent
+		 * datetime string (for example "Jan 16 2016 12:00:00:AM"), which is
+		 * not valid PostgreSQL date input.  Use a projection query so DATE
+		 * columns arrive in unambiguous ISO 8601 form.  Quote every remote
+		 * identifier with SQL Server brackets at the same time.
+		 */
+		EXECUTE format(
+		  'SELECT string_agg(
+		            CASE WHEN lower(c.type_name) = ''date'' THEN
+		                   ''CONVERT(char(10), ['' || replace(c.column_name, '']'', '']]'') ||
+		                   ''], 23) AS ['' || replace(c.column_name, '']'', '']]'') || '']''
+		                 ELSE
+		                   ''['' || replace(c.column_name, '']'', '']]'') || '']''
+		            END,
+		            '', '' ORDER BY c.position)
+		     FROM %I.columns c
+		    WHERE c."schema" = %L
+		      AND c.table_name = %L',
+		  p_source_schema, r.ora_owner, r.table_name
+		)
+		INTO v_sel_list;
+
+		v_subquery := format(
+		  'SELECT %s FROM [%s].[%s]',
+		  v_sel_list,
+		  replace(r.ora_owner, ']', ']]'),
+		  replace(r.table_name, ']', ']]')
+		);
+
+		EXECUTE format(
+			'CREATE FOREIGN TABLE %I.%I (%s) SERVER %I OPTIONS (query %L)',
+			p_stage_schema, v_tbl_pg, v_cols_sql, p_server_name, v_subquery
+		);
+
+		RAISE NOTICE 'Created SQL Server FT %.% -> %.% on %',
+				   p_stage_schema, v_tbl_pg, r.ora_owner, r.table_name, p_server_name;
 	ELSIF v_conn_type = 'postgres' THEN
           ------------------------------------------------------------------
       -- IMPORTANT for postgres_fdw:
@@ -3030,7 +3283,7 @@ BEGIN
     v_tbl_name_l := r.table_name;
 
     -- Refresh synchdb_attribute rows for this table
-	IF v_conn_type IN ('oracle','olr','postgres') THEN
+	IF v_conn_type IN ('oracle','olr','postgres','sqlserver') THEN
 	   DELETE FROM public.synchdb_attribute
 		 WHERE name       = p_connector_name
 		   AND type       = v_conn_type
@@ -3300,7 +3553,7 @@ BEGIN
     CREATE TEMP TABLE IF NOT EXISTS tmp_requested_full(fullname text PRIMARY KEY) ON COMMIT DROP;
     TRUNCATE tmp_requested_full;
 
-	IF v_conn_type IN ('oracle','olr','postgres') THEN
+	IF v_conn_type IN ('oracle','olr','postgres','sqlserver') THEN
       INSERT INTO tmp_requested_full(fullname)
       SELECT format('%s.%s.%s', db, schem, tbl)
       FROM tmp_snap_list;
@@ -3316,7 +3569,7 @@ BEGIN
     CREATE TEMP TABLE IF NOT EXISTS tmp_existing_full(fullname text PRIMARY KEY) ON COMMIT DROP;
     TRUNCATE tmp_existing_full;
 
-	IF v_conn_type IN ('oracle','olr','postgres') THEN
+	IF v_conn_type IN ('oracle','olr','postgres','sqlserver') THEN
       EXECUTE format($SQL$
         INSERT INTO tmp_existing_full(fullname)
         SELECT format('%%s.%%s.%%s', f.db, c."schema", c.table_name)
@@ -4838,7 +5091,7 @@ RETURNS void
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    v_connector text;           -- 'oracle' | 'olr' | 'mysql' | 'postgres' (lowercased)
+    v_connector text;           -- 'oracle' | 'olr' | 'mysql' | 'postgres' | 'sqlserver' (lowercased)
     v_server    text;           -- e.g. '<connector>_oracle', '<connector>_mysql', '<connector>_postgres'
     r           record;
 
@@ -4992,6 +5245,8 @@ DECLARE
 
     v_lsn           text;       -- used by postgres connector
 
+    v_ss_lsn        text;       -- used by sqlserver connector (commit_lsn, Debezium hex-group format)
+
     v_ret           text;       -- return value (connector-specific offset string)
 BEGIN
     SELECT lower(data->>'connector')
@@ -5029,7 +5284,7 @@ BEGIN
 
     -- Decide metadata schema name up-front
     v_meta_schema := ('metaschema_' || p_connector_name)::name;
-    RAISE NOTICE 'Step 1.5: Materialize foreign object views to %', v_meta_schema;
+    RAISE NOTICE 'Step 1.5a: Materialize foreign object views to %', v_meta_schema;
 
     -- Create foreign object views based on connector type
     IF v_connector IN ('oracle', 'olr') THEN
@@ -5047,13 +5302,17 @@ BEGIN
                      p_source_schema, v_server_name;
         PERFORM synchdb_create_pg_objs(v_server_name, p_source_schema, v_case_json);
 
+    ELSIF v_connector = 'sqlserver' THEN
+        RAISE NOTICE 'Step 1: Creating SQL Server FDW object views for schema "%" using server "%"',
+                     p_source_schema, v_server_name;
+        PERFORM synchdb_create_sqlserver_objs(v_server_name, p_source_schema, v_case_json);
+
     ELSE
         RAISE EXCEPTION 'Unsupported connector type: %', v_connector;
     END IF;
 
-    RAISE NOTICE 'Step 1.5: Materializing foreign object views to %', v_meta_schema;
+    RAISE NOTICE 'Step 1.5b: Materializing foreign object views to %', v_meta_schema;
     PERFORM synchdb_materialize_ora_metadata(p_source_schema, v_meta_schema, p_on_exists);
-
     ----------------------------------------------------------------------
     -- Obtain cutoff offset values (SCN, binlog, LSN) based on connector
     ----------------------------------------------------------------------
@@ -5189,6 +5448,42 @@ BEGIN
             p_case_strategy
         );
 
+    ELSIF v_connector = 'sqlserver' THEN
+        RAISE NOTICE 'Step 2: Creating/ensuring current lsn foreign table exists in schema "%" using server "%"',
+                     v_meta_schema, v_server_name;
+        PERFORM synchdb_create_current_sqlserver_lsn_ft(v_meta_schema, v_server_name);
+
+        RAISE NOTICE 'Step 3: Reading current commit_lsn value from %.current_lsn', v_meta_schema;
+        EXECUTE format('SELECT max_lsn FROM %I.current_lsn', v_meta_schema)
+           INTO v_ss_lsn;
+
+        IF v_ss_lsn IS NULL THEN
+            RAISE EXCEPTION 'Unable to read max_lsn from %.current_lsn', v_meta_schema;
+        END IF;
+
+        -- overwrite if needed
+        IF v_offset_json IS NOT NULL AND v_offset_json ? 'commit_lsn' THEN
+          v_ss_lsn := v_offset_json->>'commit_lsn';
+        END IF;
+
+        RAISE NOTICE 'Using commit_lsn % for snapshot', v_ss_lsn;
+
+        RAISE NOTICE 'Step 4: Creating staging foreign tables in schema "%"', p_stage_schema;
+        PERFORM synchdb_create_ora_stage_fts(
+            p_connector_name,
+            p_lookup_db,
+            p_lookup_schema,
+            p_stage_schema,
+            v_server_name,
+            p_lower_names,
+            p_on_exists,
+            json_build_object('commit_lsn', v_ss_lsn)::text,
+            v_meta_schema,
+            p_snapshot_tables,
+            p_write_schema_hist,
+            p_case_strategy
+        );
+
     ELSE
         RAISE EXCEPTION 'Unsupported connector type: %', v_connector;
     END IF;
@@ -5248,6 +5543,19 @@ BEGIN
                 true,
                 true
             );
+        ELSIF v_connector = 'sqlserver' THEN
+            PERFORM synchdb_migrate_data_with_transforms(
+                p_stage_schema,
+                p_connector_name,
+                p_dest_schema,
+                p_lookup_db,
+                json_build_object('commit_lsn', v_ss_lsn)::text,
+				p_case_strategy,
+                p_lookup_schema,
+                false, 0,
+                true,
+                true
+            );
         ELSE
             RAISE EXCEPTION 'Unsupported connector type: %', v_connector;
         END IF;
@@ -5280,6 +5588,9 @@ BEGIN
     ELSIF v_connector = 'postgres' THEN
         RAISE NOTICE 'Initial snapshot completed successfully at LSN %', v_lsn;
         v_ret := v_lsn;
+    ELSIF v_connector = 'sqlserver' THEN
+        RAISE NOTICE 'Initial snapshot completed successfully at commit_lsn %', v_ss_lsn;
+        v_ret := v_ss_lsn;
     ELSE
         v_ret := NULL;
     END IF;
@@ -5339,6 +5650,8 @@ DECLARE
 
     v_lsn           text;       -- used by postgres connector
 
+    v_ss_lsn        text;       -- used by sqlserver connector (commit_lsn, Debezium hex-group format)
+
     v_ret           text;       -- return value (connector-specific offset string)
 BEGIN
     SELECT lower(data->>'connector')
@@ -5376,7 +5689,7 @@ BEGIN
 
     -- Decide metadata schema name up-front
     v_meta_schema := ('metaschema_' || p_connector_name)::name;
-    RAISE NOTICE 'Step 1.5: Materialize foreign object views to %', v_meta_schema;
+    RAISE NOTICE 'Step 1.5c: Materialize foreign object views to %', v_meta_schema;
 
     -- Create foreign object views based on connector type
     IF v_connector IN ('oracle', 'olr') THEN
@@ -5394,13 +5707,17 @@ BEGIN
                      p_source_schema, v_server_name;
         PERFORM synchdb_create_pg_objs(v_server_name, p_source_schema, v_case_json);
 
+    ELSIF v_connector = 'sqlserver' THEN
+        RAISE NOTICE 'Step 1: Creating SQL Server FDW object views for schema "%" using server "%"',
+                     p_source_schema, v_server_name;
+        PERFORM synchdb_create_sqlserver_objs(v_server_name, p_source_schema, v_case_json);
+
     ELSE
         RAISE EXCEPTION 'Unsupported connector type: %', v_connector;
     END IF;
 
-    RAISE NOTICE 'Step 1.5: Materializing foreign object views to %', v_meta_schema;
+    RAISE NOTICE 'Materializing foreign object views to %', v_meta_schema;
     PERFORM synchdb_materialize_ora_metadata(p_source_schema, v_meta_schema, p_on_exists);
-
     ----------------------------------------------------------------------
     -- Obtain cutoff offset values (SCN, binlog, LSN) based on connector
     ----------------------------------------------------------------------
@@ -5536,6 +5853,42 @@ BEGIN
             p_case_strategy
         );
 
+    ELSIF v_connector = 'sqlserver' THEN
+        RAISE NOTICE 'Step 2: Creating/ensuring current lsn foreign table exists in schema "%" using server "%"',
+                     v_meta_schema, v_server_name;
+        PERFORM synchdb_create_current_sqlserver_lsn_ft(v_meta_schema, v_server_name);
+
+        RAISE NOTICE 'Step 3: Reading current commit_lsn value from %.current_lsn', v_meta_schema;
+        EXECUTE format('SELECT max_lsn FROM %I.current_lsn', v_meta_schema)
+           INTO v_ss_lsn;
+
+        IF v_ss_lsn IS NULL THEN
+            RAISE EXCEPTION 'Unable to read max_lsn from %.current_lsn', v_meta_schema;
+        END IF;
+
+        -- overwrite if needed
+        IF v_offset_json IS NOT NULL AND v_offset_json ? 'commit_lsn' THEN
+          v_ss_lsn := v_offset_json->>'commit_lsn';
+        END IF;
+
+        RAISE NOTICE 'Using commit_lsn % for snapshot', v_ss_lsn;
+
+        RAISE NOTICE 'Step 4: Creating staging foreign tables in schema "%"', p_stage_schema;
+        PERFORM synchdb_create_ora_stage_fts(
+            p_connector_name,
+            p_lookup_db,
+            p_lookup_schema,
+            p_stage_schema,
+            v_server_name,
+            p_lower_names,
+            p_on_exists,
+            json_build_object('commit_lsn', v_ss_lsn)::text,
+            v_meta_schema,
+            p_snapshot_tables,
+            p_write_schema_hist,
+            p_case_strategy
+        );
+
     ELSE
         RAISE EXCEPTION 'Unsupported connector type: %', v_connector;
     END IF;
@@ -5568,6 +5921,9 @@ BEGIN
     ELSIF v_connector = 'postgres' THEN
         RAISE NOTICE 'Initial snapshot completed successfully at LSN %', v_lsn;
         v_ret := v_lsn;
+    ELSIF v_connector = 'sqlserver' THEN
+        RAISE NOTICE 'Initial snapshot completed successfully at commit_lsn %', v_ss_lsn;
+        v_ret := v_ss_lsn;
     ELSE
         v_ret := NULL;
     END IF;
@@ -5881,4 +6237,3 @@ BEGIN
     END CASE;
 END;
 $$;
-

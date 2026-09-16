@@ -3,8 +3,36 @@ import time
 from datetime import datetime
 from common import run_pg_query, run_pg_query_one, run_remote_query, create_synchdb_connector, getConnectorName, getDbname, verify_default_type_mappings, stop_and_delete_synchdb_connector, drop_default_pg_schema, create_and_start_synchdb_connector, update_guc_conf, getSchema, drop_repslot_and_pub, restart_remote_db
 
-# import pytest
-# pytestmark = pytest.mark.skip(reason="跳过此文件")
+import pytest
+
+
+def wait_for_connector_cdc(cursor, name, timeout=180, interval=2):
+    """Wait until a connector is polling in the CDC stage."""
+    deadline = time.time() + timeout
+    last = None
+    while time.time() < deadline:
+        last = run_pg_query_one(
+            cursor,
+            f"SELECT stage, state, err FROM synchdb_state_view WHERE name = '{name}'")
+        if last is not None:
+            stage, state, err = last
+            if stage == "change data capture" and state == "polling":
+                return last
+            if state in ("paused", "stopped") and err != "no error":
+                pytest.fail(f"connector failed before CDC: stage={stage}, state={state}, err={err}")
+        time.sleep(interval)
+    pytest.fail(f"connector did not reach CDC within {timeout}s; last state: {last}")
+
+
+def wait_for_pg_row(cursor, query, timeout=60, interval=1):
+    """Poll a PostgreSQL query until it returns one row."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        row = run_pg_query_one(cursor, query)
+        if row is not None:
+            return row
+        time.sleep(interval)
+    pytest.fail(f"row did not arrive within {timeout}s: {query}")
 
 
 def test_ConnectorCreate(pg_cursor, dbvendor):
@@ -198,24 +226,19 @@ def test_InitialSnapshotFDW(pg_cursor, dbvendor):
     if dbvendor == "mysql":
         isfdw = run_pg_query_one(pg_cursor, f"SELECT EXISTS ( SELECT 1 FROM pg_available_extensions WHERE name = 'mysql_fdw' ) AS mysql_fdw_available")
         if isfdw[0] == False:
-            print ("test_InitialSnapshotFDW skipped - mysql_fdw not available for install")
-            assert True
-            return
+            pytest.skip("mysql_fdw is not available for install")
     elif dbvendor == "sqlserver":
-        assert True
-        return
+        isfdw = run_pg_query_one(pg_cursor, f"SELECT EXISTS ( SELECT 1 FROM pg_available_extensions WHERE name = 'tds_fdw' ) AS tds_fdw_available")
+        if isfdw[0] == False:
+            pytest.skip("tds_fdw is not available for install")
     elif dbvendor == "postgres":
         isfdw = run_pg_query_one(pg_cursor, f"SELECT EXISTS ( SELECT 1 FROM pg_available_extensions WHERE name = 'postgres_fdw' ) AS postgres_fdw_available")
         if isfdw[0] == False:
-            print ("test_InitialSnapshotFDW skipped - postgres_fdw not available for install")
-            assert True
-            return
+            pytest.skip("postgres_fdw is not available for install")
     else:
         isfdw = run_pg_query_one(pg_cursor, f"SELECT EXISTS ( SELECT 1 FROM pg_available_extensions WHERE name = 'oracle_fdw' ) AS oracle_fdw_available")
         if isfdw[0] == False:
-            print ("test_InitialSnapshotFDW skipped - oracle_fdw not available for install")
-            assert True
-            return
+            pytest.skip("oracle_fdw is not available for install")
 
     update_guc_conf(pg_cursor, "synchdb.snapshot_engine", "'fdw'", True)
     update_guc_conf(pg_cursor, "synchdb.letter_casing_strategy", "'lowercase'", True)
@@ -223,10 +246,7 @@ def test_InitialSnapshotFDW(pg_cursor, dbvendor):
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial")
     assert result == 0
 
-    if dbvendor in ("oracle", "oracle23ai", "olr"):
-        time.sleep(80)
-    else:
-        time.sleep(10)
+    wait_for_connector_cdc(pg_cursor, name, timeout=240)
 
     # check table counts
     pgtblcount = run_pg_query_one(pg_cursor, f"SELECT count(*) FROM information_schema.tables where table_schema='{dbname}' and table_type = 'BASE TABLE'")
@@ -238,6 +258,7 @@ def test_InitialSnapshotFDW(pg_cursor, dbvendor):
         exttblcount = run_remote_query(dbvendor, f"SELECT count(*) FROM information_schema.tables where table_schema='{schema}' and table_type = 'BASE TABLE'")
     else:
         exttblcount = run_remote_query(dbvendor, f"SELECT COUNT(*) FROM user_tables WHERE table_name NOT LIKE 'LOG_MINING%'")
+
     assert int(pgtblcount[0]) == int(exttblcount[0][0])
 
     # check row counts or orders table
@@ -291,10 +312,15 @@ def test_InitialSnapshotFDW(pg_cursor, dbvendor):
     assert int(pgrow[4]) == int(extrow[0][4])
 
     # test cdc now
-    if dbvendor == "postgres" or dbvendor == "mysql":
+    if dbvendor in ("postgres", "mysql"):
         query = """
             INSERT INTO orders(order_number, order_date, purchaser, quantity,
             product_id) VALUES (10005, '2025-12-12', 1002, 10000, 102);
+        """
+    elif dbvendor == "sqlserver":
+        query = """
+            INSERT INTO orders(order_date, purchaser, quantity, product_id)
+            VALUES ('2025-12-12', 1002, 10000, 102);
         """
     else:
         query = """
@@ -304,12 +330,11 @@ def test_InitialSnapshotFDW(pg_cursor, dbvendor):
         """
     
     run_remote_query(dbvendor, query)
-    if dbvendor in ("oracle", "oracle23ai", "olr"):
-        time.sleep(50)
-    else:
-        time.sleep(10)
-
-    pgrow = run_pg_query_one(pg_cursor, f"SELECT order_number, order_date, purchaser, quantity, product_id FROM {dbname}.orders WHERE order_number >= 10005")
+    pgrow = wait_for_pg_row(
+        pg_cursor,
+        f"SELECT order_number, order_date, purchaser, quantity, product_id "
+        f"FROM {dbname}.orders WHERE order_number >= 10005",
+        timeout=120)
     assert pgrow != None
     assert int(pgrow[3]) == 10000
 
@@ -417,7 +442,7 @@ def test_InitialSnapshotDBZ_uppercase(pg_cursor, dbvendor):
     elif dbvendor == "sqlserver":
         query = """
             INSERT INTO orders(order_date, purchaser, quantity, product_id) VALUES
-            ("2025-12-12", 1002, 10000, 102)
+            ('2025-12-12', 1002, 10000, 102)
         """
     elif dbvendor == "postgres":
         query = """
@@ -463,8 +488,11 @@ def test_InitialSnapshotFDW_uppercase(pg_cursor, dbvendor):
             assert True
             return
     elif dbvendor == "sqlserver":
-        assert True
-        return
+        isfdw = run_pg_query_one(pg_cursor, f"SELECT EXISTS ( SELECT 1 FROM pg_available_extensions WHERE name = 'tds_fdw' ) AS tds_fdw_available")
+        if isfdw[0] == False:
+            print ("test_InitialSnapshotFDW_uppercase skipped - tds_fdw not available for install")
+            assert True
+            return
     elif dbvendor == "postgres":
         isfdw = run_pg_query_one(pg_cursor, f"SELECT EXISTS ( SELECT 1 FROM pg_available_extensions WHERE name = 'postgres_fdw' ) AS postgres_fdw_available")
         if isfdw[0] == False:
@@ -560,7 +588,7 @@ def test_InitialSnapshotFDW_uppercase(pg_cursor, dbvendor):
     elif dbvendor == "sqlserver":
         query = """
             INSERT INTO orders(order_date, purchaser, quantity, product_id) VALUES
-            ("2025-12-12", 1002, 10000, 102)
+            ('2025-12-12', 1002, 10000, 102)
         """
     elif dbvendor == "postgres":
         query = """
@@ -695,7 +723,7 @@ def test_InitialSnapshotDBZ_asis(pg_cursor, dbvendor):
     elif dbvendor == "sqlserver":
         query = """
             INSERT INTO orders(order_date, purchaser, quantity, product_id) VALUES
-            ("2025-12-12", 1002, 10000, 102)
+            ('2025-12-12', 1002, 10000, 102)
         """
     elif dbvendor == "postgres":
         query = """
@@ -748,8 +776,11 @@ def test_InitialSnapshotFDW_asis(pg_cursor, dbvendor):
             assert True
             return
     elif dbvendor == "sqlserver":
-        assert True
-        return
+        isfdw = run_pg_query_one(pg_cursor, f"SELECT EXISTS ( SELECT 1 FROM pg_available_extensions WHERE name = 'tds_fdw' ) AS tds_fdw_available")
+        if isfdw[0] == False:
+            print ("test_InitialSnapshotFDW_asis skipped - tds_fdw not available for install")
+            assert True
+            return
     elif dbvendor == "postgres":
         isfdw = run_pg_query_one(pg_cursor, f"SELECT EXISTS ( SELECT 1 FROM pg_available_extensions WHERE name = 'postgres_fdw' ) AS postgres_fdw_available")
         if isfdw[0] == False:
@@ -852,7 +883,7 @@ def test_InitialSnapshotFDW_asis(pg_cursor, dbvendor):
     elif dbvendor == "sqlserver":
         query = """
             INSERT INTO orders(order_date, purchaser, quantity, product_id) VALUES
-            ("2025-12-12", 1002, 10000, 102)
+            ('2025-12-12', 1002, 10000, 102)
         """
     elif dbvendor == "postgres":
         query = """
@@ -1023,8 +1054,11 @@ def test_ConnectorStartSchemaSyncModeFDW(pg_cursor, dbvendor):
             assert True
             return
     elif dbvendor == "sqlserver":
-        assert True
-        return
+        isfdw = run_pg_query_one(pg_cursor, f"SELECT EXISTS ( SELECT 1 FROM pg_available_extensions WHERE name = 'tds_fdw' ) AS tds_fdw_available")
+        if isfdw[0] == False:
+            print ("test_ConnectorStartSchemaSyncModeFDW skipped - tds_fdw not available for install")
+            assert True
+            return
     elif dbvendor == "postgres":
         isfdw = run_pg_query_one(pg_cursor, f"SELECT EXISTS ( SELECT 1 FROM pg_available_extensions WHERE name = 'postgres_fdw' ) AS postgres_fdw_available")
         if isfdw[0] == False:
@@ -1111,11 +1145,16 @@ def test_ConnectorStartSchemaSyncModeFDW(pg_cursor, dbvendor):
 
     time.sleep(20)
     # test a bit of cdc
-    if dbvendor == "postgres" or dbvendor == "mysql":
+    if dbvendor in ("postgres", "mysql"):
         query = """
 			INSERT INTO orders(order_number, order_date, purchaser, quantity,
 			product_id) VALUES (10005, '2025-12-12', 1002, 10000, 102);
 		"""
+    elif dbvendor == "sqlserver":
+        query = """
+            INSERT INTO orders(order_date, purchaser, quantity, product_id)
+            VALUES ('2025-12-12', 1002, 10000, 102);
+        """
     else:
         query = """
             INSERT INTO orders(order_number, order_date, purchaser, quantity,
@@ -1235,8 +1274,11 @@ def test_ConnectorStartAlwaysModeFDW(pg_cursor, dbvendor):
             assert True
             return
     elif dbvendor == "sqlserver":
-        assert True
-        return
+        isfdw = run_pg_query_one(pg_cursor, f"SELECT EXISTS ( SELECT 1 FROM pg_available_extensions WHERE name = 'tds_fdw' ) AS tds_fdw_available")
+        if isfdw[0] == False:
+            print ("test_ConnectorStartAlwaysModeFDW skipped - tds_fdw not available for install")
+            assert True
+            return
     elif dbvendor == "postgres":
         isfdw = run_pg_query_one(pg_cursor, f"SELECT EXISTS ( SELECT 1 FROM pg_available_extensions WHERE name = 'postgres_fdw' ) AS postgres_fdw_available")
         if isfdw[0] == False:
@@ -1417,8 +1459,11 @@ def test_ConnectorStartNodataModeFDW(pg_cursor, dbvendor):
             assert True
             return
     elif dbvendor == "sqlserver":
-        assert True
-        return
+        isfdw = run_pg_query_one(pg_cursor, f"SELECT EXISTS ( SELECT 1 FROM pg_available_extensions WHERE name = 'tds_fdw' ) AS tds_fdw_available")
+        if isfdw[0] == False:
+            print ("test_ConnectorStartNodataModeFDW skipped - tds_fdw not available for install")
+            assert True
+            return
     elif dbvendor == "postgres":
         isfdw = run_pg_query_one(pg_cursor, f"SELECT EXISTS ( SELECT 1 FROM pg_available_extensions WHERE name = 'postgres_fdw' ) AS postgres_fdw_available")
         if isfdw[0] == False:

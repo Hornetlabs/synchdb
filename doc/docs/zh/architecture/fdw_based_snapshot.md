@@ -9,6 +9,7 @@
 * MySQL 連接器
 * Postgres 連接器
 * Oracle 和 Openlog Replicator 連接器
+* Microsoft SQL Server 連接器
 
 ## **SynchDB 如何保證資料一致性並取得截止點**
 
@@ -46,6 +47,13 @@
 
 <**注意**> Oracle 和 Openlog Replicator 連接器現已支援容器資料庫（CDB/PDB）架構：只要在建立連接器時將來源資料庫指定為 `CDB/PDB` 格式（例如 `FREE/FREEPDB1`），基於 FDW 的快照將自動連線到對應的 PDB 服務名稱。
 
+### **Microsoft SQL Server 連接器**
+
+* 快照開始前，讀取 `sys.fn_cdc_get_max_lsn()` 作為快照截止點。來源資料庫及目標表必須已啟用 SQL Server Change Data Capture (CDC)，這也是 Debezium SQL Server 連接器的既有前提。
+* 透過一般（自動提交）的 `tds_fdw` 外部表讀取遷移所有目標表的架構與資料，不使用表鎖或特殊的交易隔離等級。
+* 完成後，Debezium recovery 模式只重建 SQL Server schema history，不再擷取一次資料快照；之後 CDC 從截止點 `commit_lsn` 恢復。
+
+<**注意**> 與 Oracle 的 Flashback 查詢或維持開啟的 repeatable read 交易不同，`tds_fdw` 不會讓所有外部表讀取共用同一個遠端交易。因此，截止點之後提交的變更可能同時出現在 FDW 複製與 CDC 重播中。SynchDB 會依目的端主鍵（或 replica identity）檢查 SQL Server 的 create 事件，略過已由快照複製的資料列。使用 FDW 快照加 CDC 的資料表應具有主鍵；缺少主鍵時，無法可靠地消除重疊資料。
 ## **基於 FDW 的快照如何運作**
 
 基於 FDW 的快照大約包含 10 個步驟：
@@ -88,6 +96,10 @@ SynchDB 無需考慮每個物件即可完成初始快照；它僅考慮 "表"、
 
 * 從 current_scn 表中讀取目前 `SCN` 值
 
+**Microsoft SQL Server 連接器**
+
+* 從以 `sys.fn_cdc_get_max_lsn()` 為基礎的外部表讀取目前的 `commit_lsn`（格式化為 Debezium Lsn 字串，例如 `0000006a:00006608:0003`）。
+
 ### **4.建立所需外部表格清單**
 
 此步驟的目標是建立一個新的暫存模式（例如 ora_stage），並基於下列條件為快照建立所需的外部表：
@@ -97,7 +109,7 @@ SynchDB 無需考慮每個物件即可完成初始快照；它僅考慮 "表"、
 * 額外的資料類型映射，如 `synchdb_objmap` 中所述
 * 步驟 3 中獲得的截止 SCN（僅限 Oracle 和 Openlog Replicator 連接器）
 
-在此步驟結束時，暫存模式將包含外部表，其資料類型將根據 SynchDB 的資料類型對應規則進行對應。對於 Oracle 和 Openlog Replicator 連接器，外部表將具有 `AS OF SCN xxx` 屬性，導致每次外部讀取僅傳回指定 SCN 之前的資料。對於其他連接器類型，外部讀取將傳回可重複事務開始時的所有資料。
+在此步驟結束時，暫存模式將包含外部表，其資料類型將根據 SynchDB 的資料類型對應規則進行對應。對於 Oracle 和 Openlog Replicator 連接器，外部表將具有 `AS OF SCN xxx` 屬性，導致每次外部讀取僅傳回指定 SCN 之前的資料。MySQL 與 Postgres 使用各自的快照交易語義；SQL Server 則使用一般 `tds_fdw` 讀取以及具冪等性的 CDC 重疊處理。
 
 ### **5.物化模式**
 
