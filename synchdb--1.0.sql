@@ -1453,9 +1453,12 @@ BEGIN
          schema     text,
          table_name text
       ) SERVER %2$I OPTIONS (query $query$
-         SELECT TABLE_SCHEMA AS [schema], TABLE_NAME AS [table_name]
-         FROM INFORMATION_SCHEMA.TABLES
-         WHERE TABLE_TYPE = 'BASE TABLE'
+         SELECT t.TABLE_SCHEMA AS [schema], t.TABLE_NAME AS [table_name]
+         FROM INFORMATION_SCHEMA.TABLES t
+         JOIN sys.schemas s ON s.name = t.TABLE_SCHEMA
+         JOIN sys.tables st ON st.schema_id = s.schema_id AND st.name = t.TABLE_NAME
+         WHERE t.TABLE_TYPE = 'BASE TABLE'
+           AND st.is_ms_shipped = 0
       $query$);
       COMMENT ON FOREIGN TABLE %1$I.tables IS 'SQL Server tables (via tds_fdw)';
    $SQL$, schema, server);
@@ -1488,7 +1491,10 @@ BEGIN
          FROM INFORMATION_SCHEMA.COLUMNS c
          JOIN INFORMATION_SCHEMA.TABLES t
            ON t.TABLE_SCHEMA = c.TABLE_SCHEMA AND t.TABLE_NAME = c.TABLE_NAME
+         JOIN sys.schemas s ON s.name = t.TABLE_SCHEMA
+         JOIN sys.tables st ON st.schema_id = s.schema_id AND st.name = t.TABLE_NAME
          WHERE t.TABLE_TYPE = 'BASE TABLE'
+           AND st.is_ms_shipped = 0
       $query$);
       COMMENT ON FOREIGN TABLE %1$I.columns IS 'columns of SQL Server tables (via tds_fdw)';
    $SQL$, schema, server);
@@ -1518,7 +1524,10 @@ BEGIN
          JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
            ON tc.CONSTRAINT_SCHEMA = kcu.CONSTRAINT_SCHEMA
           AND tc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
+         JOIN sys.schemas s ON s.name = tc.TABLE_SCHEMA
+         JOIN sys.tables st ON st.schema_id = s.schema_id AND st.name = tc.TABLE_NAME
          WHERE tc.CONSTRAINT_TYPE IN ('PRIMARY KEY', 'UNIQUE')
+           AND st.is_ms_shipped = 0
       $query$);
       COMMENT ON FOREIGN TABLE %1$I.keys IS 'SQL Server primary/unique key columns (via tds_fdw)';
    $SQL$, schema, server);

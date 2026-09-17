@@ -1746,7 +1746,8 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 				if (get_shm_connector_stage_enum(myConnectorId) != STAGE_SCHEMA_SYNC)
 					set_shm_connector_stage(myConnectorId, STAGE_SCHEMA_SYNC);
 			}
-			else
+			/* Recovery events after an FDW snapshot also carry snapshot=true. */
+			else if (flag & CONNFLAG_INITIAL_SNAPSHOT_MODE)
 			{
 				if (get_shm_connector_stage_enum(myConnectorId) != STAGE_INITIAL_SNAPSHOT)
 					set_shm_connector_stage(myConnectorId, STAGE_INITIAL_SNAPSHOT);
