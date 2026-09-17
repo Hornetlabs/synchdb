@@ -51,9 +51,7 @@ def fdw_engine(pg_cursor):
 def test_FailThenRetryFDW(pg_cursor, dbvendor, fdw_engine, target):
     if dbvendor == "mysql" and target.key == "ivorysql5":
         pytest.skip("TODO: IvorySQL 5.4 not support mysql_fdw yet")
-    if dbvendor == "sqlserver":
-        pytest.skip("sqlserver no FDW snapshot yet")
-    
+
     BIG_VALUE = 9223372036854775807
 
     dbname = getDbname(dbvendor).lower()
@@ -70,6 +68,14 @@ def test_FailThenRetryFDW(pg_cursor, dbvendor, fdw_engine, target):
         );
         """
     elif dbvendor == "postgres":
+        query_pattern = """
+        CREATE TABLE bad_table_{} (
+        id INT NOT NULL,
+        order_id BIGINT,
+        PRIMARY KEY(id)
+        );
+        """
+    elif dbvendor == "sqlserver":
         query_pattern = """
         CREATE TABLE bad_table_{} (
         id INT NOT NULL,
@@ -162,6 +168,14 @@ def test_FailThenRetryDebezium(pg_cursor, dbvendor):
         );
         """
     elif dbvendor == "postgres":
+        query_pattern = """
+        CREATE TABLE bad_table_{} (
+        id INT NOT NULL,
+        order_id BIGINT,
+        PRIMARY KEY(id)
+        );
+        """
+    elif dbvendor == "sqlserver":
         query_pattern = """
         CREATE TABLE bad_table_{} (
         id INT NOT NULL,
