@@ -3462,7 +3462,10 @@ convert2PGDML(DBZ_DML * dbzdml, ConnectorType type)
 					destroyPGDML(pgdml);
 					return NULL;
 				}
-				appendStringInfo(&strinfo, ");");
+				appendStringInfoChar(&strinfo, ')');
+				if (dbzdml->op == 'c' && type == TYPE_SQLSERVER)
+					appendStringInfoString(&strinfo, " ON CONFLICT DO NOTHING");
+				appendStringInfoChar(&strinfo, ';');
 			}
 			else
 			{

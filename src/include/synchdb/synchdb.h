@@ -350,6 +350,11 @@ typedef struct
 		{
 			unsigned long long lsn;
 		} postgres;
+
+		struct
+		{
+			char commit_lsn[32];
+		} sqlserver;
 	} data;
 } OffsetData;
 

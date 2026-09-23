@@ -90,6 +90,15 @@ function build_synchdb()
 		)
 	fi
 
+	# ---- tds_fdw (FDW-based SQL Server snapshot) ----
+	# Requires FreeTDS dev headers (freetds-dev / libsybdb5 on Debian/Ubuntu).
+	git clone https://github.com/tds-fdw/tds_fdw.git --branch v2.0.5 "${srcdir}/contrib/tds_fdw"
+	(
+		cd "${srcdir}/contrib/tds_fdw"
+		make USE_PGXS=1 PG_CONFIG="${pgconfig}"
+		make USE_PGXS=1 PG_CONFIG="${pgconfig}" install
+	)
+
 	# ---- protobuf-c (OLR connector dependency) ----
 	git clone https://github.com/protobuf-c/protobuf-c.git --branch v1.5.2
 	(

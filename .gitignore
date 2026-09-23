@@ -11,3 +11,7 @@ synchdb_testdir/
 
 # When PG is configured with --enable-llvm, .bc files will be generated.
 *.bc
+
+# Generated extension installation script (sources live in src/sql/).
+/synchdb--1.0.sql
+/synchdb--1.0.sql.tmp

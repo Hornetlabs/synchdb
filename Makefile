@@ -3,7 +3,29 @@
 MODULE_big = synchdb
 
 EXTENSION = synchdb
-DATA = synchdb--1.0.sql
+DATA_built = synchdb--1.0.sql
+
+# Keep the original SQL definition order.  These are the sources for the
+# generated extension installation script; do not edit that script directly.
+SQL_SOURCES = src/sql/core.sql \
+              src/sql/fdw/prepare.sql \
+              src/sql/fdw/postgres.sql \
+              src/sql/fdw/mysql.sql \
+              src/sql/fdw/sqlserver.sql \
+              src/sql/fdw/oracle.sql \
+              src/sql/fdw/metadata.sql \
+              src/sql/fdw/stage.sql \
+              src/sql/fdw/schema.sql \
+              src/sql/fdw/column_mappings.sql \
+              src/sql/fdw/data.sql \
+              src/sql/fdw/table_mappings.sql \
+              src/sql/fdw/finalize.sql \
+              src/sql/fdw/snapshot.sql \
+              src/sql/fdw/schema_sync.sql \
+              src/sql/fdw/types.sql \
+              src/sql/fdw/compat.sql
+
+EXTRA_CLEAN += synchdb--1.0.sql.tmp
 PGFILEDESC = "synchdb - allows logical replication with heterogeneous databases"
 
 REGRESS = synchdb
@@ -72,6 +94,10 @@ include $(top_builddir)/src/Makefile.global
 include $(top_srcdir)/contrib/contrib-global.mk
 PG_MAJOR := $(MAJORVERSION)
 endif
+
+synchdb--1.0.sql: $(addprefix $(srcdir)/, $(SQL_SOURCES)) $(srcdir)/Makefile
+	cat $(addprefix $(srcdir)/, $(SQL_SOURCES)) > $@.tmp
+	mv $@.tmp $@
 
 
 check_protobufc:
@@ -151,11 +177,11 @@ _PYTEST_SEL = $(if $(SOURCE),--source=$(SOURCE)) $(if $(TARGET),--target=$(TARGE
 .PHONY: dbcheck dbcheck-tpcc mysqlcheck sqlservercheck oraclecheck oracle23aicheck olrcheck postgrescheck \
         mysqlcheck-benchmark sqlservercheck-benchmark oraclecheck-benchmark olrcheck-benchmark
 dbcheck:
-	@command -v pytest >/dev/null 2>&1 || { echo >&2 "❌ pytest not found in PATH."; exit 1; }
+	@command -v pytest --durations=0 >/dev/null 2>&1 || { echo >&2 "❌ pytest not found in PATH."; exit 1; }
 	@command -v docker >/dev/null 2>&1 || { echo >&2 "❌ docker not found in PATH."; exit 1; }
 	@command -v docker-compose >/dev/null 2>&1 || command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1 || { echo >&2 "❌ docker-compose not found in PATH"; exit 1; }
 	@echo "Running tests: source=$(SOURCE) target=$(TARGET)"
-	PYTHONPATH=./src/test/pytests/synchdbtests/ pytest -x -v -s $(_PYTEST_SEL) --capture=tee-sys ./src/test/pytests/synchdbtests/
+	PYTHONPATH=./src/test/pytests/synchdbtests/ pytest --durations=0 -x -v -s $(_PYTEST_SEL) --capture=tee-sys ./src/test/pytests/synchdbtests/
 	rm -r .pytest_cache ./src/test/pytests/synchdbtests/__pycache__ ./src/test/pytests/synchdbtests/t/__pycache__
 
 dbcheck-tpcc:

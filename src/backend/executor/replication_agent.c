@@ -320,16 +320,20 @@ spi_execute(const char * query, ConnectorType type)
  * It creates a tuple from the provided column values and inserts it into the table.
  */
 static int
-synchdb_handle_insert(List * colval, Oid tableoid, ConnectorType type, int natts)
+synchdb_handle_insert(List * colval, Oid tableoid, ConnectorType type, int natts,
+		bool skipExisting)
 {
 	Relation rel = NULL;
 	TupleTableSlot *slot;
+	TupleTableSlot *localslot = NULL;
 	EState	   *estate = NULL;
 	RangeTblEntry *rte;
 	List	   *perminfos = NIL;
 	ResultRelInfo *resultRelInfo = NULL;
 	ListCell * cell;
 	int i = 0;
+	bool found = false;
+	Oid idxoid = InvalidOid;
 
 	/*
 	 * we put in TRY and CATCH block to capture potential exceptions raised
@@ -397,11 +401,34 @@ synchdb_handle_insert(List * colval, Oid tableoid, ConnectorType type, int natts
 		/* We must open indexes here. */
 		ExecOpenIndices(resultRelInfo, false);
 
-		/* Do the insert. */
-		ExecSimpleRelationInsert(resultRelInfo, estate, slot);
+		/*
+		 * A SQL Server FDW snapshot is not taken in the same remote
+		 * transaction as the CDC cutoff.  Its first CDC batch can therefore
+		 * replay create events for rows already copied by the snapshot.  Use
+		 * the replica identity/primary key to make those creates idempotent.
+		 */
+		if (skipExisting)
+		{
+			idxoid = GetRelationIdentityOrPK(rel);
+			if (OidIsValid(idxoid))
+			{
+				localslot = table_slot_create(rel, &estate->es_tupleTable);
+				found = RelationFindReplTupleByIndex(rel, idxoid,
+						LockTupleExclusive, slot, localslot);
+			}
+			else
+				elog(WARNING, "cannot de-duplicate SQL Server create event for relation %u without a primary key or replica identity",
+						RelationGetRelid(rel));
+		}
 
-		/* increment command ID */
-		CommandCounterIncrement();
+		if (!found)
+		{
+			ExecSimpleRelationInsert(resultRelInfo, estate, slot);
+			CommandCounterIncrement();
+		}
+		else
+			elog(DEBUG1, "skipping SQL Server create event already present in relation %u",
+					RelationGetRelid(rel));
 
 		/* Cleanup. */
 		ExecCloseIndices(resultRelInfo);
@@ -867,7 +894,8 @@ ra_executePGDML(PG_DML * pgdml, ConnectorType type, SynchdbStatistics * myBatchS
 			if (synchdb_dml_use_spi)
 				ret = spi_execute(pgdml->dmlquery, type);
 			else
-				ret = synchdb_handle_insert(pgdml->columnValuesAfter, pgdml->tableoid, type, pgdml->natts);
+				ret = synchdb_handle_insert(pgdml->columnValuesAfter, pgdml->tableoid,
+						type, pgdml->natts, false);
 
 			increment_connector_statistics(myBatchStats, STATS_ROWS, 1);
 			break;
@@ -877,7 +905,8 @@ ra_executePGDML(PG_DML * pgdml, ConnectorType type, SynchdbStatistics * myBatchS
 			if (synchdb_dml_use_spi)
 				ret = spi_execute(pgdml->dmlquery, type);
 			else
-				ret = synchdb_handle_insert(pgdml->columnValuesAfter, pgdml->tableoid, type, pgdml->natts);
+				ret = synchdb_handle_insert(pgdml->columnValuesAfter, pgdml->tableoid,
+						type, pgdml->natts, type == TYPE_SQLSERVER);
 
 			if (!isInSnapshot)
 				increment_connector_statistics(myBatchStats, STATS_CREATE, 1);

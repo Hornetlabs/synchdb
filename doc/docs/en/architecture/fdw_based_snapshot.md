@@ -9,6 +9,7 @@ FDW based snapshot is supported for:
 * MySQL Connector
 * Postgres Connector
 * Oracle and Openlog Replicator Connectors
+* Microsoft SQL Server Connector
 
 ## **How Synchdb Guarentees Consistency and Obtains Cut-Off Point**
 
@@ -46,6 +47,13 @@ WARNING: **BACKUP_ADMIN permission is required to obtain the "cut-point" paramet
 
 <**NOTE**> Oracle and Openlog Replicator connectors now support Container Database (CDB/PDB) architecture: as long as the source database is specified in the `CDB/PDB` format (e.g. `FREE/FREEPDB1`) when creating the connector, the FDW-based snapshot will automatically connect to the corresponding PDB service name.
 
+### **Microsoft SQL Server Connector**
+
+* Before the snapshot begins, read `sys.fn_cdc_get_max_lsn()`, which serves as the snapshot cut-off point. SQL Server Change Data Capture (CDC) must already be enabled on the source database and desired tables, as required by the Debezium SQL Server connector.
+* Migrate all desired tables' schema and data through ordinary (autocommit) `tds_fdw` foreign-table reads. No table locks or special transaction isolation level is used.
+* Once done, Debezium recovery mode rebuilds SQL Server schema history without taking another data snapshot, then CDC resumes from the cut-off `commit_lsn`.
+
+<**NOTE**> Unlike Oracle's Flashback query or a held-open repeatable-read transaction, `tds_fdw` does not manage one remote transaction across all foreign-table reads. Changes committed after the cut-off can therefore appear in both the FDW copy and CDC replay. SynchDB makes replayed SQL Server create events idempotent by checking the destination primary key (or replica identity) and skipping rows already copied. Tables used with FDW snapshot plus CDC should therefore have a primary key; without one, overlap cannot be de-duplicated reliably.
 ## **How does FDW Based Snapshot Work**
 
 FDW based snapshot consists of about 10 steps:
@@ -87,6 +95,10 @@ Foreign tables will be created to read the cut-off value from difference source 
 
 * Read current `SCN` from current_scn table
 
+**Microsoft SQL Server Connector**
+
+* Read the current `commit_lsn` (formatted as a Debezium Lsn string, for example `0000006a:00006608:0003`) from a foreign table backed by `sys.fn_cdc_get_max_lsn()`.
+
 ### **4. Create a List of Desired Foreign Tables**
 
 The goal for this step is to create a new staging schema (ex. ora_stage), and create desired foreign tables for the snapshot based on:
@@ -96,7 +108,7 @@ The goal for this step is to create a new staging schema (ex. ora_stage), and cr
 * Extra data type mapping as described in `synchdb_objmap` 
 * the cut-off SCN obtained from step 3 (Oracle and Openlog Replicator Connectors only)
 
-At the end of this step, the staging schema will contain foreign tables with their data types mapped according to SycnhDB's data type mapping rules. For Oracle and Openlog Replicator Connectors, the foreign tables will have `AS OF SCN xxx` attribute, causing each foreign read to return data only up to specified SCN. For other connector types, the foreign reads return all data at the moment when repeatable transaction starts
+At the end of this step, the staging schema will contain foreign tables with their data types mapped according to SycnhDB's data type mapping rules. For Oracle and Openlog Replicator Connectors, the foreign tables will have an `AS OF SCN xxx` attribute, causing each foreign read to return data only up to the specified SCN. MySQL and Postgres use their snapshot transaction semantics; SQL Server uses ordinary `tds_fdw` reads plus idempotent CDC overlap handling.
 
 ### **5. Materialize the Schema**
 

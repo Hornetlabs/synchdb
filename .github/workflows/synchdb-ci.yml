@@ -64,7 +64,7 @@ jobs:
     - name: Install Protobuf
       run: |
         sudo apt-get update
-        sudo apt-get install -y protobuf-compiler libprotobuf-dev libprotoc-dev uuid-dev
+        sudo apt-get install -y protobuf-compiler libprotobuf-dev libprotoc-dev uuid-dev freetds-dev libsybdb5 freetds-common
     - name: Expose $PG_MAJOR to Github Env
       run: |
         echo "PG_MAJOR=$(echo '${{ matrix.pg_version }}' | jq -r .major)" >> $GITHUB_ENV
@@ -128,7 +128,7 @@ jobs:
     - name: Install Protobuf
       run: |
         sudo apt-get update
-        sudo apt-get install -y protobuf-compiler libprotobuf-dev libprotoc-dev uuid-dev
+        sudo apt-get install -y protobuf-compiler libprotobuf-dev libprotoc-dev uuid-dev freetds-dev libsybdb5 freetds-common
     - name: Build
       run: "./ci/build-synchdb.sh"
       shell: bash
@@ -216,7 +216,7 @@ jobs:
     - name: Install Protobuf
       run: |
         sudo apt-get update
-        sudo apt-get install -y protobuf-compiler libprotobuf-dev libprotoc-dev
+        sudo apt-get install -y protobuf-compiler libprotobuf-dev libprotoc-dev freetds-dev libsybdb5 freetds-common
     - name: synchdb test
       run: |
         TBIN=/mnt/usr/lib/postgresql/${{ matrix.major }}/bin
@@ -308,7 +308,7 @@ jobs:
     - name: Install Protobuf
       run: |
         sudo apt-get update
-        sudo apt-get install -y protobuf-compiler libprotobuf-dev libprotoc-dev
+        sudo apt-get install -y protobuf-compiler libprotobuf-dev libprotoc-dev freetds-dev libsybdb5 freetds-common
     - name: synchdb test
       run: |
         TBIN=/mnt/usr/lib/ivorysql/ivorysql-${{ matrix.major }}/bin
