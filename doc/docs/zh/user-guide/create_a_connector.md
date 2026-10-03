@@ -17,8 +17,8 @@ synchdb_add_conninfo 接受以下参数：
 | password | 用于验证用户名的密码 |
 | source database | 这是我们要从中复制更改的异构数据库中的源数据库的名称。|
 | source schema | 這是來源資料庫中來源模式的名稱，我們要從中複製變更。 |
-| table |（可选）- 以 `[database].[table]` 或 `[database].[schema].[table]` 的形式表示，该参数必须存在于异构数据库中，因此引擎将仅复制指定的表。如果留空，则复制所有表。或者，可以使用 `file:` 前缀指定表列表文件 |
-| snapshot table |（可选）- 以 `[database].[table]` 或 `[database].[schema].[table]` 的形式表示，该参数必须存在于上述 `table` 设置中，因此引擎仅在快照模式设置为 `always` 时才会重建这些表的快照。如果留空或为 null，则当快照模式设置为 `always` 时，将重建上述 `table` 设置中指定的所有表。或者，可以使用 `file:` 前缀指定快照表列表文件 |
+| table |（可选）- MySQL 以 `[database].[table]` 的形式表示，SQL Server / PostgreSQL 以 `[schema].[table]` 的形式表示，该参数必须存在于异构数据库中，因此引擎将仅复制指定的表。如果留空，则复制所有表。或者，可以使用 `file:` 前缀指定表列表文件 |
+| snapshot table |（可选）- MySQL 以 `[database].[table]` 的形式表示，SQL Server / PostgreSQL 以 `[database].[schema].[table]` 的形式表示，详见下方《快照表格式》章节。该参数必须存在于上述 `table` 设置中，因此引擎仅在快照模式设置为 `always` 时才会重建这些表的快照。如果留空或为 null，则当快照模式设置为 `always` 时，将重建上述 `table` 设置中指定的所有表。或者，可以使用 `file:` 前缀指定快照表列表文件 |
 | connector | 要使用的连接器类型（如下）。|
 
 <<**注意**>> `來源資料庫`、`來源模式`、`使用者名稱`、`密碼`、`表`和`快照表`區分大小寫，您必須按照來源資料庫中的名稱準確指定它們，因此請記住這些名稱的字母大小寫。
@@ -93,6 +93,43 @@ SynchDB 通过名称查找以下关键 JSON 数组：
 
 通常，我们可以将 `snapshot table list` 参数留空或保留为 `null`，后者默认与 `table` 参数的值相同。这意味着 SynchDB 将在需要时对 `table` 参数中指定的所有表执行初始快照（复制架构并复制初始数据）。在某些情况下，我们可能只希望对“表”的子集执行初始快照。如果是这种情况，我们可以设置不同的“快照表列表”，指示 SynchDB 仅重建指定的表快照。
 
+## **快照表格式**
+
+`snapshot table`（`snapshottable`）的值会被原样传递给 Debezium 引擎（即 `snapshot.include.collection.list`），Debezium 会将其中每一条与源数据库表的**完整表标识（fully qualified table identifier）**进行匹配：
+
+| 连接器类型 | 格式 | 示例 |
+|----------------|--------|---------|
+| mysql | `[database].[table]` | `inventory.customers` |
+| postgres | `[database].[schema].[table]` | `postgres.public.customers` |
+| sqlserver | `[database].[schema].[table]` | `testDB.dbo.customers` |
+
+<<**重要**>> 它与 `table` 参数的写法**不一样**：对于支持模式（schema）的源数据库，`table` 参数匹配的是不含库名的表名，而 `snapshot table` 匹配的是含库名的完整标识。例如 SQL Server 连接器：`table` 写 `dbo.customers`，而 `snapshot table` 要写 `testDB.dbo.customers`。要确认一张表的正确写法，可以查看 `synchdb_att_view` 的 `ext_tbname` 列，它显示的就是捕获表的完整标识。
+
+其他注意事项：
+
+* 多张表之间用逗号分隔。
+* 每一项都会按**正则表达式**处理（不区分大小写），并且必须与完整标识整串匹配，因此 `testDB.dbo.customers` 可以匹配（`.` 匹配任意字符），`.*\.customers` 也可以匹配。
+* 表列表文件中的 `snapshot_table_list` 数组遵循完全相同的规则。
+* `snapshot table` 中未列出的表在 `always` 模式下会被跳过：它们已经存在于 PostgreSQL 中的数据不会被再次复制，也不会被改动。因此，`snapshot table` 是“新增表但不重灌老表”的推荐做法。但请注意，新表的同名目标表内不能已经存在冲突数据（例如重复主键），必要时请先清理或 truncate 这些表。
+* `table` 与 `snapshot table` 各自最长 **8192 字节**（对应源码中的 `SYNCHDB_CONNINFO_TABLELIST_SIZE`），超出时 `synchdb_add_conninfo` 会直接报错。
+* 这两个值保存在共享内存的定长字段里，因此**直接用 `UPDATE synchdb_conninfo` 修改时会绕过长度校验，超长部分被静默截断**，症状是列表末尾的表既不建表也不做快照（启动日志里 `table=...` 打印的就是截断后的值，而表中的 `data` 看上去仍然完整）。表数量很多时请改用表列表文件（`file:`），或拆分成多个连接器。
+
+如果 `snapshot table` 没有匹配到任何表，不同连接器的表现不同：
+
+| 连接器类型 | 现象 |
+|----------------|---------|
+| mysql、postgres | 不报错，但不会重建任何表的快照（静默失效） |
+| sqlserver | 引擎启动失败，报错：`Unable to find relational table model for '[database].[schema].[table]', there may be an issue with your include/exclude list configuration.` |
+
+要确认引擎实际认为哪些表需要做快照，可以在连接器启动后查看以下 INFO 级别日志：
+
+```
+Only captured tables schema should be captured, capturing: []
+Locking captured tables []
+```
+
+如果打印出来是空集合，就说明 `snapshot table` 的值没有匹配到任何表。
+
 ## **示例：为每个支持的源数据库创建一个连接器以复制所有表**
 
 1. 建立一個名為 `mysqlconn` 的 MySQL 連接器，用於複製 MySQL 中 `inventory` 下的所有表。來源模式可以設定為 'null'，因為 MySQL 不支援空值。
@@ -123,7 +160,7 @@ SELECT
 
 ## **示例：创建连接器以复制指定的表**
 
-请注意，表必须使用完全限定名称（例如“[database].[table]”或“[database].[schema].[table]”）指定，并且必须存在于源数据库中。
+请注意，表必须使用完全限定名称指定（MySQL 为 `[database].[table]`，SQL Server / PostgreSQL 为 `[schema].[table]`），并且必须存在于源数据库中。而 `snapshot table` 参数使用的是上文中《快照表格式》所述的完整标识形式。
 
 创建一个名为“mysqlconn”的 MySQL 连接器，将 MySQL 中“inventory”下的“orders”和“customers”表复制到 PostgreSQL 中的目标数据库“postgres”：
 ```sql

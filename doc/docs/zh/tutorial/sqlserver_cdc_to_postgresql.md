@@ -129,12 +129,14 @@ SELECT synchdb_start_engine_bgw('sqlserverconn', 'always');
 
 但是，可以使用连接器的 `snapshottable` 选项选择部分表来重做初始快照。符合 `snapshottable` 中条件的表将重做初始快照，否则将跳过其初始快照。如果 `snapshottable` 为 null 或为空，默认情况下，连接器的 `table` 选项中指定的所有表将在 `always` 模式下重做初始快照。
 
-此示例使连接器仅重做 `inventory.customers` 表的初始快照。所有其他表的快照将被跳过。
+此示例使连接器仅重做 `customers` 表（完整标识为 `testDB.dbo.customers`）的初始快照。所有其他表的快照将被跳过。
 ```sql
 UPDATE synchdb_conninfo
-SET data = jsonb_set(data, '{snapshottable}', '"inventory.customers"')
+SET data = jsonb_set(data, '{snapshottable}', '"testDB.dbo.customers"')
 WHERE name = 'sqlserverconn';
 ```
+
+<<**注意**>> SQL Server 连接器的 `snapshot table` 必须写成 `[database].[schema].[table]`（例如 `testDB.dbo.customers`）这种带库名的完整标识，而 `table` 参数写的是 `[schema].[table]`（例如 `dbo.customers`）。写错会导致引擎启动失败，并报 `Unable to find relational table model for ...`。详见[创建连接器](../../user-guide/create_a_connector/)中的《快照表格式》章节。
 
 初始快照完成后，CDC 将开始。在 `always` 模式下重新启动连接器将重复上述过程。
 

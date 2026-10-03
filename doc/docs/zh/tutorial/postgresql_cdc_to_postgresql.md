@@ -139,9 +139,11 @@ SELECT synchdb_start_engine_bgw('pgconn', 'always');
 
 ```sql
 UPDATE synchdb_conninfo 
-SET data = jsonb_set(data, '{snapshottable}', '"public.customers"') 
+SET data = jsonb_set(data, '{snapshottable}', '"postgres.public.customers"') 
 WHERE name = 'pgconn';
 ```
+
+<<**重要**>> PostgreSQL 連接器的 `snapshot table` 必須寫成 `[database].[schema].[table]`（例如 `postgres.public.customers`）這種帶庫名的完整標識，而 `table` 參數寫的是 `[schema].[table]`（例如 `public.customers`）。寫錯不會報錯，但不會重建任何表的快照。詳見[創建連接器](../../user-guide/create_a_connector/)中的《快照表格式》章節。
 
 初始快照完成後，CDC 將開始運行。以 `always` 模式重新啟動連接器將重複上述過程。
 
@@ -357,7 +359,7 @@ WHERE name = 'pgconn';
 3. 配置快照表參數，使其只包含新表 `inventory.customers`，這樣 SynchDB 就不會嘗試重建已經完成快照的 2 個表。
 ```sql
 UPDATE synchdb_conninfo 
-SET data = jsonb_set(data, '{snapshottable}', '"public.customers"') 
+SET data = jsonb_set(data, '{snapshottable}', '"postgres.public.customers"') 
 WHERE name = 'pgconn';
 ``` 
 4. 將快照模式設為“始終”，然後重新啟動連接器，以執行另一次初始快照：

@@ -120,6 +120,17 @@ SELECT synchdb_start_engine_bgw('sqlserverconn', 'always');
 
 ```
 
+However, it is possible to select partial tables to redo the initial snapshot by using the `snapshottable` option of the connector. Tables matching the criteria in `snapshottable` will redo the initial snapshot, otherwise their initial snapshot will be skipped. If `snapshottable` is null or empty, by default, all the tables specified in the `table` option of the connector will redo the initial snapshot under `always` mode.
+
+This example makes the connector only redo the initial snapshot of the `customers` table (full identifier `testDB.dbo.customers`). All other tables will have their snapshot skipped.
+```sql
+UPDATE synchdb_conninfo
+SET data = jsonb_set(data, '{snapshottable}', '"testDB.dbo.customers"')
+WHERE name = 'sqlserverconn';
+```
+
+<<**IMPORTANT**>> For SQL Server, `snapshot table` must be written in the form of `[database].[schema].[table]` (such as `testDB.dbo.customers`) while the `table` option uses `[schema].[table]` (such as `dbo.customers`). A wrong value makes the engine fail to start with `Unable to find relational table model for ...`. See the *Snapshot Table Format* section in [Create a Connector](../../user-guide/create_a_connector/) for more details.
+
 After the initial snapshot, CDC will begin. Restarting a connector in `always` mode will repeat the same process described above.
 
 ## **Possible Snapshot Modes for SQL Server Connector**
@@ -332,12 +343,19 @@ UPDATE synchdb_conninfo
 SET data = jsonb_set(data, '{table}', '"dbo.orders,dbo.products,dbo.customers"') 
 WHERE name = 'sqlserverconn';
 ```
-3. Restart the connector with the snapshot mode set to `always` to perform another initial snapshot:
+3. Configure the snapshot table parameter to include only the newly added table so that SynchDB does not try to rebuild the 2 tables that have already finished the snapshot:
 ```sql
-DROP table testdb.orders, testdb.products;
+UPDATE synchdb_conninfo
+SET data = jsonb_set(data, '{snapshottable}', '"testDB.dbo.customers"')
+WHERE name = 'sqlserverconn';
+```
+4. Restart the connector with the snapshot mode set to `always` to perform another initial snapshot:
+```sql
 SELECT synchdb_restart_connector('sqlserverconn', 'always');
 ```
-This forces Debezium to re-snapshot all the tables again, including the old tables `dbo.orders` and `dbo.products` and the new before going to CDC streaming. This means, to add the third table, the existing tables have to be dropped (to prevent duplicate table and primary key errors) and do the entire initial snapshot again. This is quite redundant and Debezium suggests using incremental snasphot to add the addition tables without re-snapshotting. We will update this procedure once we add the incremental snapshot support to SynchDB.
+This forces Debezium to redo the initial snapshot of the newly added table `dbo.customers` only, while the old tables `dbo.orders` and `dbo.products` are skipped, so their existing data is not loaded again and there will be no duplicate table / primary key error. Please remember that the `snapshot table` value has to be expressed in the full `[database].[schema].[table]` form, see the *Snapshot Table Format* section in [Create a Connector](../../user-guide/create_a_connector/).
+
+If `snapshot table` is left as `null`, Debezium will re-snapshot all the tables again, including the old tables `dbo.orders` and `dbo.products` before going to CDC streaming. That means, to add the third table, the existing tables have to be dropped (to prevent duplicate table and primary key errors) and do the entire initial snapshot again. Debezium suggests using incremental snapshot to add the addition tables without re-snapshotting. We will update this procedure once we add the incremental snapshot support to SynchDB.
 
 ### **Verify the Updated Tables**
 

@@ -140,6 +140,8 @@ SET data = jsonb_set(data, '{snapshottable}', '"inventory.customers"')
 WHERE name = 'mysqlconn';
 ```
 
+<<**注意**>> `snapshot table` 的值必须写成源数据库表的完整标识，其格式取决于连接器类型。MySQL 的表标识中不含模式（schema）名，所以这里写 `[database].[table]`（例如 `inventory.customers`）；而 SQL Server 和 PostgreSQL 需要写成 `[database].[schema].[table]`（例如 `testDB.dbo.customers`、`postgres.public.customers`）。详见[创建连接器](../../user-guide/create_a_connector/)中的《快照表格式》章节。
+
 初始快照完成后，CDC 将开始。在 `always` 模式下重新启动连接器将重复上述过程。
 
 ### **MySQL 連接器的可用快照模式**
