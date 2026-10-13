@@ -340,7 +340,9 @@ static void set_extra_dbz_parameters(jobject myParametersObj, jclass myParameter
 	else
 		elog(WARNING, "failed to find setQueryTimeout method");
 
-	jdbz_skipped_operations = (*env)->NewStringUTF(env, dbz_skipped_operations);
+	/* Debezium 3.5 requires "none" rather than an empty skipped.operations. */
+	jdbz_skipped_operations = (*env)->NewStringUTF(env,
+			dbz_skipped_operations[0] ? dbz_skipped_operations : "none");
 
 	setSkippedOperations = (*env)->GetMethodID(env, myParametersClass, "setSkippedOperations",
 			"(Ljava/lang/String;)Lcom/example/DebeziumRunner$MyParameters;");
@@ -906,9 +908,13 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
 			if (synchdb_log_event_on_error)
 				g_eventStr = (char *)(data + offset);
 
-			fc_processDBZChangeEvent((char *)(data + offset), myBatchStats, flag,
+			if (fc_processDBZChangeEvent((char *)(data + offset), myBatchStats, flag,
 					get_shm_connector_name_by_id(myConnectorId),
-					(curr == 0), (curr == batchsize - 1));
+					(curr == 0), (curr == batchsize - 1)) < 0)
+			{
+				batchinfo->batchId = SYNCHDB_INVALID_BATCH_ID;
+				elog(ERROR, "failed to process Debezium event; batch will not be acknowledged");
+			}
 
 			offset += json_len;
 			curr++;
@@ -4324,7 +4330,8 @@ _PG_init(void)
 
 	DefineCustomStringVariable("synchdb.dbz_skipped_oeprations",
 							   "a comma-separated list of operations Debezium shall skip: "
-							   "c for inserts, u for updates, d for deletes, t for truncates",
+							   "c for inserts, u for updates, d for deletes, t for truncates; "
+							   "none or an empty string enables all operations",
 							   NULL,
 							   &dbz_skipped_operations,
 							   "t",

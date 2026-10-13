@@ -133,6 +133,8 @@ olr_client_get_change(int myConnectorId, bool * dbzExitSignal, SynchdbStatistics
 	int ret = -1, curr = 0;
 	int next_offset = 0;
 	bool isfirst = false, islast = false;
+	int saved_offset = g_offset;
+	orascn saved_scn = g_scn, saved_c_scn = g_c_scn, saved_c_idx = g_c_idx;
 
 	if (!g_netioCtx.is_connected)
 	{
@@ -145,70 +147,95 @@ olr_client_get_change(int myConnectorId, bool * dbzExitSignal, SynchdbStatistics
 	{
 		elog(DEBUG1, "%ld bytes read", nbytes);
 
-		StartTransactionCommand();
-		PushActiveSnapshot(GetTransactionSnapshot());
-
-		while (g_offset + 4 <= g_strinfo.len)
+		PG_TRY();
 		{
-			int json_len = 0;
-#if SYNCHDB_PG_MAJOR_VERSION >= 1700
-			text  * json_payload;
-#else
-			char * json_payload;
-#endif
-			memcpy(&json_len, g_strinfo.data + g_offset, 4);
+			StartTransactionCommand();
+			PushActiveSnapshot(GetTransactionSnapshot());
 
-			elog(DEBUG1, "json len %d", json_len);
-
-			if (g_offset + 4 + json_len > g_strinfo.len)
+			while (g_offset + 4 <= g_strinfo.len)
 			{
+				int json_len = 0;
+#if SYNCHDB_PG_MAJOR_VERSION >= 1700
+				text  * json_payload;
+#else
+				char * json_payload;
+#endif
+				memcpy(&json_len, g_strinfo.data + g_offset, 4);
+
+				elog(DEBUG1, "json len %d", json_len);
+
+				if (json_len <= 0)
+					elog(ERROR, "invalid native OLR event length: %d", json_len);
+
+				if (json_len > g_strinfo.len - g_offset - 4)
+				{
+					/*
+					 * not enough payload data, exit for now. More data is expected
+					 * to be read in the next call
+					 */
+					elog(DEBUG1, "json_len is %d, but only %ld bytes left in buffer %ld/%d",
+							json_len, (long)(g_strinfo.len - g_offset - 4), (long)g_offset,
+							g_strinfo.len);
+					break;
+				}
+
+				/* determine if this is the first or the last event in the batch */
+				next_offset = g_offset + 4 + json_len;
+				isfirst = (curr == 0);
+				islast = (next_offset == g_strinfo.len) || (next_offset + 4 > g_strinfo.len);
+
 				/*
-				 * not enough payload data, exit for now. More data is expected
-				 * to be read in the next call
+				 * payload is not null-terminated so we try to turn it to a text * if supported.
+				 * Otherwise, we make a copy of it as a null-terminated string
 				 */
-				elog(DEBUG1, "json_len is %d, but only %ld bytes left in buffer %ld/%d",
-						json_len, (long)(g_strinfo.len - g_offset - 4), (long)g_offset,
-						g_strinfo.len);
-				break;
+#if SYNCHDB_PG_MAJOR_VERSION >= 1700
+				json_payload = cstring_to_text_with_len(g_strinfo.data + g_offset + 4, json_len);
+#else
+				json_payload = pnstrdup(g_strinfo.data + g_offset + 4, json_len);
+#endif
+
+				if (synchdb_log_event_on_error)
+#if SYNCHDB_PG_MAJOR_VERSION >= 1700
+					g_eventStr = text_to_cstring(json_payload);
+#else
+					g_eventStr = json_payload;
+#endif
+				/* process it */
+				ret = fc_processOLRChangeEvent(json_payload, json_len, myBatchStats,
+						get_shm_connector_name_by_id(myConnectorId), sendconfirm,
+						isfirst, islast);
+
+				if (ret < 0)
+				{
+					*sendconfirm = false;
+					elog(ERROR, "failed to process native OLR event; batch will not be confirmed");
+				}
+
+				pfree(json_payload);
+
+				if (synchdb_log_event_on_error)
+					g_eventStr = NULL;
+
+				g_offset += 4 + json_len;
+				curr++;
 			}
 
-			/* determine if this is the first or the last event in the batch */
-			next_offset = g_offset + 4 + json_len;
-			isfirst = (curr == 0);
-			islast = (next_offset == g_strinfo.len) || (next_offset + 4 > g_strinfo.len);
-
-			/*
-			 * payload is not null-terminated so we try to turn it to a text * if supported.
-			 * Otherwise, we make a copy of it as a null-terminated string
-			 */
-#if SYNCHDB_PG_MAJOR_VERSION >= 1700
-			json_payload = cstring_to_text_with_len(g_strinfo.data + g_offset + 4, json_len);
-#else
-			json_payload = pnstrdup(g_strinfo.data + g_offset + 4, json_len);
-#endif
-
-			if (synchdb_log_event_on_error)
-#if SYNCHDB_PG_MAJOR_VERSION >= 1700
-				g_eventStr = text_to_cstring(json_payload);
-#else
-				g_eventStr = json_payload;
-#endif
-			/* process it */
-			ret = fc_processOLRChangeEvent(json_payload, myBatchStats,
-					get_shm_connector_name_by_id(myConnectorId), sendconfirm,
-					isfirst, islast);
-
-			pfree(json_payload);
-
-			if (synchdb_log_event_on_error)
-				g_eventStr = NULL;
-
-			g_offset += 4 + json_len;
-			curr++;
+			PopActiveSnapshot();
+			CommitTransactionCommand();
 		}
-
-		PopActiveSnapshot();
-		CommitTransactionCommand();
+		PG_CATCH();
+		{
+			/* The exit callback flushes SCNs. Restore the last committed position
+			 * so a rolled-back batch is replayed after a worker restart. */
+			g_scn = saved_scn;
+			g_c_scn = saved_c_scn;
+			g_c_idx = saved_c_idx;
+			g_offset = saved_offset;
+			*sendconfirm = false;
+			g_eventStr = NULL;
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
 
 		elog(DEBUG1, "there are %d records processed in this batch", curr);
 

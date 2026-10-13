@@ -4,7 +4,7 @@ services:
     container_name: postgres
     shm_size: 256mb
     ports:
-      - "5432:5432"
+      - "${SYNCHDB_TEST_POSTGRES_PORT:-5432}:5432"
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: pass
@@ -19,4 +19,3 @@ services:
       timeout: 3s
       retries: 20
     restart: unless-stopped
-

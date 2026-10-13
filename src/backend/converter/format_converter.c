@@ -56,6 +56,7 @@ extern int synchdb_letter_casing_strategy;
 extern int synchdb_error_strategy;
 extern bool synchdb_log_event_on_error;
 extern char * g_eventStr;
+extern char * dbz_skipped_operations;
 
 /* data transformation related hash tables */
 HTAB * dataCacheHash = NULL;
@@ -3828,7 +3829,7 @@ updateSynchdbAttribute(DBZ_DDL * dbzddl, PG_DDL * pgddl, ConnectorType conntype,
 	ListCell * cell, *cell2;
 	StringInfoData strinfo;
 
-	if (!pgddl || !dbzddl)
+	if (!pgddl || !dbzddl || pgddl->type == DDL_TRUNCATE_TABLE)
 		return;
 
 	initStringInfo(&strinfo);
@@ -4489,8 +4490,11 @@ transform_object_name(const char * objid, const char * objtype)
 	if (!objid || !objtype)
 		return NULL;
 
-	strncpy(key.extObjName, objid, strlen(objid));
-	strncpy(key.extObjType, objtype, strlen(objtype));
+	/* A long composite source name cannot match the fixed-size mapping key. */
+	if (strlen(objid) >= sizeof(key.extObjName) || strlen(objtype) >= sizeof(key.extObjType))
+		return NULL;
+	strlcpy(key.extObjName, objid, sizeof(key.extObjName));
+	strlcpy(key.extObjType, objtype, sizeof(key.extObjType));
 	entry = (ObjMapHashEntry *) hash_search(objectMappingHash, &key, HASH_FIND, &found);
 	if (found)
 	{
@@ -4596,6 +4600,184 @@ getPathElementString(Jsonb * jb, char * path, StringInfoData * strinfoout, bool 
 	if (pathcopy != path)
 		pfree(pathcopy);
 	return 0;
+}
+
+/* Return only nonempty JSON strings, without stripping identifier characters. */
+char *
+fc_jsonb_string(Jsonb * object, const char * key)
+{
+	JsonbValue buffer;
+	JsonbValue * value;
+
+	if (!object || !JB_ROOT_IS_OBJECT(object))
+		return NULL;
+	value = getKeyJsonValueFromContainer(&object->root, key, strlen(key), &buffer);
+	if (!value || value->type != jbvString || value->val.string.len == 0)
+		return NULL;
+	return pnstrdup(value->val.string.val, value->val.string.len);
+}
+
+bool
+fc_skip_truncate(void)
+{
+	const char * p = dbz_skipped_operations;
+
+	while (p && *p)
+	{
+		const char * start;
+		const char * end;
+
+		while (isspace((unsigned char) *p))
+			p++;
+		start = p;
+		while (*p && *p != ',')
+			p++;
+		end = p;
+		while (end > start && isspace((unsigned char) end[-1]))
+			end--;
+		if (end - start == 1 && *start == 't')
+			return true;
+		if (*p)
+			p++;
+	}
+	return false;
+}
+
+static void
+skip_identifier_space(const char ** p)
+{
+	for (;;)
+	{
+		while (isspace((unsigned char) **p))
+			(*p)++;
+		if (strncmp(*p, "/*", 2) == 0)
+		{
+			const char * end = strstr(*p + 2, "*/");
+			if (!end)
+				return;
+			*p = end + 2;
+		}
+		else if (strncmp(*p, "--", 2) == 0)
+		{
+			while (**p && **p != '\n')
+				(*p)++;
+		}
+		else
+			return;
+	}
+}
+
+/* Preserve case here; explicit mappings already specify the destination case. */
+static List *
+parse_identifier_parts(const char ** p)
+{
+	List * parts = NIL;
+
+	for (;;)
+	{
+		StringInfoData part;
+		char quote;
+		bool closed = false;
+
+		skip_identifier_space(p);
+		initStringInfo(&part);
+		quote = (**p == '"' || **p == '`') ? *(*p)++ : '\0';
+		if (quote)
+		{
+			while (**p)
+			{
+				if (**p == quote)
+				{
+					(*p)++;
+					if (**p != quote)
+					{
+						closed = true;
+						break;
+					}
+				}
+				appendStringInfoChar(&part, *(*p)++);
+			}
+			if (!closed)
+				return NIL;
+		}
+		else
+		{
+			while (isalnum((unsigned char) **p) || **p == '_' || **p == '$' ||
+				   (unsigned char) **p >= 128)
+				appendStringInfoChar(&part, *(*p)++);
+		}
+		if (part.len == 0 || list_length(parts) == 3)
+			return NIL;
+		parts = lappend(parts, part.data);
+		skip_identifier_space(p);
+		if (**p != '.')
+			return parts;
+		(*p)++;
+	}
+}
+
+List *
+fc_parse_identifier(const char * name)
+{
+	const char * p = name;
+	List * parts;
+
+	if (!p)
+		return NIL;
+	parts = parse_identifier_parts(&p);
+	return *p ? NIL : parts;
+}
+
+static bool
+consume_sql_keyword(const char ** p, const char * keyword)
+{
+	size_t len = strlen(keyword);
+
+	skip_identifier_space(p);
+	if (pg_strncasecmp(*p, keyword, len) != 0 ||
+		isalnum((unsigned char) (*p)[len]) || (*p)[len] == '_' || (*p)[len] == '$')
+		return false;
+	*p += len;
+	return true;
+}
+
+bool
+fc_is_truncate_sql(const char * sql)
+{
+	const char * p = sql;
+
+	return p && consume_sql_keyword(&p, "TRUNCATE");
+}
+
+/* Recognize a single TRUNCATE, never a substring or an arbitrary SQL batch. */
+List *
+fc_parse_truncate_sql(const char * sql)
+{
+	const char * p = sql;
+	List * parts;
+
+	if (!p || !consume_sql_keyword(&p, "TRUNCATE"))
+		return NIL;
+	consume_sql_keyword(&p, "TABLE");
+	parts = parse_identifier_parts(&p);
+	if (!parts)
+		return NIL;
+	/* Oracle storage options affect the source only. */
+	if (consume_sql_keyword(&p, "DROP"))
+	{
+		if (!consume_sql_keyword(&p, "STORAGE"))
+			return NIL;
+	}
+	else if (consume_sql_keyword(&p, "REUSE"))
+	{
+		if (!consume_sql_keyword(&p, "STORAGE"))
+			return NIL;
+	}
+	skip_identifier_space(&p);
+	if (*p == ';')
+		p++;
+	skip_identifier_space(&p);
+	return *p ? NIL : parts;
 }
 
 /*
@@ -5671,73 +5853,52 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 	}
 	else if (dbzddl->type == DDL_TRUNCATE_TABLE)
 	{
+		List * parts;
+		char * qualified;
+
 		mappedObjName = transform_object_name(dbzddl->id, "table");
 		if (mappedObjName)
 		{
-			/*
-			 * we will used the transformed object name here, but first, we will check if
-			 * transformed name is valid. It should be expressed in one of the forms below:
-			 * - schema.table
-			 * - table
-			 */
-			splitIdString(mappedObjName, &db, &schema, &table, false);
-			if (!table)
+			parts = fc_parse_identifier(mappedObjName);
+			if (list_length(parts) < 1 || list_length(parts) > 2)
 			{
-				/* save the error */
-				char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
-				snprintf(msg, SYNCHDB_ERRMSG_SIZE, "transformed object ID is invalid: %s",
-						mappedObjName);
-				set_shm_connector_errmsg(myConnectorId, msg);
-
-				/* trigger pg's error shutdown routine */
-				elog(ERROR, "%s", msg);
+				set_shm_connector_errmsg(myConnectorId, "invalid TRUNCATE table mapping");
+				elog(WARNING, "invalid TRUNCATE table mapping: %s", mappedObjName);
+				destroyPGDDL(pgddl);
+				pfree(strinfo.data);
+				return NULL;
 			}
-
-			if (schema && table)
-			{
-				/* table stays as table under the schema */
-				appendStringInfo(&strinfo, "TRUNCATE TABLE \"%s\".\"%s\";", schema, table);
-				pgddl->schema = pstrdup(schema);
-				pgddl->tbname = pstrdup(table);
-			}
-			else if (!schema && table)
-			{
-				/* table stays as table but no schema */
-				schema = pstrdup("public");
-				appendStringInfo(&strinfo, "TRUNCATE TABLE \"%s\";", table);
-				pgddl->schema = pstrdup("public");
-				pgddl->tbname = pstrdup(table);
-			}
-		}
-		else
-		{
-			char * idcopy = pstrdup(dbzddl->id);
-			splitIdString(idcopy, &db, &schema, &table, true);
-
-			/* we want to normalize according to letter casing strategy here */
-			fc_normalize_name(synchdb_letter_casing_strategy, idcopy, strlen(idcopy));
-
-			/* database and table must be present. schema is optional */
-			if (!db || !table)
-			{
-				/* save the error */
-				char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
-				snprintf(msg, SYNCHDB_ERRMSG_SIZE, "malformed id field in dbz change event: %s",
-						dbzddl->id);
-				set_shm_connector_errmsg(myConnectorId, msg);
-
-				/* trigger pg's error shutdown routine */
-				elog(ERROR, "%s", msg);
-			}
-			/* make schema points to db */
-			schema = db;
-			appendStringInfo(&strinfo, "TRUNCATE TABLE \"%s\".\"%s\";", schema, table);
+			schema = list_length(parts) == 2 ? linitial(parts) : "public";
+			table = llast(parts);
 			pgddl->schema = pstrdup(schema);
 			pgddl->tbname = pstrdup(table);
 		}
-		/* no column information needed for TRUNCATE */
-		pgddl->columns = NULL;
+		else
+		{
+			/* Match existing DDL/DML policy: source database becomes PG schema. */
+			if (!dbzddl->sourceDb || !dbzddl->sourceTable)
+				elog(ERROR, "missing source identifiers for TRUNCATE: %s", dbzddl->id);
+			pgddl->schema = pstrdup(dbzddl->sourceDb);
+			pgddl->tbname = pstrdup(dbzddl->sourceTable);
+			fc_normalize_name(synchdb_letter_casing_strategy, pgddl->schema,
+							  strlen(pgddl->schema));
+			fc_normalize_name(synchdb_letter_casing_strategy, pgddl->tbname,
+							  strlen(pgddl->tbname));
+		}
+		if (strlen(pgddl->schema) >= NAMEDATALEN || strlen(pgddl->tbname) >= NAMEDATALEN)
+		{
+			set_shm_connector_errmsg(myConnectorId, "TRUNCATE target identifier exceeds PostgreSQL identifier length");
+			elog(WARNING, "TRUNCATE target identifier exceeds PostgreSQL identifier length");
+			destroyPGDDL(pgddl);
+			pfree(strinfo.data);
+			return NULL;
+		}
+		qualified = quote_qualified_identifier(pgddl->schema, pgddl->tbname);
+		appendStringInfo(&strinfo, "TRUNCATE TABLE %s;", qualified);
+		pfree(qualified);
+		/* No column data, CASCADE, or RESTART IDENTITY. */
 	}
+
 	else
 	{
 		elog(WARNING, "unsupported conversion for DDL type %d", dbzddl->type);

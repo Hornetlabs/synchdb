@@ -49,8 +49,22 @@ def fdw_engine(pg_cursor):
 
 
 def test_FailThenRetryFDW(pg_cursor, dbvendor, fdw_engine, target):
-    if dbvendor == "mysql" and target.key == "ivorysql5":
-        pytest.skip("TODO: IvorySQL 5.4 not support mysql_fdw yet")
+    if dbvendor == "mysql":
+        isfdw = run_pg_query_one(pg_cursor, f"SELECT EXISTS ( SELECT 1 FROM pg_available_extensions WHERE name = 'mysql_fdw' ) AS mysql_fdw_available")
+        if isfdw[0] == False:
+            pytest.skip("mysql_fdw is not available for install")
+    elif dbvendor == "sqlserver":
+        isfdw = run_pg_query_one(pg_cursor, f"SELECT EXISTS ( SELECT 1 FROM pg_available_extensions WHERE name = 'tds_fdw' ) AS tds_fdw_available")
+        if isfdw[0] == False:
+            pytest.skip("tds_fdw is not available for install")
+    elif dbvendor == "postgres":
+        isfdw = run_pg_query_one(pg_cursor, f"SELECT EXISTS ( SELECT 1 FROM pg_available_extensions WHERE name = 'postgres_fdw' ) AS postgres_fdw_available")
+        if isfdw[0] == False:
+            pytest.skip("postgres_fdw is not available for install")
+    else:
+        isfdw = run_pg_query_one(pg_cursor, f"SELECT EXISTS ( SELECT 1 FROM pg_available_extensions WHERE name = 'oracle_fdw' ) AS oracle_fdw_available")
+        if isfdw[0] == False:
+            pytest.skip("oracle_fdw is not available for install")
 
     BIG_VALUE = 9223372036854775807
 

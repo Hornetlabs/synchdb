@@ -27,7 +27,42 @@ For Openlog Replicator based connector these Oracle DDL syntax is supported:
 ✅ ALTER [table] ADD CONSTRAINT
 ✅ ALTER [table] DROP CONSTRAINT
 
+✅ TRUNCATE [table] (capture-dependent; disabled by default)
+
 ## **Detailed Command Support**
+
+
+### TRUNCATE TABLE
+
+TRUNCATE is disabled by default. Enable it using the registered GUC (the historical spelling is intentional), reload configuration, then restart the relevant Debezium connector so its capture configuration changes:
+
+```sql
+ALTER SYSTEM SET synchdb.dbz_skipped_oeprations = 'none';
+SELECT pg_reload_conf();
+SELECT synchdb_restart_connector('myconnector', 'no_data');
+```
+
+An empty GUC value also enables all operations; SynchDB sends it to Debezium as `none`, because Debezium 3.5 rejects an empty `skipped.operations`. Other operation lists remain supported. Native OLR applies this GUC when processing incoming DDL.
+
+The Debezium `payload.op = "t"` path reads `source.connector`, `source.db`, `source.table`, and the source schema for schema-based connectors. It does not require a message key, `before`, `after`, column definitions, or primary keys. Boolean and string snapshot metadata are supported; snapshot metadata and timestamps are optional for truncate data events. Explicit `tableChanges[].type = "TRUNCATE"` / `"TRUNCATE TABLE"` and single-table TRUNCATE DDL text also use the DDL execution path. Multi-table schema-change records and SQL batches are rejected rather than partially applied.
+
+| Source | Capture format and requirements |
+|---|---|
+| MySQL, Debezium 3.5.2 | Binlog TRUNCATE becomes an `op="t"` data event. Table/database filters and `skipped.operations` must permit capture. |
+| PostgreSQL | `pgoutput` emits `op="t"` for each affected table. The publication must include the table and publish `truncate`; normal DDL is not automatically emitted by logical decoding. |
+| Oracle, Debezium 3.5.2 | The connector documents `op="t"` with `db`, `schema`, and `table`; the shipped LogMiner implementation dispatches TRUNCATE events. Capture still depends on the adapter, retained redo/archive logs and table filters. Older versions/adapters must be checked separately. |
+| Native OpenLogReplicator | JSON contains `payload[0].op="ddl"`, `sql`, `schema.owner`, `schema.table`, top-level `db`, `scn`, `c_scn`, and `c_idx`. Enable DDL output and these metadata fields; the repository example uses `flags=32`, `db=3`, `schema=7`, and `message=2`. Owner/table filtering still applies. |
+| SQL Server CDC | CDC does not provide TRUNCATE events; SQL Server disallows truncating a CDC-enabled table. SynchDB cannot reconstruct an event that the source does not emit. |
+
+Table mappings use the original source object ID. Without a mapping, the source database becomes the target PostgreSQL schema, following existing SynchDB DDL/DML policy; the source schema is part of the mapping key. The configured letter-casing strategy applies to unmapped names. Explicit target mappings preserve their supplied case; a table-only destination uses `public`. Quote mapping components containing dots, spaces, or double quotes, for example `"target.schema"."table"" name"`.
+
+The executor uses PostgreSQL identifier quoting and a fully qualified `TRUNCATE TABLE schema.table`. It adds neither `CASCADE` nor `RESTART IDENTITY`. Table definitions, indexes, relation OIDs, sequences and `synchdb_attribute` mappings survive; empty-table and repeated events succeed. Foreign-key restrictions, missing targets and permissions can fail execution. A multi-table source truncate can therefore fail on target foreign keys when applied as individual events.
+
+Each successful truncate increments `synchdb_cdcstats.truncates` and its DDL count. Filtered events increment neither success counts nor `bad_events`. Execution errors propagate through the existing SPI transaction policy: the failed batch rolls back and is not acknowledged. Native OLR also restores its previous committed SCN before shutdown can persist it. Failed-batch success counters are not published. Subsequent DML uses the existing table and attribute mappings; UPDATE/DELETE without a primary key require the default native DML path (`synchdb.dml_use_spi=false`).
+
+Both entry points log connector name and the raw event at `LOG` before JSON parsing; native OLR uses the message length.
+
+Capture references: [Debezium MySQL](https://debezium.io/documentation/reference/3.5/connectors/mysql.html#mysql-truncate-events), [PostgreSQL](https://debezium.io/documentation/reference/3.5/connectors/postgresql.html#postgresql-truncate-events), [Oracle](https://debezium.io/documentation/reference/3.5/connectors/oracle.html#oracle-truncate-events), [PostgreSQL publication options](https://www.postgresql.org/docs/18/sql-createpublication.html), and [SQL Server TRUNCATE restrictions](https://learn.microsoft.com/en-us/sql/t-sql/statements/truncate-table-transact-sql).
 
 ### **CREATE TABLE**
 

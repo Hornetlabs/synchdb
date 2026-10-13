@@ -56,10 +56,10 @@ static HTAB * build_olr_schema_jsonpos_hash(Jsonb * jb);
 static void destroyOLRDDL(OLR_DDL * ddlinfo);
 static void destroyOLRDML(OLR_DML * dmlinfo);
 static OLR_DDL * parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn,
-		orascn * c_scn, orascn * c_idx, bool isfirst, bool islast);
+		orascn * c_scn, orascn * c_idx, bool isfirst, bool islast, bool * ignored);
 static OLR_DML * parseOLRDML(Jsonb * jb, char op, Jsonb * payload,
 		orascn * scn, orascn * c_scn, orascn * c_idx,
-		bool isfirst, bool islast);
+		bool isfirst, bool islast, bool * ignored);
 
 static bool
 isallupper(const char *s)
@@ -346,6 +346,12 @@ destroyOLRDDL(OLR_DDL * ddlinfo)
 	{
 		if (ddlinfo->id)
 			pfree(ddlinfo->id);
+		if (ddlinfo->sourceDb)
+			pfree(ddlinfo->sourceDb);
+		if (ddlinfo->sourceSchema)
+			pfree(ddlinfo->sourceSchema);
+		if (ddlinfo->sourceTable)
+			pfree(ddlinfo->sourceTable);
 
 		if (ddlinfo->primaryKeyColumnNames)
 			pfree(ddlinfo->primaryKeyColumnNames);
@@ -388,11 +394,52 @@ destroyOLRDML(OLR_DML * dmlinfo)
 	}
 }
 
+static void
+load_oracle_parser(void)
+{
+	if (synchdb_oracle_raw_parser == NULL)
+	{
+		char * oralib_path = NULL, * error = NULL;
+
+		oralib_path = psprintf("%s/%s", pkglib_path, ORACLE_RAW_PARSER_LIB);
+
+		/*
+		 * RTLD_LOCAL keeps the parser's internal ora_* symbols private to
+		 * the library so they do not collide with IvorySQL's built-in
+		 * Oracle parser (which exports the same names).  We only use the
+		 * uniquely named synchdb_oracle_raw_parser entry via dlsym(), which
+		 * works through the explicit handle regardless of LOCAL/GLOBAL.
+		 */
+		handle = dlopen(oralib_path, RTLD_NOW | RTLD_LOCAL);
+		if (!handle)
+		{
+			set_shm_connector_errmsg(myConnectorId, "failed to load oracle_parser.so");
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("failed to load oracle_parser.so at %s", oralib_path),
+					 errhint("%s",  dlerror())));
+
+		}
+		pfree(oralib_path);
+
+		synchdb_oracle_raw_parser = (oracle_raw_parser_fn) dlsym(handle, "synchdb_oracle_raw_parser");
+		if ((error = dlerror()) != NULL)
+		{
+			set_shm_connector_errmsg(myConnectorId, "failed to load synchdb_oracle_raw_parser symbol");
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("failed to load synchdb_oracle_raw_parser function symbol"),
+					 errhint("make sure synchdb_oracle_raw_parser() function in libsynchdb_oracle_parser.so is "
+							 "publicly accessible ")));
+		}
+	}
+}
+
 /*
  * parseOLRDDL
  */
 static OLR_DDL *
-parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * c_idx, bool isfirst, bool islast)
+parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * c_idx, bool isfirst, bool islast, bool * ignored)
 {
 	JsonbValue * v = NULL;
 	JsonbValue vbuf;
@@ -407,7 +454,7 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 
 	/* scn - required */
 	v = getKeyJsonValueFromContainer(&jb->root, "scn", strlen("scn"), &vbuf);
-	if (!v)
+	if (!v || v->type != jbvNumeric)
 	{
 		elog(WARNING, "malformed change request - no scn value");
 		goto end;
@@ -416,7 +463,7 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 
 	/* commit scn - required */
 	v = getKeyJsonValueFromContainer(&jb->root, "c_scn", strlen("c_scn"), &vbuf);
-	if (!v)
+	if (!v || v->type != jbvNumeric)
 	{
 		elog(WARNING, "malformed change request - no c_scn value");
 		goto end;
@@ -425,16 +472,24 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 
 	/* commit index - required */
 	v = getKeyJsonValueFromContainer(&jb->root, "c_idx", strlen("c_idx"), &vbuf);
-	if (!v)
+	if (!v || v->type != jbvNumeric)
 	{
 		elog(WARNING, "malformed change request - no c_idx value");
 		goto end;
 	}
 	* c_idx = DatumGetUInt64(DirectFunctionCall1(numeric_int8, NumericGetDatum(v->val.numeric)));
 
+	/* Configuration filtering needs only a valid checkpoint, no row/table data. */
+	if (fc_skip_truncate() && fc_is_truncate_sql(fc_jsonb_string(payload, "sql")))
+	{
+		olrddl = palloc0(sizeof(OLR_DDL));
+		olrddl->type = DDL_TRUNCATE_TABLE;
+		return olrddl;
+	}
+
 	/* db - required */
 	v = getKeyJsonValueFromContainer(&jb->root, "db", strlen("db"), &vbuf);
-	if (!v)
+	if (!v || v->type != jbvString || v->val.string.len == 0)
 	{
 		elog(WARNING, "malformed change request - no db value");
 		goto end;
@@ -443,7 +498,7 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 
 	/* fetch payload.0.schema */
 	jbschema = GET_JSONB_ELEM(payload, &datum_path_schema[0], 1);
-	if (!jbschema)
+	if (!jbschema || !JB_ROOT_IS_OBJECT(jbschema))
 	{
 		elog(WARNING, "malformed change request - no payload.0.schema struct");
 		goto end;
@@ -451,13 +506,14 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 
 	/* fetch owner -> considered schema - optional*/
 	v = getKeyJsonValueFromContainer(&jbschema->root, "owner", strlen("owner"), &vbuf);
-	if (v)
+	if (v && v->type == jbvString && v->val.string.len > 0)
 	{
 		schema = pnstrdup(v->val.string.val, v->val.string.len);
 
 		/* we want to make sure the owner matches our conninfo record */
 		if (strcasecmp(schema, get_shm_connector_user_by_id(myConnectorId)))
 		{
+			*ignored = true;
 			elog(DEBUG1, "skip ddl with non matching owner...");
 			goto end;
 		}
@@ -475,7 +531,7 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 
 	/* fetch payload.0.schema.table - required */
 	v = getKeyJsonValueFromContainer(&jbschema->root, "table", strlen("table"), &vbuf);
-	if (!v)
+	if (!v || v->type != jbvString || v->val.string.len == 0)
 	{
 		elog(WARNING, "malformed change request - no payload.0.schema.table value");
 		goto end;
@@ -484,6 +540,7 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 
 	if (!is_whitelist_table(table))
 	{
+		*ignored = true;
 		elog(DEBUG1, "table %s is not white-listed...", table);
 		goto end;
 	}
@@ -491,7 +548,7 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 	/* fetch sql - required */
 	initStringInfo(&sql);
 	v = getKeyJsonValueFromContainer(&payload->root, "sql", strlen("sql"), &vbuf);
-	if (!v)
+	if (!v || v->type != jbvString || v->val.string.len == 0)
 	{
 		elog(WARNING, "malformed change request - no payload.0.sql value");
 		goto end;
@@ -499,7 +556,9 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 
 	appendBinaryStringInfo(&sql, v->val.string.val, v->val.string.len);
 
-	if (!is_whitelist_sql(&sql))
+	/* The general DDL filter uses substrings; quoted table names can themselves
+	 * contain DROP/ALTER keywords. Classify TRUNCATE by its leading token. */
+	if (!fc_is_truncate_sql(sql.data) && !is_whitelist_sql(&sql))
 	{
 		elog(DEBUG1, "unsupported DDL -----> %s", sql.data);
 		goto end;
@@ -512,12 +571,41 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 	if (isfirst || islast)
 	{
 		v = getKeyJsonValueFromContainer(&jb->root, "tm", strlen("tm"), &vbuf);
-		if (v)
+		if (v && v->type == jbvNumeric)
 		{
 			olrddl->src_ts_ms = DatumGetUInt64(DirectFunctionCall1(numeric_int8,
 					NumericGetDatum(v->val.numeric))) / 1000 / 1000;
 		}
 	}
+	/* TRUNCATE needs only source metadata, including its original case. */
+	{
+		List * names = fc_parse_truncate_sql(sql.data);
+
+		if (names)
+		{
+			if (pg_strcasecmp(llast(names), table) != 0 ||
+				(list_length(names) >= 2 &&
+				 pg_strcasecmp(list_length(names) == 3 ? lsecond(names) : linitial(names), schema) != 0))
+			{
+				elog(WARNING, "TRUNCATE SQL and OLR source metadata disagree");
+				destroyOLRDDL(olrddl);
+				return NULL;
+			}
+			olrddl->type = DDL_TRUNCATE_TABLE;
+			olrddl->sourceDb = pstrdup(db);
+			olrddl->sourceSchema = pstrdup(schema);
+			olrddl->sourceTable = pstrdup(table);
+			olrddl->id = psprintf("%s.%s.%s", db, schema, table);
+			return olrddl;
+		}
+	}
+	if (fc_is_truncate_sql(sql.data))
+	{
+		elog(WARNING, "unsupported native OLR TRUNCATE statement: %s", sql.data);
+		destroyOLRDDL(olrddl);
+		return NULL;
+	}
+	load_oracle_parser();
 	/* Parse the Oracle SQL */
 	PG_TRY();
 	{
@@ -1281,41 +1369,10 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 		}
 		else if (IsA(stmt, TruncateStmt))
 		{
-			TruncateStmt *truncateStmt = (TruncateStmt *)stmt;
-			ListCell *objCell;
-			olrddl->type = DDL_TRUNCATE_TABLE;
-
-			if (strstr(dbz_skipped_operations, "t"))
-			{
-				elog(WARNING, "truncate support is not enabled. Remove 't' from "
-						"dbz_skipped_operations GUC to support it");
-				destroyOLRDDL(olrddl);
-				olrddl = NULL;
-				goto end;
-			}
-
-			/* we only expect one entry from this list */
-			if (list_length(truncateStmt->relations) > 1)
-			{
-				elog(WARNING, "truncate more than 1 relations is not supported (%d)",
-						list_length(truncateStmt->relations));
-				destroyOLRDDL(olrddl);
-				olrddl = NULL;
-				goto end;
-			}
-
-			foreach (objCell, truncateStmt->relations)
-			{
-				RangeVar *rv = lfirst(objCell);
-				elog(WARNING, "truncate rv.relname %s", rv->relname);
-
-				/* replace table with the new value to be truncated */
-				if(table)
-				{
-					pfree(table);
-					table = pstrdup(rv->relname);
-				}
-			}
+			/* Unsupported TRUNCATE syntax must not be acknowledged as success. */
+			elog(WARNING, "unsupported native OLR TRUNCATE statement: %s", sql.data);
+			destroyOLRDDL(olrddl);
+			return NULL;
 		}
 		else
 		{
@@ -1371,7 +1428,7 @@ end:
  * parseOLRDML
  */
 static OLR_DML *
-parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * c_idx, bool isfirst, bool islast)
+parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * c_idx, bool isfirst, bool islast, bool * ignored)
 {
 	JsonbValue * v = NULL;
 	JsonbValue vbuf;
@@ -1397,7 +1454,7 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 
 	/* scn - required */
 	v = getKeyJsonValueFromContainer(&jb->root, "scn", strlen("scn"), &vbuf);
-	if (!v)
+	if (!v || v->type != jbvNumeric)
 	{
 		elog(WARNING, "malformed change request - no scn value");
 		return NULL;
@@ -1406,7 +1463,7 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 
 	/* commit scn - required */
 	v = getKeyJsonValueFromContainer(&jb->root, "c_scn", strlen("c_scn"), &vbuf);
-	if (!v)
+	if (!v || v->type != jbvNumeric)
 	{
 		elog(WARNING, "malformed change request - no c_scn value");
 		return NULL;
@@ -1415,7 +1472,7 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 
 	/* commit index - required */
 	v = getKeyJsonValueFromContainer(&jb->root, "c_idx", strlen("c_idx"), &vbuf);
-	if (!v)
+	if (!v || v->type != jbvNumeric)
 	{
 		elog(WARNING, "malformed change request - no c_idx value");
 		return NULL;
@@ -1424,7 +1481,7 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 
 	/* db - required */
 	v = getKeyJsonValueFromContainer(&jb->root, "db", strlen("db"), &vbuf);
-	if (!v)
+	if (!v || v->type != jbvString || v->val.string.len == 0)
 	{
 		elog(WARNING, "malformed change request - no db value");
 		return NULL;
@@ -1452,7 +1509,7 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 
 	/* fetch payload.0.schema */
 	jbschema = GET_JSONB_ELEM(payload, &datum_path_schema[0], 1);
-	if (!jbschema)
+	if (!jbschema || !JB_ROOT_IS_OBJECT(jbschema))
 	{
 		elog(WARNING, "malformed change request - no payload.0.schema struct");
 		destroyOLRDML(olrdml);
@@ -1462,6 +1519,13 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 
 	/* fetch owner -> considered schema - optional*/
 	v = getKeyJsonValueFromContainer(&jbschema->root, "owner", strlen("owner"), &vbuf);
+	if (v && (v->type != jbvString || v->val.string.len == 0))
+	{
+		elog(WARNING, "malformed change request - invalid payload.0.schema.owner value");
+		destroyOLRDML(olrdml);
+		olrdml = NULL;
+		goto end;
+	}
 	if (v)
 	{
 		schema = pnstrdup(v->val.string.val, v->val.string.len);
@@ -1470,7 +1534,7 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 
 	/* fetch payload.0.schema.table - required */
 	v = getKeyJsonValueFromContainer(&jbschema->root, "table", strlen("table"), &vbuf);
-	if (!v)
+	if (!v || v->type != jbvString || v->val.string.len == 0)
 	{
 		elog(WARNING, "malformed change request - no payload.0.schema.table value");
 		destroyOLRDML(olrdml);
@@ -1481,6 +1545,7 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 
 	if (!is_whitelist_table(table))
 	{
+		*ignored = true;
 		elog(DEBUG1, "table %s is not white-listed", table);
 		destroyOLRDML(olrdml);
 		olrdml = NULL;
@@ -1493,10 +1558,9 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 	olrdml->mappedObjectId = transform_object_name(olrdml->remoteObjectId, "table");
 	if (olrdml->mappedObjectId)
 	{
-		char * objectIdCopy = pstrdup(olrdml->mappedObjectId);
-		char * db2 = NULL, * table2 = NULL, * schema2 = NULL;
-
-		splitIdString(objectIdCopy, &db2, &schema2, &table2, false);
+		List * parts = fc_parse_identifier(olrdml->mappedObjectId);
+		char * table2 = list_length(parts) == 1 || list_length(parts) == 2 ? llast(parts) : NULL;
+		char * schema2 = list_length(parts) == 2 ? linitial(parts) : NULL;
 		if (!table2)
 		{
 			/* save the error */
@@ -1529,6 +1593,10 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 		appendStringInfo(&strinfo, "%s.%s", olrdml->schema, olrdml->table);
 		olrdml->mappedObjectId = pstrdup(strinfo.data);
 	}
+
+	/* Reuse the same safe destination identifiers for DML after TRUNCATE. */
+	pfree(olrdml->mappedObjectId);
+	olrdml->mappedObjectId = quote_qualified_identifier(olrdml->schema, olrdml->table);
 
 	/* prepare cache key */
 	strlcpy(cachekey.schema, olrdml->schema, sizeof(cachekey.schema));
@@ -2180,7 +2248,7 @@ end:
  * Main function to process Openlog Replicator change event
  */
 int
-fc_processOLRChangeEvent(void * event, SynchdbStatistics * myBatchStats,
+fc_processOLRChangeEvent(void * event, int eventlen, SynchdbStatistics * myBatchStats,
 		const char * name, bool * sendconfirm, bool isfirst, bool islast)
 {
 	Datum jsonb_datum;
@@ -2195,11 +2263,21 @@ fc_processOLRChangeEvent(void * event, SynchdbStatistics * myBatchStats,
 
 	Datum datum_path_payload[2] = {CStringGetTextDatum("payload"), CStringGetTextDatum("0")};
 
+	*sendconfirm = false;
+
 	tempContext = AllocSetContextCreate(TopMemoryContext,
 										"FORMAT_CONVERTER",
 										ALLOCSET_DEFAULT_SIZES);
 
 	oldContext = MemoryContextSwitchTo(tempContext);
+
+#if SYNCHDB_PG_MAJOR_VERSION >= 1700
+	elog(LOG, "synchdb connector %s native OLR event: %.*s", name,
+		 eventlen, VARDATA_ANY((text *) event));
+#else
+	elog(LOG, "synchdb connector %s native OLR event: %.*s", name,
+		 eventlen, (char *) event);
+#endif
 
     /* Convert event string to JSONB */
 	PG_TRY();
@@ -2232,9 +2310,22 @@ fc_processOLRChangeEvent(void * event, SynchdbStatistics * myBatchStats,
 	elog(DEBUG1, "%s", (char *) event);
 #endif
 
+	{
+		Jsonb * records = GET_JSONB_ELEM(jb, datum_path_payload, 1);
+
+		if (!records || !JB_ROOT_IS_ARRAY(records) || JsonContainerSize(&records->root) != 1)
+		{
+			elog(WARNING, "native OLR requires one payload per message (format.message=2)");
+			increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
+			MemoryContextSwitchTo(oldContext);
+			MemoryContextDelete(tempContext);
+			return -1;
+		}
+	}
+
 	/* payload - required */
 	payload = GET_JSONB_ELEM(jb, &datum_path_payload[0], 2);
-	if (!payload)
+	if (!payload || !JB_ROOT_IS_OBJECT(payload))
 	{
 		elog(WARNING, "malformed change request - no payload struct");
 		increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
@@ -2244,8 +2335,8 @@ fc_processOLRChangeEvent(void * event, SynchdbStatistics * myBatchStats,
 	}
 
 	/* payload.op - required */
-	v = getKeyJsonValueFromContainer(&payload->root, "op", strlen("db"), &vbuf);
-	if (!v)
+	v = getKeyJsonValueFromContainer(&payload->root, "op", strlen("op"), &vbuf);
+	if (!v || v->type != jbvString || v->val.string.len == 0)
 	{
 		elog(WARNING, "malformed change request - no payload.0.op value");
 		increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
@@ -2347,10 +2438,8 @@ fc_processOLRChangeEvent(void * event, SynchdbStatistics * myBatchStats,
 		/* DMLs */
 		OLR_DML * olrdml = NULL;
 		PG_DML * pgdml = NULL;
+		bool ignored = false;
 		orascn scn = 0, c_scn = 0, c_idx = 0;
-
-		/* increment batch statistics */
-		increment_connector_statistics(myBatchStats, STATS_DML, 1);
 
 		if (!IsTransactionState())
 		{
@@ -2362,7 +2451,20 @@ fc_processOLRChangeEvent(void * event, SynchdbStatistics * myBatchStats,
 
 		/* (1) parse */
 		set_shm_connector_state(myConnectorId, STATE_PARSING);
-		olrdml = parseOLRDML(jb, op[0], payload, &scn, &c_scn, &c_idx, isfirst, islast);
+		olrdml = parseOLRDML(jb, op[0], payload, &scn, &c_scn, &c_idx, isfirst, islast, &ignored);
+		if (ignored)
+		{
+			/* Internal flush-table traffic is consumed without target DML.
+			 * Validated checkpoints must advance so it is not replayed. */
+			olr_client_set_scns(scn, c_scn, c_idx);
+			*sendconfirm = true;
+			set_shm_connector_state(myConnectorId, STATE_SYNCING);
+			MemoryContextSwitchTo(oldContext);
+			MemoryContextDelete(tempContext);
+			return 0;
+		}
+
+		increment_connector_statistics(myBatchStats, STATS_DML, 1);
     	if (!olrdml)
 		{
 			set_shm_connector_state(myConnectorId, STATE_SYNCING);
@@ -2427,56 +2529,21 @@ fc_processOLRChangeEvent(void * event, SynchdbStatistics * myBatchStats,
 		/* DDLs */
 		OLR_DDL * olrddl = NULL;
 		PG_DDL * pgddl = NULL;
+		bool ignored = false;
 		orascn scn = 0, c_scn = 0, c_idx = 0;
 
-		/* increment batch statistics */
-		increment_connector_statistics(myBatchStats, STATS_DDL, 1);
 
-		/* (1) make sure oracle parser is ready to use - todo move earlier */
-		if (synchdb_oracle_raw_parser == NULL)
-		{
-			char * oralib_path = NULL, * error = NULL;
-
-			oralib_path = psprintf("%s/%s", pkglib_path, ORACLE_RAW_PARSER_LIB);
-
-			/*
-			 * RTLD_LOCAL keeps the parser's internal ora_* symbols private to
-			 * the library so they do not collide with IvorySQL's built-in
-			 * Oracle parser (which exports the same names).  We only use the
-			 * uniquely named synchdb_oracle_raw_parser entry via dlsym(), which
-			 * works through the explicit handle regardless of LOCAL/GLOBAL.
-			 */
-			handle = dlopen(oralib_path, RTLD_NOW | RTLD_LOCAL);
-			if (!handle)
-			{
-				set_shm_connector_errmsg(myConnectorId, "failed to load oracle_parser.so");
-				ereport(ERROR,
-						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-						 errmsg("failed to load oracle_parser.so at %s", oralib_path),
-						 errhint("%s",  dlerror())));
-
-			}
-			pfree(oralib_path);
-
-			synchdb_oracle_raw_parser = (oracle_raw_parser_fn) dlsym(handle, "synchdb_oracle_raw_parser");
-			if ((error = dlerror()) != NULL)
-			{
-				set_shm_connector_errmsg(myConnectorId, "failed to load synchdb_oracle_raw_parser symbol");
-				ereport(ERROR,
-						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-						 errmsg("failed to load synchdb_oracle_raw_parser function symbol"),
-						 errhint("make sure synchdb_oracle_raw_parser() function in libsynchdb_oracle_parser.so is "
-								 "publicly accessible ")));
-			}
-		}
 
 		/* (2) parse */
 		set_shm_connector_state(myConnectorId, STATE_PARSING);
-		olrddl = parseOLRDDL(jb, payload, &scn, &c_scn, &c_idx, isfirst, islast);
+		olrddl = parseOLRDDL(jb, payload, &scn, &c_scn, &c_idx, isfirst, islast, &ignored);
     	if (!olrddl)
 		{
 			set_shm_connector_state(myConnectorId, STATE_SYNCING);
-			increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
+			if (!ignored)
+				increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
+			if (!fc_is_truncate_sql(fc_jsonb_string(payload, "sql")))
+				increment_connector_statistics(myBatchStats, STATS_DDL, 1);
 
 			/*
 			 * openlog replicator delivers a lot of DDLs issued internally in oracle that
@@ -2484,13 +2551,31 @@ fc_processOLRChangeEvent(void * event, SynchdbStatistics * myBatchStats,
 			 * have to move forward with scn and c_scn so we do not receive these again
 			 * in case of connector restart.
 			 */
+			if (!ignored && fc_is_truncate_sql(fc_jsonb_string(payload, "sql")))
+			{
+				MemoryContextSwitchTo(oldContext);
+				MemoryContextDelete(tempContext);
+				return -1;
+			}
 	    	olr_client_set_scns(scn, c_scn, c_idx);
 	    	* sendconfirm = true;
 
 			MemoryContextSwitchTo(oldContext);
 			MemoryContextDelete(tempContext);
-			return -1;
+			return 0;
 		}
+
+		if (olrddl->type == DDL_TRUNCATE_TABLE && fc_skip_truncate())
+		{
+			olr_client_set_scns(scn, c_scn, c_idx);
+			*sendconfirm = true;
+			set_shm_connector_state(myConnectorId, STATE_SYNCING);
+			MemoryContextSwitchTo(oldContext);
+			MemoryContextDelete(tempContext);
+			return 0;
+		}
+		if (olrddl->type != DDL_TRUNCATE_TABLE)
+			increment_connector_statistics(myBatchStats, STATS_DDL, 1);
 
     	/* (3) convert */
     	set_shm_connector_state(myConnectorId, STATE_CONVERTING);
@@ -2507,7 +2592,7 @@ fc_processOLRChangeEvent(void * event, SynchdbStatistics * myBatchStats,
 
     	/* (4) execute */
     	set_shm_connector_state(myConnectorId, STATE_EXECUTING);
-    	ret = ra_executePGDDL(pgddl, TYPE_OLR);
+		ret = ra_executePGDDL(pgddl, TYPE_OLR, myBatchStats);
     	if(ret)
     	{
     		set_shm_connector_state(myConnectorId, STATE_SYNCING);
@@ -2518,6 +2603,11 @@ fc_processOLRChangeEvent(void * event, SynchdbStatistics * myBatchStats,
     		MemoryContextDelete(tempContext);
     		return -1;
     	}
+
+		if (olrddl->type == DDL_TRUNCATE_TABLE)
+		{
+			increment_connector_statistics(myBatchStats, STATS_DDL, 1);
+		}
 
     	/* (5) record scn, c_scn and processing timestmaps */
     	olr_client_set_scns(scn, c_scn, c_idx);
@@ -2538,7 +2628,8 @@ fc_processOLRChangeEvent(void * event, SynchdbStatistics * myBatchStats,
     	}
 
 		/* (6) update attribute map table */
-    	updateSynchdbAttribute(olrddl, pgddl, TYPE_OLR, name);
+		if (olrddl->type != DDL_TRUNCATE_TABLE)
+			updateSynchdbAttribute(olrddl, pgddl, TYPE_OLR, name);
 
     	/* (7) clean up */
     	set_shm_connector_state(myConnectorId, STATE_SYNCING);

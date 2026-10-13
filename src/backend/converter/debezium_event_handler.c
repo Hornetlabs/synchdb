@@ -45,6 +45,8 @@ static DBZ_DDL * parseDBZDDL(Jsonb * jb, bool isfirst, bool islast, bool deriveM
 static DBZ_DML * parseDBZDML(Jsonb * jb, char op, ConnectorType type,
 		Jsonb * source, bool isfirst, bool islast);
 static int deriveLogicalMessage(Jsonb ** jb);
+static DBZ_DDL * parseDBZTruncate(Jsonb * jb, Jsonb * source, ConnectorType type);
+static DBZ_DDL * parseDBZTruncateDDL(Jsonb * jb, bool * recognized);
 
 static bool isInSnapshot = false;
 
@@ -57,6 +59,8 @@ name_to_ddltype(const char * name)
 		return DDL_ALTER_TABLE;
 	else if (!strcasecmp(name, "DROP") || !strcasecmp(name, "DROP TABLE"))
 		return DDL_DROP_TABLE;
+	else if (!strcasecmp(name, "TRUNCATE") || !strcasecmp(name, "TRUNCATE TABLE"))
+		return DDL_TRUNCATE_TABLE;
 	else
 		return DDL_UNDEF;
 }
@@ -267,6 +271,12 @@ destroyDBZDDL(DBZ_DDL * ddlinfo)
 	{
 		if (ddlinfo->id)
 			pfree(ddlinfo->id);
+		if (ddlinfo->sourceDb)
+			pfree(ddlinfo->sourceDb);
+		if (ddlinfo->sourceSchema)
+			pfree(ddlinfo->sourceSchema);
+		if (ddlinfo->sourceTable)
+			pfree(ddlinfo->sourceTable);
 
 		if (ddlinfo->primaryKeyColumnNames)
 			pfree(ddlinfo->primaryKeyColumnNames);
@@ -392,6 +402,115 @@ deriveLogicalMessage(Jsonb ** jb)
 	return 0;
 }
 
+static void
+finishTruncateInfo(DBZ_DDL * ddl, Jsonb * jb)
+{
+	StringInfoData timestamp;
+
+	ddl->type = DDL_TRUNCATE_TABLE;
+	ddl->id = ddl->sourceSchema ?
+		psprintf("%s.%s.%s", ddl->sourceDb, ddl->sourceSchema, ddl->sourceTable) :
+		psprintf("%s.%s", ddl->sourceDb, ddl->sourceTable);
+	initStringInfo(&timestamp);
+	if (!getPathElementString(jb, "payload.ts_ms", &timestamp, true))
+		ddl->dbz_ts_ms = strtoull(timestamp.data, NULL, 10);
+	if (!getPathElementString(jb, "payload.source.ts_ms", &timestamp, true))
+		ddl->src_ts_ms = strtoull(timestamp.data, NULL, 10);
+	pfree(timestamp.data);
+}
+
+/* No before/after, primary key, schema envelope, or attribute lookup is needed. */
+static DBZ_DDL *
+parseDBZTruncate(Jsonb * jb, Jsonb * source, ConnectorType type)
+{
+	DBZ_DDL * ddl = palloc0(sizeof(DBZ_DDL));
+
+	ddl->sourceDb = fc_jsonb_string(source, "db");
+	ddl->sourceSchema = fc_jsonb_string(source, "schema");
+	ddl->sourceTable = fc_jsonb_string(source, "table");
+	if (!ddl->sourceDb || !ddl->sourceTable ||
+		((type == TYPE_POSTGRES || type == TYPE_ORACLE || type == TYPE_OLR ||
+		  type == TYPE_SQLSERVER) && !ddl->sourceSchema))
+	{
+		elog(WARNING, "malformed TRUNCATE event: nonempty source db, table and connector schema required");
+		destroyDBZDDL(ddl);
+		return NULL;
+	}
+	finishTruncateInfo(ddl, jb);
+	return ddl;
+}
+
+/* Schema-change records can explicitly name TRUNCATE, or carry its DDL text. */
+static DBZ_DDL *
+parseDBZTruncateDDL(Jsonb * jb, bool * recognized)
+{
+	Datum path[3] = {CStringGetTextDatum("payload"), CStringGetTextDatum("tableChanges"),
+		CStringGetTextDatum("0")};
+	Datum sourcepath[2] = {CStringGetTextDatum("payload"), CStringGetTextDatum("source")};
+	Jsonb * payload = GET_JSONB_ELEM(jb, path, 1);
+	Jsonb * changes = GET_JSONB_ELEM(jb, path, 2);
+	Jsonb * change = GET_JSONB_ELEM(jb, path, 3);
+	Jsonb * source = GET_JSONB_ELEM(jb, sourcepath, 2);
+	char * action = fc_jsonb_string(change, "type");
+	char * sql = fc_jsonb_string(payload, "ddl");
+	char * id = fc_jsonb_string(change, "id");
+	char * connector = fc_jsonb_string(source, "connector");
+	ConnectorType type = connector ? fc_get_connector_type(connector) : TYPE_UNDEF;
+	bool explicitTruncate = action && name_to_ddltype(action) == DDL_TRUNCATE_TABLE;
+	List * sqlparts = fc_parse_truncate_sql(sql);
+	List * parts;
+	DBZ_DDL * ddl;
+
+	*recognized = explicitTruncate || fc_is_truncate_sql(sql);
+	if ((!explicitTruncate && !sqlparts) || (explicitTruncate && sql && !sqlparts))
+		return NULL;
+	/* Never apply only the first table of a multi-table schema-change record. */
+	if (changes && (!JB_ROOT_IS_ARRAY(changes) || JsonContainerSize(&changes->root) > 1))
+		return NULL;
+	parts = id ? fc_parse_identifier(id) : sqlparts;
+	if (!parts)
+		return NULL;
+	ddl = palloc0(sizeof(DBZ_DDL));
+	ddl->sourceTable = pstrdup(llast(parts));
+	ddl->sourceDb = fc_jsonb_string(source, "db");
+	if (!ddl->sourceDb)
+		ddl->sourceDb = fc_jsonb_string(payload, "databaseName");
+	ddl->sourceSchema = fc_jsonb_string(source, "schema");
+	if (!ddl->sourceSchema)
+		ddl->sourceSchema = fc_jsonb_string(payload, "schemaName");
+	if (list_length(parts) == 3)
+	{
+		ddl->sourceDb = pstrdup(linitial(parts));
+		ddl->sourceSchema = pstrdup(lsecond(parts));
+	}
+	else if (list_length(parts) == 2)
+	{
+		if (type == TYPE_MYSQL)
+			ddl->sourceDb = pstrdup(linitial(parts));
+		else
+			ddl->sourceSchema = pstrdup(linitial(parts));
+	}
+	if (!ddl->sourceDb || (type != TYPE_MYSQL && !ddl->sourceSchema))
+	{
+		destroyDBZDDL(ddl);
+		return NULL;
+	}
+	/* Reject inconsistent DDL/metadata instead of truncating the wrong table. */
+	if (sqlparts && (strcmp(llast(sqlparts), ddl->sourceTable) ||
+		(list_length(sqlparts) == 2 && strcmp(linitial(sqlparts),
+			type == TYPE_MYSQL ? ddl->sourceDb : ddl->sourceSchema)) ||
+		(list_length(sqlparts) == 3 &&
+			(strcmp(linitial(sqlparts), ddl->sourceDb) ||
+			 !ddl->sourceSchema ||
+			 strcmp(lsecond(sqlparts), ddl->sourceSchema)))))
+	{
+		destroyDBZDDL(ddl);
+		return NULL;
+	}
+	finishTruncateInfo(ddl, jb);
+	return ddl;
+}
+
 /*
  * parseDBZDDL
  *
@@ -442,6 +561,22 @@ parseDBZDDL(Jsonb * jb, bool isfirst, bool islast, bool deriveMsg)
 			return NULL;
 		}
 		elog(WARNING, "logical message derived");
+	}
+
+	{
+		bool recognized = false;
+		DBZ_DDL * truncate = parseDBZTruncateDDL(jb, &recognized);
+
+		if (truncate)
+		{
+			destroyDBZDDL(ddlinfo);
+			return truncate;
+		}
+		if (recognized)
+		{
+			destroyDBZDDL(ddlinfo);
+			return NULL;
+		}
 	}
 
     if (getPathElementString(jb, "payload.tableChanges.0.id", &strinfo, true))
@@ -797,10 +932,9 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 	dbzdml->mappedObjectId = transform_object_name(dbzdml->remoteObjectId, "table");
 	if (dbzdml->mappedObjectId)
 	{
-		char * objectIdCopy = pstrdup(dbzdml->mappedObjectId);
-		char * db2 = NULL, * table2 = NULL, * schema2 = NULL;
-
-		splitIdString(objectIdCopy, &db2, &schema2, &table2, false);
+		List * parts = fc_parse_identifier(dbzdml->mappedObjectId);
+		char * table2 = list_length(parts) == 1 || list_length(parts) == 2 ? llast(parts) : NULL;
+		char * schema2 = list_length(parts) == 2 ? linitial(parts) : NULL;
 		if (!table2)
 		{
 			/* save the error */
@@ -833,6 +967,10 @@ parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirs
 		appendStringInfo(&strinfo, "%s.%s", dbzdml->schema, dbzdml->table);
 		dbzdml->mappedObjectId = pstrdup(strinfo.data);
 	}
+	/* Reuse the same safe destination identifiers for DML after TRUNCATE. */
+	pfree(dbzdml->mappedObjectId);
+	dbzdml->mappedObjectId = quote_qualified_identifier(dbzdml->schema, dbzdml->table);
+
 	/* free the temporary pointers */
 	if (db)
 	{
@@ -1676,6 +1814,7 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 	ConnectorType type;
 	MemoryContext tempContext, oldContext;
 	bool islastsnapshot = false;
+	bool isTruncateEvent = false;
 	int ret = -1;
 	struct timeval tv;
 	Datum datum_elems[2] = {CStringGetTextDatum("payload"), CStringGetTextDatum("source")};
@@ -1688,6 +1827,8 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 	oldContext = MemoryContextSwitchTo(tempContext);
 
 	initStringInfo(&strinfo);
+
+	elog(LOG, "synchdb connector %s Debezium event: %s", name, event);
 
     /* Convert event string to JSONB */
 	PG_TRY();
@@ -1706,9 +1847,33 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 	}
 	PG_END_TRY();
 
+    payload = GET_JSONB_ELEM(jb, datum_payload, 1);
+    if (!payload || !JB_ROOT_IS_OBJECT(payload))
+    {
+        elog(WARNING, "malformed change request - payload must be an object");
+        increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
+        MemoryContextSwitchTo(oldContext);
+        MemoryContextDelete(tempContext);
+        return -1;
+    }
+
+	{
+		char * op = fc_jsonb_string(payload, "op");
+
+		isTruncateEvent = op && strcmp(op, "t") == 0;
+	}
+
     /* Obtain source element - required */
 	source = GET_JSONB_ELEM(jb, &datum_elems[0], 2);
-    if (source)
+	if (isTruncateEvent && (!source || !JB_ROOT_IS_OBJECT(source)))
+	{
+		elog(WARNING, "malformed TRUNCATE event - source must be an object");
+		increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
+		MemoryContextSwitchTo(oldContext);
+		MemoryContextDelete(tempContext);
+		return -1;
+	}
+    if (source && JB_ROOT_IS_OBJECT(source))
     {
 		JsonbValue * v = NULL;
 		JsonbValue vbuf;
@@ -1716,7 +1881,7 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 
 		/* payload.source.connector - required */
 		v = getKeyJsonValueFromContainer(&source->root, "connector", strlen("connector"), &vbuf);
-		if (!v)
+		if (!v || v->type != jbvString || v->val.string.len == 0)
 		{
 			elog(WARNING, "malformed change request - no connector attribute specified");
 	    	increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
@@ -1725,12 +1890,29 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 			return -1;
 		}
 		tmp = pnstrdup(v->val.string.val, v->val.string.len);
-		type = fc_get_connector_type(tmp);
+		PG_TRY();
+		{
+			type = fc_get_connector_type(tmp);
+		}
+		PG_CATCH();
+		{
+			increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
 		pfree(tmp);
+		if (type == TYPE_UNDEF)
+		{
+			increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
+			MemoryContextSwitchTo(oldContext);
+			MemoryContextDelete(tempContext);
+			return -1;
+		}
 
-		/* payload.source.snapshot - required */
+		/* Snapshot metadata is optional for rowless TRUNCATE events. */
 		v = getKeyJsonValueFromContainer(&source->root, "snapshot", strlen("snapshot"), &vbuf);
-		if (!v)
+		if ((!v && !isTruncateEvent) ||
+			(v && v->type != jbvString && v->type != jbvBool))
 		{
 			elog(WARNING, "malformed DML change request - no snapshot attribute specified");
 			increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
@@ -1738,7 +1920,9 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 	    	MemoryContextDelete(tempContext);
 			return -1;
 		}
-		tmp = pnstrdup(v->val.string.val, v->val.string.len);
+		tmp = !v ? pstrdup("false") :
+			v->type == jbvBool ? pstrdup(v->val.boolean ? "true" : "false") :
+			pnstrdup(v->val.string.val, v->val.string.len);
 	    if (!strcmp(tmp, "true") || !strcmp(tmp, "last"))
 	    {
 			if (flag & CONNFLAG_SCHEMA_SYNC_MODE)
@@ -1837,7 +2021,7 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 
 			/* payload.status - required */
 			v = getKeyJsonValueFromContainer(&payload->root, "status", strlen("status"), &vbuf);
-			if (!v)
+			if (!v || v->type != jbvString)
 			{
 				elog(WARNING, "malformed change request - no status in transaction boundary payload");
 				increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
@@ -1877,7 +2061,7 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 			}
 			MemoryContextSwitchTo(oldContext);
 			MemoryContextDelete(tempContext);
-			return -1;
+			return 0;
 		}
 		else
 		{
@@ -1890,12 +2074,52 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
     }
 
     /* Check if it's a DDL or DML event */
-    ret = getPathElementString(jb, "payload.op", &strinfo, true);
+	payload = GET_JSONB_ELEM(jb, datum_payload, 1);
+	{
+		char * op = fc_jsonb_string(payload, "op");
+		JsonbValue buffer;
+		JsonbValue * value = payload && JB_ROOT_IS_OBJECT(payload) ?
+			getKeyJsonValueFromContainer(&payload->root, "op", 2, &buffer) : NULL;
+
+		if (value && (!op || strlen(op) != 1))
+		{
+			increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
+			MemoryContextSwitchTo(oldContext);
+			MemoryContextDelete(tempContext);
+			return -1;
+		}
+		ret = op ? 0 : -1;
+		resetStringInfo(&strinfo);
+		if (op)
+			appendStringInfoString(&strinfo, op);
+	}
+	if (!ret && strinfo.data[0] == 't' && fc_skip_truncate())
+	{
+		MemoryContextSwitchTo(oldContext);
+		MemoryContextDelete(tempContext);
+		return 0;
+	}
+	if (ret)
+	{
+		Datum path[2] = {CStringGetTextDatum("payload"), CStringGetTextDatum("tableChanges")};
+		Jsonb * changes = GET_JSONB_ELEM(jb, path, 2);
+		char * ddl = fc_jsonb_string(payload, "ddl");
+
+		/* MySQL snapshots also emit SET/USE/database DDL without table changes.
+		 * These metadata records are deliberately consumed, not failed batches. */
+		if (changes && JB_ROOT_IS_ARRAY(changes) && JsonContainerSize(&changes->root) == 0 &&
+			ddl && !fc_is_truncate_sql(ddl))
+		{
+			MemoryContextSwitchTo(oldContext);
+			MemoryContextDelete(tempContext);
+			return 0;
+		}
+	}
     /*
      * if payload.op exists and value equals 'm' or the entire payload.op missing,
      * then it is about DDL.
      */
-    if ((!ret && strinfo.data && strinfo.data[0] == 'm') || ret)
+    if ((!ret && (strinfo.data[0] == 'm' || strinfo.data[0] == 't')) || ret)
     {
         /* Process DDL event */
     	DBZ_DDL * dbzddl = NULL;
@@ -1910,7 +2134,9 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 
     	/* (1) parse */
     	set_shm_connector_state(myConnectorId, STATE_PARSING);
-    	dbzddl = parseDBZDDL(jb, isfirst, islast, deriveMsg);
+		dbzddl = !ret && strinfo.data[0] == 't' ?
+			parseDBZTruncate(jb, source, type) :
+			parseDBZDDL(jb, isfirst, islast, deriveMsg);
     	if (!dbzddl)
     	{
     		set_shm_connector_state(myConnectorId, STATE_SYNCING);
@@ -1919,6 +2145,14 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
     		MemoryContextDelete(tempContext);
     		return -1;
     	}
+
+		if (dbzddl->type == DDL_TRUNCATE_TABLE && fc_skip_truncate())
+		{
+			set_shm_connector_state(myConnectorId, STATE_SYNCING);
+			MemoryContextSwitchTo(oldContext);
+			MemoryContextDelete(tempContext);
+			return 0;
+		}
 
     	/* (2) convert */
     	set_shm_connector_state(myConnectorId, STATE_CONVERTING);
@@ -1935,7 +2169,7 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 
     	/* (3) execute */
     	set_shm_connector_state(myConnectorId, STATE_EXECUTING);
-    	ret = ra_executePGDDL(pgddl, type);
+		ret = ra_executePGDDL(pgddl, type, myBatchStats);
     	if(ret)
     	{
     		set_shm_connector_state(myConnectorId, STATE_SYNCING);
@@ -1948,7 +2182,8 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
     	}
 
 		/* (4) update attribute map table */
-    	updateSynchdbAttribute(dbzddl, pgddl, get_shm_connector_type_enum(myConnectorId), name);
+		if (dbzddl->type != DDL_TRUNCATE_TABLE)
+			updateSynchdbAttribute(dbzddl, pgddl, get_shm_connector_type_enum(myConnectorId), name);
 
     	/* (5) record only the first and last change event's processing timestamps only */
     	if (islast)
@@ -1966,7 +2201,7 @@ fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
     	}
 
     	/* increment DDLs only in CDC stage */
-    	if (!isInSnapshot)
+		if (!isInSnapshot || dbzddl->type == DDL_TRUNCATE_TABLE)
     		increment_connector_statistics(myBatchStats, STATS_DDL, 1);
 
     	/* increment snapshot table count only in initial snapshot stage */

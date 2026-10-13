@@ -859,14 +859,29 @@ synchdb_handle_delete(List * colvalbefore, Oid tableoid, ConnectorType type, int
  * It uses SPI to execute the DDL query.
  */
 int
-ra_executePGDDL(PG_DDL * pgddl, ConnectorType type)
+ra_executePGDDL(PG_DDL * pgddl, ConnectorType type, SynchdbStatistics * stats)
 {
+	int ret;
+
 	if (!pgddl || !pgddl->ddlquery)
     {
         elog(WARNING, "Invalid DDL query");
         return -1;
     }
-	return spi_execute(pgddl->ddlquery, type);
+	/* SPI errors propagate before the worker commits or acknowledges the batch. */
+	PG_TRY();
+	{
+		ret = spi_execute(pgddl->ddlquery, type);
+	}
+	PG_CATCH();
+	{
+		increment_connector_statistics(stats, STATS_BAD_CHANGE_EVENT, 1);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	if (ret == 0 && pgddl->type == DDL_TRUNCATE_TABLE)
+		increment_connector_statistics(stats, STATS_TRUNCATE, 1);
+	return ret;
 }
 
 /*

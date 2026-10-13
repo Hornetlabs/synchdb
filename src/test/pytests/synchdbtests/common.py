@@ -93,7 +93,7 @@ OLR_PORT="7070"
 OLR_SERVICE="ORACLE"
 
 POSTGRES_HOST="127.0.0.1"
-POSTGRES_PORT=5432
+POSTGRES_PORT=int(os.environ.get("SYNCHDB_TEST_POSTGRES_PORT", "5432"))
 POSTGRES_USER="postgres"
 POSTGRES_PASS="pass"
 POSTGRES_DB="postgres"
@@ -160,6 +160,14 @@ def verify_default_type_mappings(exttype, pgtype, dbvendor):
 
     if exttype == pgtype:
         return True
+
+    # synchdb_att_view stores the base source type without precision/scale.
+    # Oracle NUMBER(p, 0) uses smallint (p <= 4), integer (p <= 9), or
+    # bigint (p <= 18); unrestricted, fractional, and wider NUMBER use numeric.
+    # Oracle and OLR share these mappings for Debezium and FDW snapshots.
+    if dbvendor in ("oracle", "oracle23ai", "olr") and exttype == "number":
+        if pgtype in {"smallint", "integer", "bigint", "numeric"}:
+            return True
     
     default_mappings = {
         "int": "integer",
