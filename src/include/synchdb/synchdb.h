@@ -18,7 +18,9 @@
 #ifndef SYNCHDB_SYNCHDB_H_
 #define SYNCHDB_SYNCHDB_H_
 
-#include "storage/lwlock.h"
+#include "runtime/run_options.h"
+#include "runtime/connector_identity.h"
+#include "runtime/run_state.h"
 
 /* Constants */
 #define SYNCHDB_CONNINFO_NAME_SIZE 64
@@ -38,6 +40,8 @@
 #define SYNCHDB_METADATA_PATH_SIZE 256
 #define SYNCHDB_DATATYPE_NAME_SIZE 64
 #define SYNCHDB_OBJ_NAME_SIZE 128
+#define SYNCHDB_SOURCE_ID_MAX_BYTES 2400
+#define SYNCHDB_SOURCE_ID_SIZE (SYNCHDB_SOURCE_ID_MAX_BYTES + 1)
 #define SYNCHDB_OBJ_TYPE_SIZE 32
 #define SYNCHDB_TRANSFORM_EXPRESSION_SIZE 256
 #define SYNCHDB_JSON_PATH_SIZE 128
@@ -75,7 +79,6 @@
 #define SYNCHDB_OFFSET_FILE_PATTERN "pg_synchdb/%s_%s_%s_offsets.dat"
 #define SYNCHDB_SCHEMA_FILE_PATTERN "pg_synchdb/%s_%s_%s_schemahistory.dat"
 #define SYNCHDB_INFINISPAN_DIR "pg_synchdb/ispn_%s_%s"
-#define SYNCHDB_SECRET "930e62fb8c40086c23f543357a023c0c"
 #define SYNCHDB_CONNINFO_TABLE "synchdb_conninfo"
 #define SYNCHDB_ATTRIBUTE_TABLE "synchdb_attribute"
 #define SYNCHDB_OBJECT_MAPPING_TABLE "synchdb_objmap"
@@ -84,9 +87,9 @@
 typedef unsigned long long orascn;
 
 /* Possible connector flags */
-#define CONNFLAG_SCHEMA_SYNC_MODE 			1 << 0		/* 0001 */
-#define CONNFLAG_NO_CDC_MODE 				1 << 1		/* 0010 */
-#define CONNFLAG_INITIAL_SNAPSHOT_MODE 		1 << 2		/* 0100 */
+#define CONNFLAG_SCHEMA_SYNC_MODE 			(1 << 0)	/* 0001 */
+#define CONNFLAG_NO_CDC_MODE 				(1 << 1)	/* 0010 */
+#define CONNFLAG_INITIAL_SNAPSHOT_MODE 		(1 << 2)	/* 0100 */
 
 /* Enumerations */
 
@@ -384,6 +387,9 @@ typedef struct _ConnectionInfo
     IspnInfo ispn;
     SnapshotEngine snapengine;
     OffsetData offsetdata;
+	SynchdbRunOptions run_options;
+	SynchdbConnectorKey key;
+	int64 config_revision;
 } ConnectionInfo;
 
 /**
@@ -403,6 +409,10 @@ typedef struct _SynchdbRequest
 	ConnectorState reqstate;
 	char reqdata[SYNCHDB_ERRMSG_SIZE];
 	ConnectionInfo reqconninfo;
+	ConnectorType reqtype;
+	uint64 command_id;
+	uint64 target_generation;
+	uint64 target_attempt;
 } SynchdbRequest;
 
 
@@ -418,9 +428,9 @@ typedef struct _CDCStatistics
 {
 	unsigned long long stats_ddl;				/* number of DDL operations performed */
 	unsigned long long stats_dml;				/* number of DML operations performed */
-	unsigned long long stats_create;			/* INSERT events generated during CDC */
-	unsigned long long stats_update;			/* UPDATE events generated during CDC */
-	unsigned long long stats_delete;			/* DELETE events generated during CDC */
+	unsigned long long stats_create;			/* applied target INSERT rows during CDC */
+	unsigned long long stats_update;			/* applied target UPDATE rows during CDC */
+	unsigned long long stats_delete;			/* applied target DELETE rows during CDC */
 	unsigned long long stats_tx;				/* transaction boundary events like BEGIN and COMMIT */
 	unsigned long long stats_truncate;			/* TRUNCATE events generated during CDC */
 } CDCStatistics;
@@ -451,37 +461,11 @@ typedef struct _SynchdbStatistics
 	CDCStatistics cdcstats;
 } SynchdbStatistics;
 
-/**
- *  Structure holding state information for connectors
- */
-typedef struct _ActiveConnectors
-{
-	pid_t pid;
-	ConnectorState state;
-	ConnectorStage stage;
-	ConnectorType type;
-	SynchdbRequest req;
-	char errmsg[SYNCHDB_ERRMSG_SIZE];
-	char dbzoffset[SYNCHDB_OFFSET_SIZE];
-	char snapshotMode[SYNCHDB_SNAPSHOT_MODE_SIZE];
-	ConnectionInfo conninfo;
-	SynchdbStatistics stats;
-} ActiveConnectors;
-
-/**
- * SynchdbSharedState - Shared state information for synchdb background worker
- */
-typedef struct _SynchdbSharedState
-{
-	LWLock		lock;		/* mutual exclusion */
-	ActiveConnectors * connectors;
-} SynchdbSharedState;
-
 typedef struct _ObjectMap
 {
 	char objtype[SYNCHDB_CONNINFO_NAME_SIZE];
 	bool enabled;
-	char srcobj[SYNCHDB_CONNINFO_NAME_SIZE];
+	char *srcobj;
 	char dstobj[SYNCHDB_TRANSFORM_EXPRESSION_SIZE];
 	char curr_pg_tbname[SYNCHDB_CONNINFO_NAME_SIZE];
 	char curr_pg_attname[SYNCHDB_CONNINFO_NAME_SIZE];
@@ -489,9 +473,9 @@ typedef struct _ObjectMap
 } ObjectMap;
 
 /* Function prototypes */
+/* Shared-slot accessors return defaults or do nothing for invalid IDs. */
 const char * get_shm_connector_name(ConnectorType type);
 pid_t get_shm_connector_pid(int connectorId);
-void set_shm_connector_pid(int connectorId, pid_t pid);
 void set_shm_connector_errmsg(int connectorId, const char * err);
 const char * get_shm_connector_errmsg(int connectorId);
 void set_shm_connector_state(int connectorId, ConnectorState state);

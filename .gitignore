@@ -15,3 +15,10 @@ synchdb_testdir/
 # Generated extension installation script (sources live in src/sql/).
 /synchdb--1.0.sql
 /synchdb--1.0.sql.tmp
+/synchdb--1.1.sql
+/synchdb--1.1.sql.tmp
+/synchdb--1.0--1.1.sql
+/synchdb--1.0--1.1.sql.tmp
+
+# Generated local release review bundles and validation evidence.
+/.release-review/

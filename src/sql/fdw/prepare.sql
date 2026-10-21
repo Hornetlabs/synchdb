@@ -28,6 +28,16 @@ BEGIN
     -- parse it as JSONB
     json_data := file_content::jsonb;
 
+    IF jsonb_typeof(json_data->'snapshot_table_list') IS DISTINCT FROM 'array' THEN
+      RAISE EXCEPTION 'Snapshot table file must contain a snapshot_table_list array';
+    END IF;
+    IF jsonb_array_length(json_data->'snapshot_table_list') = 0 OR EXISTS (
+      SELECT 1 FROM jsonb_array_elements(json_data->'snapshot_table_list') e
+       WHERE jsonb_typeof(e) <> 'string' OR btrim(e #>> '{}') = ''
+    ) THEN
+      RAISE EXCEPTION 'Snapshot table file must contain nonempty table identifiers';
+    END IF;
+
     -- Build comma-separated list, normalizing entries:
     --   mysql: db.table
     --   non-mysql: schema.table => db.schema.table
@@ -55,14 +65,16 @@ $$;
 /* added for oracle_fdw based initial snapshot */
 
 CREATE OR REPLACE FUNCTION synchdb_prepare_initial_snapshot(
-    p_connector_name name,
-    p_master_key     text DEFAULT NULL      -- prefer supplying via GUC or parameter, not hardcoding
+    p_connector_name text,
+    p_server_name    name
 )
 RETURNS text
 LANGUAGE plpgsql
-SECURITY DEFINER
+SECURITY INVOKER
+SET search_path = pg_catalog, pg_temp
 AS $$
 DECLARE
+    v_extension_schema name;
 	v_connector   text;      -- 'oracle' | 'olr' | 'mysql' | 'postgres' | 'sqlserver' (lowercased)
     v_hostname    text;
     v_port        int;
@@ -72,15 +84,22 @@ DECLARE
     v_pwd         text;   -- decrypted password
     v_server      text;
     v_dbserver    text;   -- oracle_fdw "dbserver" option, e.g. //host:1521/SERVICE
-    v_key         text;
     v_ssl_mode    text;   -- ssl_mode for postgres_fdw (from extra conninfo)
     v_ssl_cert    text;   -- FDW client certificate file path
     v_ssl_key     text;   -- FDW client private key file path
     v_ssl_rootcert text;  -- FDW CA cert path; for oracle_fdw: Oracle Wallet directory
     v_ssl_cipher  text;   -- SSL cipher list (mysql_fdw only)
 BEGIN
+    SELECT n.nspname INTO STRICT v_extension_schema
+      FROM pg_catalog.pg_extension e
+      JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace
+     WHERE e.extname = 'synchdb';
+    PERFORM pg_catalog.set_config(
+        'search_path',
+        pg_catalog.format('pg_catalog, %I, pg_temp', v_extension_schema),
+        true);
     ----------------------------------------------------------------------
-    -- 0) Fetch connector type and ensure we have a master key
+    -- 0) Fetch connector type. Credential keys stay inside the C provider.
     ----------------------------------------------------------------------
     SELECT lower(data->>'connector')
       INTO v_connector
@@ -91,11 +110,6 @@ BEGIN
         RAISE EXCEPTION 'synchdb_conninfo[%]: data->>connector is missing/empty', p_connector_name;
     END IF;
 	
-	v_key := p_master_key;
-    IF v_key IS NULL OR v_key = '' THEN
-        RAISE EXCEPTION 'Master key not provided.';
-    END IF;
-
     ----------------------------------------------------------------------
     -- 1) Ensure required extensions exist (oracle_fdw and pgcrypto)
     ----------------------------------------------------------------------
@@ -147,9 +161,9 @@ BEGIN
     SELECT
         data->>'hostname',
         NULLIF(data->>'port','')::int,
-        lower(data->>'srcdb'),          -- service/SID
+        data->>'srcdb',                 -- preserve the exact source database/service
         data->>'user',
-        pgp_sym_decrypt((data->>'pwd')::bytea, v_key)
+        synchdb_connector_credential(p_connector_name, 'pwd')
     INTO v_hostname, v_port, v_srcdb, v_user, v_pwd
     FROM synchdb_conninfo
     WHERE name = p_connector_name;
@@ -164,7 +178,7 @@ BEGIN
         NULLIF(data->>'fdw_ssl_cert',     'null'),
         NULLIF(data->>'fdw_ssl_key',      'null'),
         NULLIF(data->>'fdw_ssl_rootcert', 'null'),
-        NULLIF(pgp_sym_decrypt((data->>'fdw_ssl_cipher')::bytea, v_key), 'null')
+        NULLIF(synchdb_connector_credential(p_connector_name, 'fdw_ssl_cipher'), 'null')
     INTO v_ssl_mode, v_ssl_cert, v_ssl_key, v_ssl_rootcert, v_ssl_cipher
     FROM synchdb_conninfo
     WHERE name = p_connector_name;
@@ -196,13 +210,16 @@ BEGIN
     END IF;
 
     v_port := COALESCE(v_port, 1521);
-	v_server := format('%s_%s', p_connector_name, v_connector);	
+	v_server := p_server_name::text;
+    IF v_server IS NULL OR btrim(v_server) = '' THEN
+        RAISE EXCEPTION 'FDW server name must be nonempty' USING ERRCODE = '22023';
+    END IF;
 
     ----------------------------------------------------------------------
-    -- 3) Recreate FDW server and user mapping with fresh info
+    -- 3) Create a new FDW server and user mapping
     ----------------------------------------------------------------------
-    EXECUTE format('DROP USER MAPPING IF EXISTS FOR CURRENT_USER SERVER %I', v_server);
-    EXECUTE format('DROP SERVER IF EXISTS %I CASCADE', v_server);
+    -- The name alone does not prove ownership of an existing server. The
+    -- CREATE below rejects collisions without deleting its dependent objects.
 
 	IF v_connector IN ('oracle','olr') THEN
 		-- oracle_fdw uses Easy Connect Plus for TLS. fdw_ssl_rootcert is treated as
@@ -287,10 +304,27 @@ EXCEPTION
     WHEN OTHERS THEN
         RAISE EXCEPTION 'synchdb_prepare_initial_snapshot(%) failed: % [%]',
                         p_connector_name, SQLERRM, SQLSTATE
-            USING HINT = 'Verify designated FDWs are available and synchdb_conninfo JSON fields (hostname, port, srcdb, user, pwd) are valid; also ensure the master key is correct.';
+        USING ERRCODE = SQLSTATE,
+              HINT = 'Verify designated FDWs, connector fields, credential keyring, and caller privileges.';
 END;
 $$;
 
-COMMENT ON FUNCTION synchdb_prepare_initial_snapshot(name, text) IS
+COMMENT ON FUNCTION synchdb_prepare_initial_snapshot(text, name) IS
    'check oracle_fdw and prepare foreign server and user mapping objects';
 
+-- The coordinated path supplies a generation-specific server name. Direct
+-- callers can explicitly use this convenience entry point under their role.
+CREATE OR REPLACE FUNCTION synchdb_prepare_initial_snapshot(
+    p_connector_name name
+) RETURNS text LANGUAGE plpgsql SECURITY INVOKER SET search_path = pg_catalog, pg_temp AS $$
+DECLARE v_schema name; v_connector text; v_result text;
+BEGIN
+    SELECT n.nspname INTO STRICT v_schema FROM pg_catalog.pg_extension e
+      JOIN pg_catalog.pg_namespace n ON n.oid=e.extnamespace WHERE e.extname='synchdb';
+    EXECUTE pg_catalog.format('SELECT lower(data->>''connector'') FROM %I.synchdb_conninfo WHERE name=$1',v_schema)
+      INTO STRICT v_connector USING p_connector_name;
+    EXECUTE pg_catalog.format('SELECT %I.synchdb_prepare_initial_snapshot($1::text,$2)',v_schema)
+      INTO STRICT v_result USING p_connector_name,pg_catalog.format('%s_%s',p_connector_name,v_connector)::name;
+    RETURN v_result;
+END;
+$$;

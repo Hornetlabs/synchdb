@@ -25,6 +25,7 @@
 #include <arpa/inet.h>
 #include <dlfcn.h>
 #include "tcop/utility.h"
+#include "tcop/tcopprot.h"
 #include "nodes/parsenodes.h"
 #include "utils/elog.h"
 
@@ -33,6 +34,22 @@
 #include "converter/debezium_event_handler.h"
 #include "synchdb/synchdb.h"
 #include "executor/replication_agent.h"
+#include "executor/pg_compat.h"
+#include "catalog/connector_store.h"
+#include "catalog/credentials.h"
+#include "catalog/mapping_store.h"
+#include "runtime/run_spec.h"
+#include "runtime/run_registry.h"
+#include "runtime/worker_runtime.h"
+#include "runtime/java_operations.h"
+#include "snapshot/bootstrap.h"
+#include "snapshot/artifact_store.h"
+#include "runtime/controller.h"
+#include "runtime/config.h"
+
+#ifndef SYNCHDB_LIBRARY_NAME
+#define SYNCHDB_LIBRARY_NAME "synchdb"
+#endif
 #ifdef WITH_OLR
 #include "olr/olr_client.h"
 #endif
@@ -42,13 +59,13 @@
 #include "postmaster/interrupt.h"
 #include "storage/procsignal.h"
 #include "storage/latch.h"
-#include "storage/lwlock.h"
 #include "storage/proc.h"
 #include "storage/ipc.h"
 #include "storage/fd.h"
 #include "miscadmin.h"
 #include "utils/wait_event.h"
 #include "utils/guc.h"
+#include "utils/memutils.h"
 #include "varatt.h"
 #include "funcapi.h"
 #include "access/xact.h"
@@ -73,6 +90,7 @@ PG_FUNCTION_INFO_V1(synchdb_log_jvm_meminfo);
 PG_FUNCTION_INFO_V1(synchdb_get_stats);
 PG_FUNCTION_INFO_V1(synchdb_reset_stats);
 PG_FUNCTION_INFO_V1(synchdb_add_objmap);
+PG_FUNCTION_INFO_V1(synchdb_add_objmap_text);
 PG_FUNCTION_INFO_V1(synchdb_reload_objmap);
 PG_FUNCTION_INFO_V1(synchdb_add_extra_conninfo);
 PG_FUNCTION_INFO_V1(synchdb_del_extra_conninfo);
@@ -80,6 +98,7 @@ PG_FUNCTION_INFO_V1(synchdb_add_fdw_conninfo);
 PG_FUNCTION_INFO_V1(synchdb_del_fdw_conninfo);
 PG_FUNCTION_INFO_V1(synchdb_del_conninfo);
 PG_FUNCTION_INFO_V1(synchdb_del_objmap);
+PG_FUNCTION_INFO_V1(synchdb_del_objmap_text);
 PG_FUNCTION_INFO_V1(synchdb_add_jmx_conninfo);
 PG_FUNCTION_INFO_V1(synchdb_del_jmx_conninfo);
 PG_FUNCTION_INFO_V1(synchdb_add_jmx_exporter_conninfo);
@@ -93,39 +112,39 @@ PG_FUNCTION_INFO_V1(synchdb_set_snapstats);
 PG_FUNCTION_INFO_V1(synchdb_set_dbz_loglevel);
 
 /* Global variables */
-SynchdbSharedState *sdb_state = NULL; /* Pointer to shared-memory state. */
+static SynchdbSharedState *sdb_state = NULL; /* Pointer to shared-memory state. */
 int myConnectorId = -1;	/* Global index number to SynchdbSharedState in shared memory - global per worker */
 const char * g_eventStr = NULL;	/* global pointer to the JSON event currently working on */
 
 /* GUC variables */
-int synchdb_worker_naptime = 10;
+static int synchdb_worker_naptime = 10;
 bool synchdb_dml_use_spi = false;
-bool synchdb_auto_launcher = true;
-int dbz_batch_size = 2048;
-int dbz_queue_size = 8192;
+static bool synchdb_auto_launcher = true;
+static int dbz_batch_size = 2048;
+static int dbz_queue_size = 8192;
 char * dbz_skipped_operations = "t";
-int dbz_connect_timeout_ms = 30000;
-int dbz_query_timeout_ms = 600000;
-int jvm_max_heap_size = 1024;
-int jvm_max_direct_buffer_size = 1024;
-int dbz_snapshot_thread_num = 2;
-int dbz_snapshot_fetch_size = 0; /* 0: auto */
-int dbz_snapshot_min_row_to_stream_results = 0; /* 0: always stream */
-int dbz_incremental_snapshot_chunk_size = 2048;
-char * dbz_incremental_snapshot_watermarking_strategy = "insert_insert";
+static int dbz_connect_timeout_ms = 30000;
+static int dbz_query_timeout_ms = 600000;
+static int jvm_max_heap_size = 1024;
+static int jvm_max_direct_buffer_size = 1024;
+static int dbz_snapshot_thread_num = 1;
+static int dbz_snapshot_fetch_size = 0; /* 0: auto */
+static int dbz_snapshot_min_row_to_stream_results = 0; /* 0: always stream */
+static int dbz_incremental_snapshot_chunk_size = 2048;
+static char * dbz_incremental_snapshot_watermarking_strategy = "insert_insert";
 int dbz_offset_flush_interval_ms = 60000;
-bool dbz_capture_only_selected_table_ddl = true;
+static bool dbz_capture_only_selected_table_ddl = true;
 int synchdb_max_connector_workers = 30;
 int synchdb_error_strategy = STRAT_EXIT_ON_ERROR;
-int dbz_log_level = LOG_LEVEL_WARN;
+static int dbz_log_level = LOG_LEVEL_WARN;
 bool synchdb_log_event_on_error = true;
 int olr_read_buffer_size = 128;	/* in MB */
-int dbz_logminer_stream_mode = LOGMINER_MODE_UNCOMMITTED;
+static int dbz_logminer_stream_mode = LOGMINER_MODE_UNCOMMITTED;
 int olr_connect_timeout_ms = 5000;
 int olr_read_timeout_ms = 5000;
-int synchdb_snapshot_engine = ENGINE_DEBEZIUM;
-int cdc_start_delay_ms = 0;
-bool synchdb_fdw_use_subtx = true;
+static int synchdb_snapshot_engine = ENGINE_DEBEZIUM;
+static int cdc_start_delay_ms = 0;
+static bool synchdb_fdw_use_subtx = true;
 int synchdb_letter_casing_strategy = LCS_NORMALIZE_LOWERCASE;
 
 static const struct config_enum_entry letter_casing_strategies[] =
@@ -171,55 +190,67 @@ static const struct config_enum_entry snapshot_engines[] =
 	{NULL, 0, false}
 };
 
-/* JNI-related objects */
-static JavaVM *jvm = NULL; /* represents java vm instance */
-static JNIEnv *env = NULL; /* represents JNI run-time environment */
-static jclass cls;		   /* represents debezium runner java class */
-static jobject obj;		   /* represents debezium runner java class object */
-static jmethodID getChangeEvents;
-static jmethodID markBatchComplete;
-static jmethodID getoffsets;
+/* Exit callbacks retain this process-owned context after ERROR unwinding. */
+static SynchdbWorkerContext worker;
 
 /* Function declarations */
 PGDLLEXPORT void synchdb_engine_main(Datum main_arg);
-PGDLLEXPORT void synchdb_auto_launcher_main(Datum main_arg);
-PGDLLEXPORT void synchdb_db_launcher_main(Datum main_arg);
+
+StaticAssertDecl(sizeof(SynchdbWorkerStartup) <= BGW_EXTRALEN,
+				 "connector startup identity must fit background worker extra data");
 
 /* Static function prototypes */
 static int dbz_engine_stop(void);
-static int dbz_engine_init(JNIEnv *env, jclass *cls, jobject *obj);
-static int dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int myConnectorId, bool * dbzExitSignal,
+static int dbz_engine_get_change(int connectorId, bool *dbzExitSignal,
 		BatchInfo * batchinfo, SynchdbStatistics * myBatchStats, int flag);
 static int dbz_engine_start(const ConnectionInfo *connInfo, ConnectorType connectorType, const char * snapshotMode);
 static char *dbz_engine_get_offset(int connectorId);
 static int dbz_mark_batch_complete(int batchid);
+static void process_debezium_batch(int connectorId, bool *exit_signal,
+		SynchdbStatistics *statistics, int flag, bool refresh_offset);
 static TupleDesc synchdb_state_tupdesc(void);
 static TupleDesc synchdb_stats_tupdesc(void);
+static bool shm_connector_id_is_valid(int connectorId);
+static bool read_connector_view(int connectorId, SynchdbRunView *view);
 static void synchdb_detach_shmem(int code, Datum arg);
-static void prepare_bgw(BackgroundWorker *worker, const ConnectionInfo *connInfo, const char *connector, int connectorid, const char * snapshotMode);
+static void capture_run_options(SynchdbRunOptions *options);
+static void build_run_spec(SynchdbRunSpec *spec, ConnectionInfo *connection,
+		ConnectorType type, const char *snapshotMode);
+static void publish_worker_run(int connectorId, SynchdbWorkerRun *run,
+		const SynchdbRunSpec *spec, const SynchdbRequest *consumed_request);
+static void prepare_bgw(BackgroundWorker *worker, const SynchdbRunSpec *spec, const SynchdbRunHandle *handle);
+static bool worker_should_stop(void);
+static int32 start_registered_worker(const SynchdbRunSpec *spec);
 static const char *connectorStateAsString(ConnectorState state);
 static void reset_shm_request_state(int connectorId);
 static int dbz_engine_set_offset(ConnectorType connectorType, char *db, char *offset, char *file);
-static void processRequestInterrupt(ConnectionInfo *connInfo, ConnectorType type, int connectorId);
-static void setup_environment(ConnectorType * connectorType, ConnectionInfo *conninfo, char ** snapshotMode);
-static void initialize_jvm(JMXConnectionInfo * jmx);
+static bool processRequestInterrupt(SynchdbWorkerRun *run, int connectorId);
+static void worker_sigterm(SIGNAL_ARGS);
+static void setup_environment(SynchdbWorkerRun *run);
+static void initialize_jvm(const JMXConnectionInfo *jmx, const SynchdbRunOptions *options);
 static void start_debezium_engine(ConnectorType connectorType, const ConnectionInfo *connInfo, const char * snapshotMode);
-static void main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshotMode);
-static void cleanup(ConnectorType connectorType);
-static void set_extra_dbz_parameters(jobject myParametersObj, jclass myParametersClass,
-		const ExtraConnectionInfo * extraConnInfo, const OLRConnectionInfo * olrConnInfo,
-		const IspnInfo * ispnInfo);
+static void validate_schema_sync_request(ConnectorType type, int snapshotEngine, int flag);
+static bool start_snapshot_run(ConnectorType type, ConnectionInfo *connInfo, const char *snapshotMode);
+static bool main_loop(SynchdbWorkerRun *run);
+static bool cleanup(ConnectorType connectorType);
+static bool prepare_worker_close(SynchdbWorkerContext *context);
+static bool close_worker_local(SynchdbWorkerContext *context);
+
+static const SynchdbWorkerResourceOps worker_resources =
+{
+	.prepare_close = prepare_worker_close,
+	.close_local = close_worker_local
+};
+
 static void set_shm_connector_statistics(int connectorId, SynchdbStatistics * stats);
-static void is_snapshot_cdc_needed(const char* snapshotMode, bool isSnapshotDone, bool * snapshot, bool * cdc);
 #ifdef WITH_OLR
+static void is_snapshot_cdc_needed(const char* snapshotMode, bool isSnapshotDone, bool * snapshot, bool * cdc);
 static void try_reconnect_olr(ConnectionInfo * connInfo);
 static int olr_set_offset_from_raw(char * offsetdata);
 #endif
 static bool dbz_read_snapshot_state(ConnectorType type, const char * offset);
 static bool offset_json_bool_value(const char *offset, const char *key, bool *found);
 static bool has_running_connectors_for_db(const char *dbname, char *active_name, int active_len);
-static int populate_debezium_metadata(ConnectionInfo * connInfo, ConnectorType connectorType,
-		const char * dstdb, const char * srcdb);
 static int launch_fdw_based_snapshot(ConnectorType connectorType, ConnectionInfo *connInfo,
 		char * snapshotMode, bool schemahistory);
 
@@ -232,468 +263,10 @@ static int launch_fdw_based_snapshot(ConnectorType connectorType, ConnectionInfo
 static bool
 has_running_connectors_for_db(const char *dbname, char *active_name, int active_len)
 {
-	int i;
-	bool found = false;
-
 	if (active_name && active_len > 0)
 		active_name[0] = '\0';
-
-	if (!sdb_state || !dbname)
-		return false;
-
-	LWLockAcquire(&sdb_state->lock, LW_SHARED);
-	for (i = 0; i < synchdb_max_connector_workers; i++)
-	{
-		ActiveConnectors *entry = &sdb_state->connectors[i];
-
-		if (entry->pid == InvalidPid)
-			continue;
-		if (entry->state == STATE_UNDEF || entry->state == STATE_STOPPED)
-			continue;
-		if (entry->conninfo.dstdb[0] == '\0')
-			continue;
-		if (pg_strcasecmp(entry->conninfo.dstdb, dbname) != 0)
-			continue;
-
-		found = true;
-		if (active_name && active_len > 0)
-			strlcpy(active_name, entry->conninfo.name, active_len);
-		break;
-	}
-	LWLockRelease(&sdb_state->lock);
-
-	return found;
-}
-
-/*
- * set_extra_dbz_parameters - configures extra paramters for Debezium runner
- *
- * This function builds myParametersObj with extra parameters to be passed
- * to the Debezium Java side.
- *
- * @return: void
- */
-static void set_extra_dbz_parameters(jobject myParametersObj, jclass myParametersClass, const ExtraConnectionInfo * extraConnInfo,
-		const OLRConnectionInfo * olrConnInfo, const IspnInfo * ispnInfo)
-{
-	jmethodID setBatchSize, setQueueSize, setSkippedOperations, setConnectTimeout, setQueryTimeout;
-	jmethodID setSnapshotThreadNum, setSnapshotFetchSize, setSnapshotMinRowToStreamResults;
-	jmethodID setIncrementalSnapshotChunkSize, setIncrementalSnapshotWatermarkingStrategy;
-	jmethodID setOffsetFlushIntervalMs, setCaptureOnlySelectedTableDDL;
-	jmethodID setSslmode, setSslKeystore, setSslKeystorePass, setSslTruststore, setSslTruststorePass;
-	jmethodID setLogLevel, setOlr, setIspn, setLogminerStreamMode, setCdcDelay;
-	jstring jdbz_skipped_operations, jdbz_watermarking_strategy;
-	jstring jdbz_sslmode, jdbz_sslkeystore, jdbz_sslkeystorepass, jdbz_ssltruststore, jdbz_ssltruststorepass;
-	jstring jolrHost, jolrSource;
-	jstring jispnMemoryType, jispnCacheType;
-	jstring jlogminerStreamMode;
-
-	setBatchSize = (*env)->GetMethodID(env, myParametersClass, "setBatchSize",
-			"(I)Lcom/example/DebeziumRunner$MyParameters;");
-	if (setBatchSize)
-	{
-		myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setBatchSize, dbz_batch_size);
-		if (!myParametersObj)
-		{
-			elog(WARNING, "failed to call setBatchSize method");
-		}
-	}
-	else
-		elog(WARNING, "failed to find setBatchSize method");
-
-	setQueueSize = (*env)->GetMethodID(env, myParametersClass, "setQueueSize",
-			"(I)Lcom/example/DebeziumRunner$MyParameters;");
-	if (setQueueSize)
-	{
-		myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setQueueSize, dbz_queue_size);
-		if (!myParametersObj)
-		{
-			elog(WARNING, "failed to call setQueueSize method");
-		}
-	}
-	else
-		elog(WARNING, "failed to find setQueueSize method");
-
-	setConnectTimeout = (*env)->GetMethodID(env, myParametersClass, "setConnectTimeout",
-			"(I)Lcom/example/DebeziumRunner$MyParameters;");
-	if (setConnectTimeout)
-	{
-		myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setConnectTimeout, dbz_connect_timeout_ms);
-		if (!myParametersObj)
-		{
-			elog(WARNING, "failed to call setConnectTimeout method");
-		}
-	}
-	else
-		elog(WARNING, "failed to find setConnectTimeout method");
-
-	setQueryTimeout = (*env)->GetMethodID(env, myParametersClass, "setQueryTimeout",
-			"(I)Lcom/example/DebeziumRunner$MyParameters;");
-	if (setQueryTimeout)
-	{
-		myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setQueryTimeout, dbz_query_timeout_ms);
-		if (!myParametersObj)
-		{
-			elog(WARNING, "failed to call setQueryTimeout method");
-		}
-	}
-	else
-		elog(WARNING, "failed to find setQueryTimeout method");
-
-	jdbz_skipped_operations = (*env)->NewStringUTF(env, dbz_skipped_operations);
-
-	setSkippedOperations = (*env)->GetMethodID(env, myParametersClass, "setSkippedOperations",
-			"(Ljava/lang/String;)Lcom/example/DebeziumRunner$MyParameters;");
-	if (setSkippedOperations)
-	{
-		myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setSkippedOperations, jdbz_skipped_operations);
-		if (!myParametersObj)
-		{
-			elog(WARNING, "failed to call setSkippedOperations method");
-		}
-	}
-	else
-		elog(WARNING, "failed to find setSkippedOperations method");
-
-	if (jdbz_skipped_operations)
-			(*env)->DeleteLocalRef(env, jdbz_skipped_operations);
-
-	setSnapshotThreadNum = (*env)->GetMethodID(env, myParametersClass, "setSnapshotThreadNum",
-			"(I)Lcom/example/DebeziumRunner$MyParameters;");
-	if (setSnapshotThreadNum)
-	{
-		myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setSnapshotThreadNum, dbz_snapshot_thread_num);
-		if (!myParametersObj)
-		{
-			elog(WARNING, "failed to call setSnapshotThreadNum method");
-		}
-	}
-	else
-		elog(WARNING, "failed to find setSnapshotThreadNum method");
-
-	setSnapshotFetchSize = (*env)->GetMethodID(env, myParametersClass, "setSnapshotFetchSize",
-			"(I)Lcom/example/DebeziumRunner$MyParameters;");
-	if (setSnapshotFetchSize)
-	{
-		myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setSnapshotFetchSize, dbz_snapshot_fetch_size);
-		if (!myParametersObj)
-		{
-			elog(WARNING, "failed to call setSnapshotFetchSize method");
-		}
-	}
-	else
-		elog(WARNING, "failed to find setSnapshotFetchSize method");
-
-	setSnapshotMinRowToStreamResults = (*env)->GetMethodID(env, myParametersClass, "setSnapshotMinRowToStreamResults",
-			"(I)Lcom/example/DebeziumRunner$MyParameters;");
-	if (setSnapshotMinRowToStreamResults)
-	{
-		myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setSnapshotMinRowToStreamResults, dbz_snapshot_min_row_to_stream_results);
-		if (!myParametersObj)
-		{
-			elog(WARNING, "failed to call setSnapshotMinRowToStreamResults method");
-		}
-	}
-	else
-		elog(WARNING, "failed to find setSnapshotMinRowToStreamResults method");
-
-	setIncrementalSnapshotChunkSize = (*env)->GetMethodID(env, myParametersClass, "setIncrementalSnapshotChunkSize",
-			"(I)Lcom/example/DebeziumRunner$MyParameters;");
-	if (setIncrementalSnapshotChunkSize)
-	{
-		myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setIncrementalSnapshotChunkSize, dbz_incremental_snapshot_chunk_size);
-		if (!myParametersObj)
-		{
-			elog(WARNING, "failed to call setIncrementalSnapshotChunkSize method");
-		}
-	}
-	else
-		elog(WARNING, "failed to find setIncrementalSnapshotChunkSize method");
-
-	jdbz_watermarking_strategy = (*env)->NewStringUTF(env, dbz_incremental_snapshot_watermarking_strategy);
-
-	setIncrementalSnapshotWatermarkingStrategy = (*env)->GetMethodID(env, myParametersClass, "setIncrementalSnapshotWatermarkingStrategy",
-			"(Ljava/lang/String;)Lcom/example/DebeziumRunner$MyParameters;");
-	if (setIncrementalSnapshotWatermarkingStrategy)
-	{
-		myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setIncrementalSnapshotWatermarkingStrategy, jdbz_watermarking_strategy);
-		if (!myParametersObj)
-		{
-			elog(WARNING, "failed to call setIncrementalSnapshotWatermarkingStrategy method");
-		}
-	}
-	else
-		elog(WARNING, "failed to find setIncrementalSnapshotWatermarkingStrategy method");
-
-	if (jdbz_watermarking_strategy)
-			(*env)->DeleteLocalRef(env, jdbz_watermarking_strategy);
-
-	setOffsetFlushIntervalMs = (*env)->GetMethodID(env, myParametersClass, "setOffsetFlushIntervalMs",
-			"(I)Lcom/example/DebeziumRunner$MyParameters;");
-	if (setOffsetFlushIntervalMs)
-	{
-		myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setOffsetFlushIntervalMs, dbz_offset_flush_interval_ms);
-		if (!myParametersObj)
-		{
-			elog(WARNING, "failed to call setOffsetFlushIntervalMs method");
-		}
-	}
-	else
-		elog(WARNING, "failed to find setOffsetFlushIntervalMs method");
-
-	setCaptureOnlySelectedTableDDL = (*env)->GetMethodID(env, myParametersClass, "setCaptureOnlySelectedTableDDL",
-			"(Z)Lcom/example/DebeziumRunner$MyParameters;");
-	if (setCaptureOnlySelectedTableDDL)
-	{
-		jboolean bval = dbz_capture_only_selected_table_ddl ? JNI_TRUE : JNI_FALSE;
-		myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setCaptureOnlySelectedTableDDL, bval);
-		if (!myParametersObj)
-		{
-			elog(WARNING, "failed to call setCaptureOnlySelectedTableDDL method");
-		}
-	}
-	else
-		elog(WARNING, "failed to find setCaptureOnlySelectedTableDDL method");
-
-	jdbz_watermarking_strategy = (*env)->NewStringUTF(env, dbz_incremental_snapshot_watermarking_strategy);
-
-	setIncrementalSnapshotWatermarkingStrategy = (*env)->GetMethodID(env, myParametersClass, "setIncrementalSnapshotWatermarkingStrategy",
-			"(Ljava/lang/String;)Lcom/example/DebeziumRunner$MyParameters;");
-	if (setIncrementalSnapshotWatermarkingStrategy)
-	{
-		myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setIncrementalSnapshotWatermarkingStrategy, jdbz_watermarking_strategy);
-		if (!myParametersObj)
-		{
-			elog(WARNING, "failed to call setIncrementalSnapshotWatermarkingStrategy method");
-		}
-	}
-	else
-		elog(WARNING, "failed to find setIncrementalSnapshotWatermarkingStrategy method");
-
-	if (jdbz_watermarking_strategy)
-			(*env)->DeleteLocalRef(env, jdbz_watermarking_strategy);
-
-	if (strcasecmp(extraConnInfo->ssl_mode, "null"))
-	{
-		jdbz_sslmode = (*env)->NewStringUTF(env, extraConnInfo->ssl_mode);
-
-		setSslmode = (*env)->GetMethodID(env, myParametersClass, "setSslmode",
-				"(Ljava/lang/String;)Lcom/example/DebeziumRunner$MyParameters;");
-		if (setSslmode)
-		{
-			myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setSslmode, jdbz_sslmode);
-			if (!myParametersObj)
-			{
-				elog(WARNING, "failed to call setSslmode method");
-			}
-		}
-		else
-			elog(WARNING, "failed to find setSslmode method");
-
-		if (jdbz_sslmode)
-				(*env)->DeleteLocalRef(env, jdbz_sslmode);
-	}
-
-	if (strcasecmp(extraConnInfo->ssl_keystore, "null"))
-	{
-		jdbz_sslkeystore = (*env)->NewStringUTF(env, extraConnInfo->ssl_keystore);
-
-		setSslKeystore = (*env)->GetMethodID(env, myParametersClass, "setSslKeystore",
-				"(Ljava/lang/String;)Lcom/example/DebeziumRunner$MyParameters;");
-		if (setSslKeystore)
-		{
-			myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setSslKeystore, jdbz_sslkeystore);
-			if (!myParametersObj)
-			{
-				elog(WARNING, "failed to call setSslKeystore method");
-			}
-		}
-		else
-			elog(WARNING, "failed to find setSslKeystore method");
-
-		if (jdbz_sslkeystore)
-				(*env)->DeleteLocalRef(env, jdbz_sslkeystore);
-	}
-
-	if (strcasecmp(extraConnInfo->ssl_keystore_pass, "null"))
-	{
-		jdbz_sslkeystorepass = (*env)->NewStringUTF(env, extraConnInfo->ssl_keystore_pass);
-
-		setSslKeystorePass = (*env)->GetMethodID(env, myParametersClass, "setSslKeystorePass",
-				"(Ljava/lang/String;)Lcom/example/DebeziumRunner$MyParameters;");
-		if (setSslKeystorePass)
-		{
-			myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setSslKeystorePass, jdbz_sslkeystorepass);
-			if (!myParametersObj)
-			{
-				elog(WARNING, "failed to call setSslKeystorePass method");
-			}
-		}
-		else
-			elog(WARNING, "failed to find setSslKeystorePass method");
-
-		if (jdbz_sslkeystorepass)
-				(*env)->DeleteLocalRef(env, jdbz_sslkeystorepass);
-	}
-
-	if (strcasecmp(extraConnInfo->ssl_truststore, "null"))
-	{
-		jdbz_ssltruststore = (*env)->NewStringUTF(env, extraConnInfo->ssl_truststore);
-
-		setSslTruststore = (*env)->GetMethodID(env, myParametersClass, "setSslTruststore",
-				"(Ljava/lang/String;)Lcom/example/DebeziumRunner$MyParameters;");
-		if (setSslTruststore)
-		{
-			myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setSslTruststore, jdbz_ssltruststore);
-			if (!myParametersObj)
-			{
-				elog(WARNING, "failed to call setSslTruststore method");
-			}
-		}
-		else
-			elog(WARNING, "failed to find setSslTruststore method");
-
-		if (jdbz_ssltruststore)
-				(*env)->DeleteLocalRef(env, jdbz_ssltruststore);
-	}
-
-	if (strcasecmp(extraConnInfo->ssl_truststore_pass, "null"))
-	{
-		jdbz_ssltruststorepass = (*env)->NewStringUTF(env, extraConnInfo->ssl_truststore_pass);
-
-		setSslTruststorePass = (*env)->GetMethodID(env, myParametersClass, "setSslTruststorePass",
-				"(Ljava/lang/String;)Lcom/example/DebeziumRunner$MyParameters;");
-		if (setSslTruststorePass)
-		{
-			myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setSslTruststorePass, jdbz_ssltruststorepass);
-			if (!myParametersObj)
-			{
-				elog(WARNING, "failed to call setSslTruststorePass method");
-			}
-		}
-		else
-			elog(WARNING, "failed to find setSslTruststorePass method");
-
-		if (jdbz_ssltruststorepass)
-				(*env)->DeleteLocalRef(env, jdbz_ssltruststorepass);
-	}
-
-	setLogLevel = (*env)->GetMethodID(env, myParametersClass, "setLogLevel",
-			"(I)Lcom/example/DebeziumRunner$MyParameters;");
-	if (setLogLevel)
-	{
-		myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setLogLevel, dbz_log_level);
-		if (!myParametersObj)
-		{
-			elog(WARNING, "failed to call setLogLevel method");
-		}
-	}
-	else
-		elog(WARNING, "failed to find setLogLevel method");
-
-	/* Openlog Replicator Options for Oracle */
-	if (strcasecmp(olrConnInfo->olr_host, "null") && olrConnInfo->olr_port != 0)
-	{
-		jolrHost = (*env)->NewStringUTF(env, olrConnInfo->olr_host);
-		jolrSource = (*env)->NewStringUTF(env, olrConnInfo->olr_source);
-
-		setOlr = (*env)->GetMethodID(env, myParametersClass, "setOlr",
-				"(Ljava/lang/String;ILjava/lang/String;)Lcom/example/DebeziumRunner$MyParameters;");
-		if (setOlr)
-		{
-			myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setOlr, jolrHost,
-					olrConnInfo->olr_port, jolrSource);
-			if (!myParametersObj)
-			{
-				elog(WARNING, "failed to call setOlr method");
-			}
-		}
-		else
-			elog(WARNING, "failed to find setOlr method");
-
-		if (jolrHost)
-				(*env)->DeleteLocalRef(env, jolrHost);
-		if (jolrSource)
-				(*env)->DeleteLocalRef(env, jolrSource);
-	}
-
-	/* Infinispan Options for Oracle */
-	if (strcasecmp(ispnInfo->ispn_cache_type, "null"))
-	{
-		jispnCacheType = (*env)->NewStringUTF(env, ispnInfo->ispn_cache_type);
-		jispnMemoryType = (*env)->NewStringUTF(env, ispnInfo->ispn_memory_type);
-
-		setIspn = (*env)->GetMethodID(env, myParametersClass, "setIspn",
-				"(Ljava/lang/String;Ljava/lang/String;I)Lcom/example/DebeziumRunner$MyParameters;");
-		if (setIspn)
-		{
-			myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setIspn, jispnCacheType,
-					jispnMemoryType, ispnInfo->ispn_memory_size);
-			if (!myParametersObj)
-			{
-				elog(WARNING, "failed to call setIspn method");
-			}
-		}
-		else
-			elog(WARNING, "failed to find setIspn method");
-
-		if (jispnCacheType)
-				(*env)->DeleteLocalRef(env, jispnCacheType);
-		if (jispnMemoryType)
-				(*env)->DeleteLocalRef(env, jispnMemoryType);
-	}
-
-	/* Oracle logminer stream mode if defined */
-	if (dbz_logminer_stream_mode != LOGMINER_MODE_UNDEF)
-	{
-		if (dbz_logminer_stream_mode == LOGMINER_MODE_UNCOMMITTED)
-			jlogminerStreamMode = (*env)->NewStringUTF(env, "logminer");
-		else if (dbz_logminer_stream_mode == LOGMINER_MODE_COMMITTED)
-			/*
-			 * XXX: current version of debezium 2.7.x does not yet support
-			 * logminer in committed mode: "logminer_unbuffered", so we will
-			 * default to "logminer" as of now. When we upgrade debezium to
-			 * 3.2.x, we will fix this part accordingly. This can be considered
-			 * as a placeholder for now.
-			 */
-			jlogminerStreamMode = (*env)->NewStringUTF(env, "logminer");
-		else
-			jlogminerStreamMode = (*env)->NewStringUTF(env, "logminer");
-
-		setLogminerStreamMode = (*env)->GetMethodID(env, myParametersClass, "setLogminerStreamMode",
-				"(Ljava/lang/String;)Lcom/example/DebeziumRunner$MyParameters;");
-		if (setLogminerStreamMode)
-		{
-			myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setLogminerStreamMode, jlogminerStreamMode);
-			if (!myParametersObj)
-			{
-				elog(WARNING, "failed to call setLogminerStreamMode method");
-			}
-		}
-		else
-			elog(WARNING, "failed to find setLogminerStreamMode method");
-
-		if (jlogminerStreamMode)
-			(*env)->DeleteLocalRef(env, jlogminerStreamMode);
-	}
-
-	setCdcDelay = (*env)->GetMethodID(env, myParametersClass, "setCdcDelay",
-			"(I)Lcom/example/DebeziumRunner$MyParameters;");
-	if (setCdcDelay)
-	{
-		myParametersObj = (*env)->CallObjectMethod(env, myParametersObj, setCdcDelay, cdc_start_delay_ms);
-		if (!myParametersObj)
-		{
-			elog(WARNING, "failed to call setCdcDelay method");
-		}
-	}
-	else
-		elog(WARNING, "failed to find setCdcDelay method");
-	/*
-	 * additional parameters that we want to pass to Debezium on the java side
-	 * will be added here, Make sure to add the matching methods in the MyParameters
-	 * inner class inside DebeziumRunner class.
-	 */
+	return dbname != NULL && synchdb_registry_any_active(sdb_state, MyDatabaseId,
+														active_name, Max(active_len, 0));
 }
 
 /*
@@ -707,265 +280,141 @@ static void set_extra_dbz_parameters(jobject myParametersObj, jclass myParameter
 static int
 dbz_engine_stop(void)
 {
-	jmethodID stopEngine;
-	jthrowable exception;
-
-	if (!jvm)
-	{
-		elog(WARNING, "jvm not initialized");
-		return -1;
-	}
-	if (!env)
-	{
-		elog(WARNING, "jvm env not initialized");
-		return -1;
-	}
-
-	/* Find the stopEngine method */
-	stopEngine = (*env)->GetMethodID(env, cls, "stopEngine", "()V");
-	if (stopEngine == NULL)
-	{
-		elog(WARNING, "Failed to find stopEngine method");
-		return -1;
-	}
-
-	(*env)->CallVoidMethod(env, obj, stopEngine);
-
-	/* Check for exceptions */
-	exception = (*env)->ExceptionOccurred(env);
-	if (exception)
-	{
-		(*env)->ExceptionDescribe(env);
-		(*env)->ExceptionClear(env);
-		(*env)->DeleteLocalRef(env, exception);
-		elog(WARNING, "Exception occurred while stopping Debezium engine");
-		return -1;
-	}
-
-	return 0;
+	return synchdb_java_stop(&worker.java);
 }
 
-/*
- * dbz_engine_init - Initialize the Debezium engine
- *
- * This function initializes the Debezium engine by finding the DebeziumRunner
- * class and allocating an instance of it. It handles JNI interactions and
- * exception checking.
- *
- * @param env: JNI environment pointer
- * @param cls: Pointer to store the found Java class
- * @param obj: Pointer to store the allocated Java object
- *
- * @return: 0 on success, -1 on failure
- */
-static int
-dbz_engine_init(JNIEnv *env, jclass *cls, jobject *obj)
+/* The adapter supplies event semantics; Batch Apply owns the transaction. */
+typedef struct SynchdbDbzApplyContext
 {
-	elog(DEBUG1, "dbz_engine_init - Starting initialization");
+	SynchdbStatistics *statistics;
+	int connector_id;
+	int flag;
+	int32 batch_id;
+} SynchdbDbzApplyContext;
 
-	/* Find the DebeziumRunner class */
-	*cls = (*env)->FindClass(env, "com/example/DebeziumRunner");
-	if (*cls == NULL)
+static void
+apply_debezium_record(const char *json, int32 index, bool first, bool last, void *argument)
+{
+	SynchdbDbzApplyContext *context = argument;
+	SynchdbEventOutcome outcome;
+
+	g_eventStr = synchdb_log_event_on_error ? json : NULL;
+	outcome = fc_processDBZChangeEvent(json, context->statistics, context->flag,
+										worker.run.spec.connection.name, first, last);
+	switch (outcome)
 	{
-		if ((*env)->ExceptionCheck(env))
-		{
-			(*env)->ExceptionDescribe(env);
-			(*env)->ExceptionClear(env);
-		}
-		elog(WARNING, "Failed to find com.example.DebeziumRunner class");
-		return -1;
+		case SYNCHDB_EVENT_APPLIED:
+		case SYNCHDB_EVENT_CONTROL:
+		case SYNCHDB_EVENT_NOOP:
+			break;
+		case SYNCHDB_EVENT_UNSUPPORTED:
+		case SYNCHDB_EVENT_FAILED:
+			set_shm_connector_errmsg(context->connector_id, "failed to apply Debezium change event");
+			if (g_eventStr != NULL)
+				elog(LOG, "%s", g_eventStr);
+			ereport(ERROR,
+					(errcode(outcome == SYNCHDB_EVENT_UNSUPPORTED ?
+							 ERRCODE_FEATURE_NOT_SUPPORTED : ERRCODE_INTERNAL_ERROR),
+					 errmsg("failed to apply Debezium record %d in batch %d", index, context->batch_id)));
+			break;
+		default:
+			/* SKIPPED is not enabled until rollback and policy are explicit. */
+			elog(ERROR, "unexpected Debezium event outcome: %d", (int) outcome);
 	}
-
-	elog(DEBUG1, "dbz_engine_init - Class found, allocating object");
-
-	/* Allocate an instance of the DebeziumRunner class */
-	*obj = (*env)->AllocObject(env, *cls);
-	if (*obj == NULL)
-	{
-		if ((*env)->ExceptionCheck(env))
-		{
-			(*env)->ExceptionDescribe(env);
-			(*env)->ExceptionClear(env);
-		}
-		elog(WARNING, "Failed to allocate DBZ Runner object");
-		return -1;
-	}
-
-	elog(DEBUG1, "dbz_engine_init - Object allocated successfully");
-
-	return 0;
+	g_eventStr = NULL;
 }
 
-/*
- * dbz_engine_get_change - Retrieve and process change events from the Debezium engine
- *
- * This function retrieves change events from the Debezium engine and processes them.
- *
- * @param jvm: Pointer to the Java VM
- * @param env: Pointer to the JNI environment
- * @param cls: Pointer to the DebeziumRunner class
- * @param obj: Pointer to the DebeziumRunner object
- * @param myConnectorId: The connector ID of interest
- * @param dbzExitSignal: Set by this function to indicate the connector has exited
- * @param batchinfo: Set by this function to indicate a valid batch is in progress
- * @param myBatchStats: update connector statistics to this struct
- *
- * @return: 0 on success, -1 on failure
- */
-static int
-dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int myConnectorId,
-		bool * dbzExitSignal, BatchInfo * batchinfo, SynchdbStatistics * myBatchStats,
-		int flag)
+static void
+apply_debezium_frame(const SynchdbDbzFrame *frame, SynchdbDbzApplyContext *context)
 {
-	jobject jbytebuffer;
-	int offset = 0;
-	unsigned char * data;
-	jsize datalen = 0;
+	bool previous = synchdb_worker_sql_interruptible();
 
-	/* Validate input parameters */
-	if (!jvm || !env || !cls || !obj)
+	PG_TRY();
 	{
-		elog(WARNING, "dbz_engine_get_change: Invalid input parameters");
-		return -1;
+		synchdb_worker_sql_enter();
+		synchdb_batch_apply(frame, &worker.apply, apply_debezium_record, context);
 	}
-
-	/* Get the getChangeEvents method if needed */
-	if (!getChangeEvents)
+	PG_FINALLY();
 	{
-		getChangeEvents = (*env)->GetMethodID(env, *cls, "getChangeEvents", "()Ljava/nio/ByteBuffer;");
-		if (getChangeEvents == NULL)
+		synchdb_worker_sql_restore(previous);
+	}
+	PG_END_TRY();
+}
+
+static void
+load_worker_rules(const char *name, ConnectorType type)
+{
+	bool previous = synchdb_worker_sql_interruptible();
+
+	PG_TRY();
+	{
+		synchdb_worker_sql_enter();
+		fc_load_objmap(name, type);
+	}
+	PG_FINALLY();
+	{
+		synchdb_worker_sql_restore(previous);
+	}
+	PG_END_TRY();
+}
+
+/* A view never outlives its JNI lease, including PostgreSQL ERROR paths. */
+static int
+dbz_engine_get_change(int connectorId, bool *dbzExitSignal,
+		BatchInfo *batchinfo, SynchdbStatistics *myBatchStats, int flag)
+{
+	SynchdbDbzFrame frame;
+	SynchdbDbzApplyContext context = {myBatchStats, connectorId, flag, -1};
+	volatile bool finished = false;
+
+	if (!dbzExitSignal || !batchinfo || !myBatchStats)
+		elog(ERROR, "invalid Debezium batch output arguments");
+	batchinfo->batchId = SYNCHDB_INVALID_BATCH_ID;
+	batchinfo->batchSize = 0;
+
+	PG_TRY();
+	{
+		if (synchdb_java_poll_frame(&worker.java, &frame))
 		{
-			elog(WARNING, "Failed to find getChangeEvents method");
-			return -1;
+			if (frame.kind == SYNCHDB_DBZ_BATCH)
+			{
+				MemSet(&worker.apply, 0, sizeof(worker.apply));
+				context.batch_id = frame.batch_id;
+				apply_debezium_frame(&frame, &context);
+				synchdb_java_batch_committed(&worker.java, frame.batch_id);
+				increment_connector_statistics(myBatchStats, STATS_TOTAL_CHANGE_EVENT, frame.record_count);
+				batchinfo->batchId = frame.batch_id;
+				batchinfo->batchSize = frame.record_count;
+			}
+			else
+			{
+				char *message = pnstrdup(frame.message, frame.message_length);
+
+				if (!frame.success)
+				{
+					set_shm_connector_errmsg(connectorId, message);
+					ereport(ERROR, (errmsg("Debezium engine failed: %s", message)));
+				}
+				elog(LOG, "Debezium engine completed: %s", message);
+				*dbzExitSignal = true;
+				pfree(message);
+			}
 		}
+		finished = true;
 	}
-
-	/* Call getChangeEvents method */
-	jbytebuffer = (*env)->CallObjectMethod(env, *obj, getChangeEvents);
-	if ((*env)->ExceptionCheck(env))
+	PG_FINALLY();
 	{
-		(*env)->ExceptionDescribe(env);
-		(*env)->ExceptionClear(env);
-		elog(WARNING, "Exception occurred while calling getChangeEvents");
-		return -1;
-	}
-	if (jbytebuffer == NULL)
-	{
-		return -1;
-	}
-
-	data = (*env)->GetDirectBufferAddress(env, jbytebuffer);
-	datalen = (*env)->GetDirectBufferCapacity(env, jbytebuffer);
-
-	elog(DEBUG1, "datalen %d", datalen);
-
-	if (data[0] == 'B')
-	{
-		int batchsize = 0;
-		int curr = 0;
-
-		offset += 1;
-		memcpy(&(batchinfo->batchId), data + offset, 4);
-		batchinfo->batchId =  ntohl(batchinfo->batchId);
-		offset += 4;
-
-		memcpy(&batchsize, data + offset, 4);
-		batchsize =  ntohl(batchsize);
-		offset += 4;
-
-		elog(DEBUG1, "batch id %d contains %d change events", batchinfo->batchId, batchsize);
-
-		StartTransactionCommand();
-		PushActiveSnapshot(GetTransactionSnapshot());
-
-		while (offset + 4 <= datalen && curr < batchsize)
+		g_eventStr = NULL;
+		if (!finished)
 		{
-			int json_len = 0;
-			memcpy(&json_len, data + offset, 4);
-			offset += 4;
-			json_len = ntohl(json_len);
-
-			/* json_len includes the null terminator */
-			elog(DEBUG1,"json len %d", json_len);
-			if (offset + json_len > datalen)
-			{
-				elog(WARNING, "Invalid JSON length %d at offset %d (buffer length = %d)",
-						json_len, offset, datalen);
-				break;
-			}
-			if (json_len == 0)
-			{
-				/* should not happen as dbz also skips empty change events */
-				elog(WARNING, "empty json skipped");
-				offset += 4;
-				curr++;
-				continue;
-			}
-
-			/* data + offset is already null-terminated */
-			if (synchdb_log_event_on_error)
-				g_eventStr = (char *)(data + offset);
-
-			fc_processDBZChangeEvent((char *)(data + offset), myBatchStats, flag,
-					get_shm_connector_name_by_id(myConnectorId),
-					(curr == 0), (curr == batchsize - 1));
-
-			offset += json_len;
-			curr++;
+			batchinfo->batchId = SYNCHDB_INVALID_BATCH_ID;
+			batchinfo->batchSize = 0;
+			synchdb_java_batch_failed(&worker.java,
+					worker.apply.phase == SYNCHDB_APPLY_COMMIT_UNKNOWN);
 		}
-
-		PopActiveSnapshot();
-		CommitTransactionCommand();
-		increment_connector_statistics(myBatchStats, STATS_TOTAL_CHANGE_EVENT, batchsize);
+		synchdb_java_release_frame(&worker.java);
 	}
-	else if (data[0] == 'K')
-	{
-		int msg_len = 0;
-		char * successflag = NULL, * dbzmsg = NULL;
-
-		offset += 1;
-
-		/* success flag length */
-		memcpy(&msg_len, data + offset, 4);
-		offset += 4;
-		msg_len = ntohl(msg_len);
-
-		/* success flag */
-		successflag = palloc0(msg_len + 1);
-		memcpy(successflag, data + offset, msg_len);
-		offset += msg_len;
-
-		/* dbz message length */
-		memcpy(&msg_len, data + offset, 4);
-		offset += 4;
-		msg_len = ntohl(msg_len);
-
-		/* dbz message */
-		dbzmsg = palloc0(msg_len + 1);
-		memcpy(dbzmsg, data + offset, msg_len);
-		offset += msg_len;
-
-		elog(WARNING, "%s", dbzmsg);
-
-		/* process the payload */
-		if (successflag && strlen(successflag) > 0)
-			*dbzExitSignal = true;
-
-		if (dbzmsg && strlen(dbzmsg) > 0)
-			set_shm_connector_errmsg(myConnectorId, dbzmsg);
-
-		if (successflag)
-			pfree(successflag);
-
-		if (dbzmsg)
-			pfree(dbzmsg);
-	}
-	else
-	{
-		elog(WARNING, "unknown change request");
-	}
-
-	(*env)->DeleteLocalRef(env, jbytebuffer);
+	PG_END_TRY();
 	return 0;
 }
 
@@ -981,124 +430,15 @@ dbz_engine_get_change(JavaVM *jvm, JNIEnv *env, jclass *cls, jobject *obj, int m
  * @return: 0 on success, -1 on failure
  */
 static int
-dbz_engine_start(const ConnectionInfo *connInfo, ConnectorType connectorType, const char * snapshotMode)
+dbz_engine_start(const ConnectionInfo *connInfo, ConnectorType connectorType, const char *snapshotMode)
 {
-	jmethodID mid, paramConstruct;
-	jstring jHostname = NULL, jUser = NULL, jPassword = NULL, jDatabase = NULL, jTable = NULL;
-	jstring jSnapshotTable = NULL, jName = NULL, jSnapshot = NULL, jdstdb = NULL, jsrcschema = NULL;
-	jthrowable exception = NULL;
-	jclass myParametersClass = NULL;
-	jobject myParametersObj = NULL;
-	int ret = -1;
+	int result;
 
-	elog(LOG, "dbz_engine_start: Starting dbz engine %s:%d ", connInfo->hostname, connInfo->port);
-	if (!jvm)
-	{
-		elog(WARNING, "jvm not initialized");
-		goto cleanup;
-	}
-
-	if (!env)
-	{
-		elog(WARNING, "jvm env not initialized");
-		goto cleanup;
-	}
-
-	myParametersClass = (*env)->FindClass(env, "com/example/DebeziumRunner$MyParameters");
-	if (!myParametersClass)
-	{
-		elog(WARNING, "failed to find MyParameters class");
-		goto cleanup;
-	}
-
-	paramConstruct = (*env)->GetMethodID(env, myParametersClass, "<init>",
-			"(Lcom/example/DebeziumRunner;Ljava/lang/String;ILjava/lang/String;ILjava/lang/String;"
-			"Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;"
-			"Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V");
-	if (paramConstruct == NULL)
-	{
-		elog(WARNING, "failed to find myParameters Constructor");
-		goto cleanup;
-	}
-
-	/* prepare required parameters */
-	jHostname = (*env)->NewStringUTF(env, connInfo->hostname);
-	jUser = (*env)->NewStringUTF(env, connInfo->user);
-	jPassword = (*env)->NewStringUTF(env, connInfo->pwd);
-	jDatabase = (*env)->NewStringUTF(env, connInfo->srcdb);
-	jTable = (*env)->NewStringUTF(env, connInfo->table);
-	jSnapshotTable = (*env)->NewStringUTF(env, connInfo->snapshottable);
-	jName = (*env)->NewStringUTF(env, connInfo->name);
-	jSnapshot = (*env)->NewStringUTF(env, snapshotMode);
-	jdstdb = (*env)->NewStringUTF(env, connInfo->dstdb);
-	jsrcschema = (*env)->NewStringUTF(env, connInfo->srcschema);
-
-	myParametersObj = (*env)->NewObject(env, myParametersClass, paramConstruct, obj,
-			jName, connectorType, jHostname, connInfo->port, jUser, jPassword,
-			jDatabase, jTable, jSnapshotTable, jSnapshot, jdstdb, jsrcschema);
-	if (!myParametersObj)
-	{
-		elog(WARNING, "failed to create MyParameters object");
-		goto cleanup;
-	}
-
-	/* set extra parameters */
-	set_extra_dbz_parameters(myParametersObj, myParametersClass, &(connInfo->extra), &(connInfo->olr),
-			&(connInfo->ispn));
-
-	/* Find the startEngine method */
-	mid = (*env)->GetMethodID(env, cls, "startEngine", "(Lcom/example/DebeziumRunner$MyParameters;)V");
-	if (mid == NULL)
-	{
-		elog(WARNING, "Failed to find startEngine method");
-		goto cleanup;
-	}
-
-	/* Call the Java method */
-	(*env)->CallVoidMethod(env, obj, mid, myParametersObj);
-
-	/* Check for exceptions */
-	exception = (*env)->ExceptionOccurred(env);
-	if (exception)
-	{
-		(*env)->ExceptionDescribe(env);
-		(*env)->ExceptionClear(env);
-		(*env)->DeleteLocalRef(env, exception);
-		elog(WARNING, "Exception occurred while starting Debezium engine");
-		goto cleanup;
-	}
-
-	elog(LOG, "Debezium engine started successfully for %s connector", connectorTypeToString(connectorType));
-	ret = 0;
-
-cleanup:
-	/* Clean up local references */
-	if (jHostname)
-		(*env)->DeleteLocalRef(env, jHostname);
-	if (jUser)
-		(*env)->DeleteLocalRef(env, jUser);
-	if (jPassword)
-		(*env)->DeleteLocalRef(env, jPassword);
-	if (jDatabase)
-		(*env)->DeleteLocalRef(env, jDatabase);
-	if (jTable)
-		(*env)->DeleteLocalRef(env, jTable);
-	if (jSnapshotTable)
-		(*env)->DeleteLocalRef(env, jSnapshotTable);
-	if (jName)
-		(*env)->DeleteLocalRef(env, jName);
-	if (jSnapshot)
-		(*env)->DeleteLocalRef(env, jSnapshot);
-	if (jdstdb)
-		(*env)->DeleteLocalRef(env, jdstdb);
-	if (jsrcschema)
-		(*env)->DeleteLocalRef(env, jsrcschema);
-	if (myParametersObj)
-		(*env)->DeleteLocalRef(env, myParametersObj);
-	if (myParametersClass)
-		(*env)->DeleteLocalRef(env, myParametersClass);
-
-	return ret;
+	elog(LOG, "Starting Debezium engine %s:%d", connInfo->hostname, connInfo->port);
+	result = synchdb_java_start(&worker.java, connInfo, connectorType, snapshotMode);
+	if (result == 0)
+		elog(LOG, "Debezium engine started successfully for %s connector", connectorTypeToString(connectorType));
+	return result;
 }
 
 /*
@@ -1114,111 +454,13 @@ cleanup:
 static char *
 dbz_engine_get_offset(int connectorId)
 {
-	jstring jdb, result, jName, jdstdb;
-	char *resultStr = NULL;
-	char *db = NULL, *name = NULL;
-	char *dstdb = NULL;
-	const char *tmp;
-	jthrowable exception;
+	const SynchdbRunSpec *spec = &worker.run.spec;
 
-	if (!jvm)
-	{
-		elog(WARNING, "jvm not initialized");
+	if (!shm_connector_id_is_valid(connectorId))
 		return NULL;
-	}
-
-	if (!env)
-	{
-		elog(WARNING, "jvm env not initialized");
-		return NULL;
-	}
-
-	/* Get the source database name based on connector type */
-	db = sdb_state->connectors[connectorId].conninfo.srcdb;
-	if (!db)
-	{
-		elog(WARNING, "Source database name not set for connector type: %d",
-				sdb_state->connectors[connectorId].type);
-		return NULL;
-	}
-
-	/* Get the destination database name based on connector type */
-	dstdb = sdb_state->connectors[connectorId].conninfo.dstdb;
-	if (!dstdb)
-	{
-		elog(WARNING, "Destination database name not set for connector type: %d",
-				sdb_state->connectors[connectorId].type);
-		return NULL;
-	}
-
-	/* Get the unique name */
-	name = sdb_state->connectors[connectorId].conninfo.name;
-	if (!name)
-	{
-		elog(WARNING, "Unique name not set for connector type: %d",
-				sdb_state->connectors[connectorId].type);
-		return NULL;
-	}
-
-	if (!getoffsets)
-	{
-		getoffsets = (*env)->GetMethodID(env, cls, "getConnectorOffset",
-										 "(ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;)"
-										 "Ljava/lang/String;");
-		if (getoffsets == NULL)
-		{
-			elog(WARNING, "Failed to find getConnectorOffset method");
-			return NULL;
-		}
-	}
-
-	jdb = (*env)->NewStringUTF(env, db);
-	jName = (*env)->NewStringUTF(env, name);
-	jdstdb = (*env)->NewStringUTF(env, dstdb);
-
-	result = (jstring)(*env)->CallObjectMethod(env, obj, getoffsets,
-			(int)sdb_state->connectors[connectorId].type, jdb, jName, jdstdb);
-	/* Check for exceptions */
-	exception = (*env)->ExceptionOccurred(env);
-	if (exception)
-	{
-		(*env)->ExceptionDescribe(env);
-		(*env)->ExceptionClear(env);
-		(*env)->DeleteLocalRef(env, exception);
-		elog(WARNING, "Exception occurred while getting connector offset");
-		(*env)->DeleteLocalRef(env, jdb);
-		(*env)->DeleteLocalRef(env, jName);
-		(*env)->DeleteLocalRef(env, jdstdb);
-		return NULL;
-	}
-
-	if (result == NULL)
-	{
-		elog(WARNING, "getConnectorOffset returned NULL");
-		(*env)->DeleteLocalRef(env, jdb);
-		(*env)->DeleteLocalRef(env, jName);
-		(*env)->DeleteLocalRef(env, jdstdb);
-		return NULL;
-	}
-
-	/* Convert Java string to C string */
-	tmp = (*env)->GetStringUTFChars(env, result, NULL);
-	if (tmp && strlen(tmp) > 0)
-		resultStr = pstrdup(tmp);
-	else
-		resultStr = pstrdup("no offset");
-
-	/* Clean up */
-	(*env)->ReleaseStringUTFChars(env, result, tmp);
-	(*env)->DeleteLocalRef(env, jdb);
-	(*env)->DeleteLocalRef(env, result);
-	(*env)->DeleteLocalRef(env, jName);
-	(*env)->DeleteLocalRef(env, jdstdb);
-
-	elog(DEBUG1, "Retrieved offset for %s connector: %s",
-			connectorTypeToString(sdb_state->connectors[connectorId].type), resultStr);
-
-	return resultStr;
+	return synchdb_java_get_offset(&worker.java, spec->legacy_type,
+								   spec->connection.srcdb, spec->connection.name,
+								   spec->connection.dstdb);
 }
 
 /*
@@ -1227,31 +469,14 @@ dbz_engine_get_offset(int connectorId)
  * This function prints current heap and non-heap memory allocated
  * and used by the connector JVM.
  */
-static void
+static int
 dbz_engine_memory_dump(void)
 {
-	jmethodID jvmMemDump;
+	int result = synchdb_java_memory_dump(&worker.java);
 
-	if (!jvm)
-	{
-		elog(WARNING, "jvm not initialized");
-		return;
-	}
-
-	if (!env)
-	{
-		elog(WARNING, "jvm env not initialized");
-		return;
-	}
-
-	jvmMemDump = (*env)->GetMethodID(env, cls, "jvmMemDump", "()V");
-	if (jvmMemDump == NULL)
-	{
-		elog(WARNING, "Failed to find jvmMemDump method");
-		return;
-	}
-
-	(*env)->CallVoidMethod(env, obj, jvmMemDump);
+	if (result != 0)
+		elog(WARNING, "failed to dump Debezium Java memory status");
+	return result;
 }
 
 /**
@@ -1262,28 +487,7 @@ dbz_engine_memory_dump(void)
 static int
 dbz_engine_set_loglevel(int level)
 {
-	jmethodID changeLogLevel;
-
-	if (!jvm)
-	{
-		elog(WARNING, "jvm not initialized");
-		return -1;
-	}
-	if (!env)
-	{
-		elog(WARNING, "jvm env not initialized");
-		return -1;
-	}
-
-	changeLogLevel = (*env)->GetMethodID(env, cls, "changeLogLevel", "(I)V");
-	if (changeLogLevel == NULL)
-	{
-		elog(WARNING, "Failed to find changeLogLevel method");
-		return -1;
-	}
-
-	(*env)->CallVoidMethod(env, obj, changeLogLevel, level);
-	return 0;
+	return synchdb_java_set_loglevel(&worker.java, level);
 }
 
 /*
@@ -1374,108 +578,119 @@ synchdb_stats_tupdesc(void)
 static void
 synchdb_init_shmem(void)
 {
-	bool found;
-	int i = 0;
-
-	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
-	sdb_state = ShmemInitStruct("synchdb",
-								sizeof(SynchdbSharedState),
-								&found);
-	if (!found)
-	{
-		/* First time through ... */
-		LWLockInitialize(&sdb_state->lock, LWLockNewTrancheId());
-	}
-	sdb_state->connectors =
-			ShmemInitStruct("synchdb_connectors",
-							sizeof(ActiveConnectors) * synchdb_max_connector_workers,
-							&found);
-	if (!found)
-	{
-		for (i = 0; i < synchdb_max_connector_workers; i++)
-		{
-			sdb_state->connectors[i].pid = InvalidPid;
-			sdb_state->connectors[i].state = STATE_UNDEF;
-			sdb_state->connectors[i].type = TYPE_UNDEF;
-		}
-	}
-	LWLockRelease(AddinShmemInitLock);
-	LWLockRegisterTranche(sdb_state->lock.tranche, "synchdb");
+	sdb_state = synchdb_registry_try_attach(synchdb_max_connector_workers);
 }
 
-/*
- * synchdb_detach_shmem - Detach from synchdb shared memory
- *
- * This function is responsible for detaching a process from the synchdb shared memory.
- * It updates the shared memory state if the current process is the one registered for
- * the specified connector type.
- *
- * @param code: An integer representing the exit code or reason for detachment
- * @param arg: A Datum containing the connector type as an unsigned integer
- */
+/* This must also be safe when called while reporting a SQL backend error. */
+static bool
+shm_connector_id_is_valid(int connectorId)
+{
+	return synchdb_registry_valid_slot(sdb_state, connectorId);
+}
+
+/* Legacy report adapters pass a complete owner, never just the physical slot. */
+static bool
+read_connector_view(int connectorId, SynchdbRunView *view)
+{
+	const SynchdbWorkerOwner *owner = worker.owner.run.generation != 0 ? &worker.owner : NULL;
+
+	return synchdb_registry_read_slot(sdb_state, connectorId, owner, view);
+}
+
+static bool
+worker_should_stop(void)
+{
+	return ShutdownRequestPending ||
+		synchdb_worker_gate(&worker) == SYNCHDB_GATE_STOP;
+}
+
+/* Cleanup owns private process resources; registry release checks the captured owner. */
 static void
 synchdb_detach_shmem(int code, Datum arg)
 {
-	pid_t enginepid;
+	SynchdbWorkerContext *context = (SynchdbWorkerContext *) DatumGetPointer(arg);
 
-	elog(LOG, "synchdb detach shm ... myConnectorId %d, code %d",
-			DatumGetUInt32(arg), code);
-
-	enginepid = get_shm_connector_pid(DatumGetUInt32(arg));
-	if (enginepid == MyProcPid)
-	{
-		set_shm_connector_pid(DatumGetUInt32(arg), InvalidPid);
-		set_shm_connector_state(DatumGetUInt32(arg), STATE_UNDEF);
-	}
-
-	cleanup(sdb_state->connectors[DatumGetUInt32(arg)].type);
+	synchdb_worker_finalize(context, code);
 }
 
-/*
- * prepare_bgw - Prepare a background worker for synchdb
- *
- * This function sets up a BackgroundWorker structure with the appropriate
- * information based on the connector type and connection details.
- *
- * @param worker: Pointer to the BackgroundWorker structure to be prepared
- * @param connInfo: Pointer to the ConnectionInfo structure containing connection details
- * @param connector: String representing the connector type
- * @param connectorid: Connector ID of interest
- * @param snapshotMode: Snapshot mode to use to start Debezium engine
- */
+/* Capture caller settings once; worker retries keep this accepted snapshot. */
 static void
-prepare_bgw(BackgroundWorker *worker, const ConnectionInfo *connInfo, const char *connector, int connectorid, const char * snapshotMode)
-
+capture_run_options(SynchdbRunOptions *options)
 {
-	const char * val = NULL;
-	ConnectorType type = fc_get_connector_type(connector);
+	MemSet(options, 0, sizeof(*options));
+	options->version = SYNCHDB_RUN_OPTIONS_VERSION;
+	options->dbz_batch_size = dbz_batch_size;
+	options->dbz_queue_size = dbz_queue_size;
+	options->dbz_connect_timeout_ms = dbz_connect_timeout_ms;
+	options->dbz_query_timeout_ms = dbz_query_timeout_ms;
+	if (!dbz_skipped_operations || strlen(dbz_skipped_operations) >= sizeof(options->dbz_skipped_operations))
+		ereport(ERROR,
+				(errcode(ERRCODE_STRING_DATA_RIGHT_TRUNCATION),
+				 errmsg("run option \"dbz_skipped_operations\" exceeds its supported length")));
+	strlcpy(options->dbz_skipped_operations, dbz_skipped_operations, sizeof(options->dbz_skipped_operations));
+	options->dbz_snapshot_thread_num = dbz_snapshot_thread_num;
+	options->dbz_snapshot_fetch_size = dbz_snapshot_fetch_size;
+	options->dbz_snapshot_min_row_to_stream_results = dbz_snapshot_min_row_to_stream_results;
+	options->dbz_incremental_snapshot_chunk_size = dbz_incremental_snapshot_chunk_size;
+	if (!dbz_incremental_snapshot_watermarking_strategy || strlen(dbz_incremental_snapshot_watermarking_strategy) >= sizeof(options->dbz_incremental_snapshot_watermarking_strategy))
+		ereport(ERROR,
+				(errcode(ERRCODE_STRING_DATA_RIGHT_TRUNCATION),
+				 errmsg("run option \"dbz_incremental_snapshot_watermarking_strategy\" exceeds its supported length")));
+	strlcpy(options->dbz_incremental_snapshot_watermarking_strategy, dbz_incremental_snapshot_watermarking_strategy, sizeof(options->dbz_incremental_snapshot_watermarking_strategy));
+	options->dbz_offset_flush_interval_ms = dbz_offset_flush_interval_ms;
+	options->dbz_capture_only_selected_table_ddl = dbz_capture_only_selected_table_ddl;
+	options->dbz_log_level = dbz_log_level;
+	options->dbz_logminer_stream_mode = dbz_logminer_stream_mode;
+	options->cdc_start_delay_ms = cdc_start_delay_ms;
+	options->jvm_max_heap_size = jvm_max_heap_size;
+	options->jvm_max_direct_buffer_size = jvm_max_direct_buffer_size;
+	options->synchdb_fdw_use_subtx = synchdb_fdw_use_subtx;
+	options->synchdb_letter_casing_strategy = synchdb_letter_casing_strategy;
+}
 
-	worker->bgw_main_arg = UInt32GetDatum(connectorid);
-	snprintf(worker->bgw_name, BGW_MAXLEN, "synchdb engine: %s@%s:%u", connector, connInfo->hostname, connInfo->port);
+static void
+build_run_spec(SynchdbRunSpec *spec, ConnectionInfo *connection,
+			   ConnectorType type, const char *snapshotMode)
+{
+	const char *compatible = GetConfigOption("ivorysql.compatible_mode", true, false);
+
+	connection->snapengine = synchdb_snapshot_engine;
+	connection->isOraCompat = compatible && pg_strcasecmp(compatible, "oracle") == 0;
+	capture_run_options(&connection->run_options);
+	synchdb_run_spec_init(spec, type, connection, snapshotMode);
+}
+
+/* Publish the accepted attempt before starting an engine that can fail. */
+static void
+publish_worker_run(int connectorId, SynchdbWorkerRun *run,
+				   const SynchdbRunSpec *spec, const SynchdbRequest *consumed_request)
+{
+	Assert(run == &worker.run);
+	if (connectorId != worker.owner.run.slot ||
+		!synchdb_worker_publish(&worker, spec, consumed_request))
+		proc_exit(0);
+	synchdb_letter_casing_strategy = spec->connection.run_options.synchdb_letter_casing_strategy;
+}
+
+static void
+prepare_bgw(BackgroundWorker *worker, const SynchdbRunSpec *spec, const SynchdbRunHandle *handle)
+{
+	const ConnectionInfo *connection = &spec->connection;
+	const char *connector = connectorTypeToString(spec->legacy_type);
+	SynchdbWorkerStartup startup = {0};
+
+	startup.version = SYNCHDB_WORKER_STARTUP_VERSION;
+	startup.run = *handle;
+	startup.key = connection->key;
+	startup.config_revision = connection->config_revision;
+	memset(worker->bgw_extra, 0, sizeof(worker->bgw_extra));
+	memcpy(worker->bgw_extra, &startup, sizeof(startup));
+	worker->bgw_main_arg = UInt32GetDatum(handle->slot);
+	snprintf(worker->bgw_name, BGW_MAXLEN, "synchdb engine: %s@%s:%u",
+			 connector, connection->hostname, connection->port);
 	snprintf(worker->bgw_type, BGW_MAXLEN, "synchdb engine: %s", connector);
-
-	/* append destination database to worker->bgw_name for clarity */
 	strlcat(worker->bgw_name, " -> ", BGW_MAXLEN);
-	strlcat(worker->bgw_name, connInfo->dstdb, BGW_MAXLEN);
-
-	/* [ivorysql] check if we are running under ivorysql's oracle compatible mode */
-	val = GetConfigOption("ivorysql.compatible_mode", true, false);
-
-	/*
-	 * save connInfo to synchdb shared memory at index[connectorid]. When the connector
-	 * worker starts, it will obtain the same connInfo from shared memory from the same
-	 * index location
-	 */
-	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
-	sdb_state->connectors[connectorid].type = type;
-	memset(sdb_state->connectors[connectorid].snapshotMode, 0, SYNCHDB_SNAPSHOT_MODE_SIZE);
-	strcpy(sdb_state->connectors[connectorid].snapshotMode, snapshotMode);
-
-	memset(&(sdb_state->connectors[connectorid].conninfo), 0, sizeof(ConnectionInfo));
-	memcpy(&(sdb_state->connectors[connectorid].conninfo), connInfo, sizeof(ConnectionInfo));
-	if (val && !strcasecmp(val, "oracle"))
-		sdb_state->connectors[connectorid].conninfo.isOraCompat = true;
-	LWLockRelease(&sdb_state->lock);
+	strlcat(worker->bgw_name, connection->dstdb, BGW_MAXLEN);
 }
 
 /*
@@ -1535,13 +750,8 @@ connectorStateAsString(ConnectorState state)
 static void
 reset_shm_request_state(int connectorId)
 {
-	if (!sdb_state)
-		return;
-
-	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
-	sdb_state->connectors[connectorId].req.reqstate = STATE_UNDEF;
-	memset(sdb_state->connectors[connectorId].req.reqdata, 0, SYNCHDB_ERRMSG_SIZE);
-	LWLockRelease(&sdb_state->lock);
+	if (connectorId == worker.owner.run.slot)
+		synchdb_worker_ack(&worker);
 }
 
 /*
@@ -1560,68 +770,11 @@ reset_shm_request_state(int connectorId)
 static int
 dbz_engine_set_offset(ConnectorType connectorType, char *db, char *offset, char *file)
 {
-	jmethodID setoffsets;
-	jstring joffsetstr = NULL, jdb = NULL, jfile = NULL;
-	jthrowable exception = NULL;
-	int ret = 0;
+	int result = synchdb_java_set_offset(&worker.java, connectorType, db, offset, file);
 
-	if (!jvm)
-	{
-		elog(WARNING, "jvm not initialized");
-		ret = -1;
-		goto cleanup;
-	}
-
-	if (!env)
-	{
-		elog(WARNING, "jvm env not initialized");
-		ret = -1;
-		goto cleanup;
-	}
-
-	/* Find the setConnectorOffset method */
-	setoffsets = (*env)->GetMethodID(env, cls, "setConnectorOffset",
-									 "(Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;)V");
-	if (setoffsets == NULL)
-	{
-		elog(WARNING, "Failed to find setConnectorOffset method");
-		ret = -1;
-		goto cleanup;
-	}
-
-	/* Create Java strings from C strings */
-	joffsetstr = (*env)->NewStringUTF(env, offset);
-	jdb = (*env)->NewStringUTF(env, db);
-	jfile = (*env)->NewStringUTF(env, file);
-
-	/* Call the Java method */
-	(*env)->CallVoidMethod(env, obj, setoffsets, jfile, (int)connectorType, jdb, joffsetstr);
-
-	/* Check for exceptions */
-	exception = (*env)->ExceptionOccurred(env);
-	if (exception)
-	{
-		(*env)->ExceptionDescribe(env);
-		(*env)->ExceptionClear(env);
-		(*env)->DeleteLocalRef(env, exception);
-		elog(WARNING, "Exception occurred while setting connector offset");
-		ret = -1;
-		goto cleanup;
-	}
-
-cleanup:
-	/* Clean up local references */
-	if (joffsetstr)
-		(*env)->DeleteLocalRef(env, joffsetstr);
-	if (jdb)
-		(*env)->DeleteLocalRef(env, jdb);
-	if (jfile)
-		(*env)->DeleteLocalRef(env, jfile);
-
-	if(ret == 0)
+	if (result == 0)
 		elog(LOG, "Successfully set offset for %s connector", connectorTypeToString(connectorType));
-
-	return ret;
+	return result;
 }
 
 /*
@@ -1635,25 +788,25 @@ cleanup:
  * @param connectorId: Connector ID of interest
  * @param snapshotMode: The new snapshot mode requested
  */
-static void
-processRequestInterrupt(ConnectionInfo *connInfo, ConnectorType type, int connectorId)
+static bool
+processRequestInterrupt(SynchdbWorkerRun *run, int connectorId)
 {
-	SynchdbRequest *req, *reqcopy;
-	ConnectorState *currstate, *currstatecopy;
+	ConnectionInfo *connInfo = &run->execution;
+	ConnectorType type = run->spec.legacy_type;
+	char *snapshotMode = run->snapshot_mode;
+	SynchdbRequest *reqcopy;
+	ConnectorState *currstatecopy;
 	char offsetfile[MAX_PATH_LENGTH] = {0};
 	char *srcdb;
 	int ret;
+	volatile bool completed = false;
+	bool request_consumed = false;
 
-	if (!sdb_state)
-		return;
+	if (!shm_connector_id_is_valid(connectorId))
+		return false;
 
-	req = &(sdb_state->connectors[connectorId].req);
-	currstate = &(sdb_state->connectors[connectorId].state);
-	srcdb = sdb_state->connectors[connectorId].conninfo.srcdb;
+	srcdb = connInfo->srcdb;
 
-	/* no requests, do nothing */
-	if (req->reqstate == STATE_UNDEF)
-		return;
 
 	/*
 	 * make a copy of requested state, its data and curr state to avoid holding locks
@@ -1662,10 +815,13 @@ processRequestInterrupt(ConnectionInfo *connInfo, ConnectorType type, int connec
 	reqcopy = palloc0(sizeof(SynchdbRequest));
 	currstatecopy = palloc0(sizeof(ConnectorState));
 
-	LWLockAcquire(&sdb_state->lock, LW_SHARED);
-	memcpy(reqcopy, req, sizeof(SynchdbRequest));
-	memcpy(currstatecopy, currstate, sizeof(ConnectorState));
-	LWLockRelease(&sdb_state->lock);
+	if (connectorId != worker.owner.run.slot ||
+		!synchdb_worker_poll(&worker, reqcopy, currstatecopy))
+	{
+		pfree(reqcopy);
+		pfree(currstatecopy);
+		return false;
+	}
 
 	/* Process the request based on current and requested states */
 	if (reqcopy->reqstate == STATE_PAUSED && *currstatecopy == STATE_SYNCING)
@@ -1688,11 +844,14 @@ processRequestInterrupt(ConnectionInfo *connInfo, ConnectorType type, int connec
 			ret = dbz_engine_stop();
 			if (ret)
 			{
-				elog(WARNING, "failed to stop dbz engine...");
-				reset_shm_request_state(connectorId);
+				synchdb_registry_complete_request(sdb_state, &worker.owner, reqcopy->command_id, false,
+					ERRCODE_EXTERNAL_ROUTINE_EXCEPTION, "failed to confirm Debezium runner shutdown while pausing");
+				worker.command_id = 0;
 				pfree(reqcopy);
 				pfree(currstatecopy);
-				return;
+				ereport(ERROR,
+					(errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
+					 errmsg("failed to confirm Debezium runner shutdown while pausing")));
 			}
 			set_shm_connector_state(connectorId, STATE_PAUSED);
 
@@ -1705,7 +864,19 @@ processRequestInterrupt(ConnectionInfo *connInfo, ConnectorType type, int connec
 	}
 	else if (reqcopy->reqstate == STATE_SYNCING && *currstatecopy == STATE_PAUSED)
 	{
-		/* Handle resume request, we can only transition to STATE_SYNCING from STATE_PAUSED */
+		synchdb_registry_report_ready(sdb_state, &worker.owner, false);
+		if (worker.bootstrap != NULL)
+		{
+			set_shm_connector_errmsg(connectorId,
+				"FDW bootstrap has no verified CDC handoff. Inspect its result and explicitly restart bootstrap or use a supported capture protocol.");
+            synchdb_registry_complete_request(sdb_state,&worker.owner,reqcopy->command_id,false,
+                ERRCODE_FEATURE_NOT_SUPPORTED,"FDW bootstrap has no verified CDC handoff");
+            worker.command_id=0;
+            pfree(reqcopy);
+            pfree(currstatecopy);
+            return false;
+        }
+        /* Handle resume request, we can only transition to STATE_SYNCING from STATE_PAUSED */
 		elog(LOG, "Resuming %s connector. Current state: %s, Requested state: %s",
 			 connectorTypeToString(type),
 			 connectorStateAsString(*currstatecopy),
@@ -1736,14 +907,20 @@ processRequestInterrupt(ConnectionInfo *connInfo, ConnectorType type, int connec
 			 */
 			if (connInfo->snapengine == ENGINE_DEBEZIUM)
 			{
-				ret = dbz_engine_start(connInfo, type, "initial");
+				ret = dbz_engine_start(connInfo, type, snapshotMode);
 				if (ret < 0)
 				{
 					elog(WARNING, "Failed to restart dbz engine");
-					reset_shm_request_state(connectorId);
+					synchdb_registry_complete_request(sdb_state, &worker.owner, reqcopy->command_id, false,
+						ERRCODE_EXTERNAL_ROUTINE_EXCEPTION, "could not resume Debezium runner");
+					worker.command_id = 0;
 					pfree(reqcopy);
 					pfree(currstatecopy);
-					return;
+					if (worker.java.engine_start_attempted && !worker.java.stop_confirmed)
+						ereport(ERROR,
+							(errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
+							 errmsg("Debezium start failed after engine creation may have begun; closing worker resources")));
+					return false;
 				}
 			}
 			else if (connInfo->snapengine == ENGINE_FDW)
@@ -1755,7 +932,11 @@ processRequestInterrupt(ConnectionInfo *connInfo, ConnectorType type, int connec
 				if ((connInfo->flag & (CONNFLAG_SCHEMA_SYNC_MODE |
 						CONNFLAG_INITIAL_SNAPSHOT_MODE)) == 0 )
 				{
-					const char *resumeMode = "initial";
+					const char *resumeMode = !strcasecmp(snapshotMode, "recovery") ?
+						"initial" : snapshotMode;
+
+					if (connInfo->flag & CONNFLAG_NO_CDC_MODE)
+						elog(ERROR, "cannot resume CDC for an initial_only connector");
 
 					/*
 					 * A SQL Server FDW schema-sync handoff has an incomplete
@@ -1769,10 +950,16 @@ processRequestInterrupt(ConnectionInfo *connInfo, ConnectorType type, int connec
 					if (ret < 0)
 					{
 						elog(WARNING, "Failed to restart dbz engine");
-						reset_shm_request_state(connectorId);
+						synchdb_registry_complete_request(sdb_state, &worker.owner, reqcopy->command_id, false,
+							ERRCODE_EXTERNAL_ROUTINE_EXCEPTION, "could not resume Debezium runner");
+						worker.command_id = 0;
 						pfree(reqcopy);
 						pfree(currstatecopy);
-						return;
+						if (worker.java.engine_start_attempted && !worker.java.stop_confirmed)
+							ereport(ERROR,
+								(errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
+								 errmsg("Debezium start failed after engine creation may have begun; closing worker resources")));
+						return false;
 					}
 				}
 			}
@@ -1795,11 +982,13 @@ processRequestInterrupt(ConnectionInfo *connInfo, ConnectorType type, int connec
 			if (ret < 0)
 			{
 				elog(WARNING, "Failed to set offset for %s connector", connectorTypeToString(type));
-				reset_shm_request_state(connectorId);
+				synchdb_registry_complete_request(sdb_state,&worker.owner,reqcopy->command_id,false,
+					ERRCODE_EXTERNAL_ROUTINE_EXCEPTION,"could not update connector offset");
+				worker.command_id=0;
 				set_shm_connector_state(connectorId, STATE_PAUSED);
 				pfree(reqcopy);
 				pfree(currstatecopy);
-				return;
+				return false;
 			}
 
 			/* after new offset is set, change state back to STATE_PAUSED */
@@ -1811,20 +1000,38 @@ processRequestInterrupt(ConnectionInfo *connInfo, ConnectorType type, int connec
 		else
 #endif
 		{
-			/* derive offset file*/
-			snprintf(offsetfile, MAX_PATH_LENGTH, SYNCHDB_OFFSET_FILE_PATTERN,
-					get_shm_connector_name(type), connInfo->name, connInfo->dstdb);
+				SynchdbArtifactPaths paths;
+				bool previous = synchdb_worker_sql_interruptible();
+
+				PG_TRY();
+				{
+					synchdb_worker_sql_enter();
+					StartTransactionCommand();
+					PushActiveSnapshot(GetTransactionSnapshot());
+					if (!synchdb_artifact_store_lookup(&connInfo->key, &paths))
+						elog(ERROR, "connector has no active artifact generation");
+					strlcpy(offsetfile, paths.offset, sizeof(offsetfile));
+					PopActiveSnapshot();
+					CommitTransactionCommand();
+				}
+				PG_FINALLY();
+				{
+					synchdb_worker_sql_restore(previous);
+				}
+				PG_END_TRY();
 
 			set_shm_connector_state(connectorId, STATE_OFFSET_UPDATE);
 			ret = dbz_engine_set_offset(type, srcdb, reqcopy->reqdata, offsetfile);
 			if (ret < 0)
 			{
 				elog(WARNING, "Failed to set offset for %s connector", connectorTypeToString(type));
-				reset_shm_request_state(connectorId);
+				synchdb_registry_complete_request(sdb_state,&worker.owner,reqcopy->command_id,false,
+					ERRCODE_EXTERNAL_ROUTINE_EXCEPTION,"could not update connector offset");
+				worker.command_id=0;
 				set_shm_connector_state(connectorId, STATE_PAUSED);
 				pfree(reqcopy);
 				pfree(currstatecopy);
-				return;
+				return false;
 			}
 
 			/* after new offset is set, change state back to STATE_PAUSED */
@@ -1834,89 +1041,121 @@ processRequestInterrupt(ConnectionInfo *connInfo, ConnectorType type, int connec
 			set_shm_dbz_offset(connectorId);
 		}
 	}
-	else if (reqcopy->reqstate == STATE_RESTARTING && *currstatecopy == STATE_SYNCING)
+	else if (reqcopy->reqstate == STATE_RESTARTING &&
+			(*currstatecopy == STATE_SYNCING || *currstatecopy == STATE_PAUSED))
 	{
-		ConnectionInfo newConnInfo = {0};
+		SynchdbRunSpec next;
 
-		elog(WARNING, "got a restart request: %s", reqcopy->reqdata);
+		/* Recheck the complete request before stopping the current engine. */
+		synchdb_run_spec_init(&next, reqcopy->reqtype, &reqcopy->reqconninfo, reqcopy->reqdata);
+		synchdb_run_spec_validate_restart(&run->spec, &next);
+#ifdef WITH_OLR
+		if (type == TYPE_OLR &&
+			(pg_strcasecmp(next.snapshot_mode, "initial") != 0 ||
+			 (connInfo->flag & (CONNFLAG_SCHEMA_SYNC_MODE |
+				CONNFLAG_INITIAL_SNAPSHOT_MODE | CONNFLAG_NO_CDC_MODE))))
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("OLR snapshot requests require a new worker start")));
+#endif
 		set_shm_connector_state(connectorId, STATE_RESTARTING);
-
-		/* get a copy of more recent conninfo from reqdata */
-		memcpy(&newConnInfo, &(reqcopy->reqconninfo), sizeof(ConnectionInfo));
-
 #ifdef WITH_OLR
 		if (type == TYPE_OLR)
 		{
-			set_shm_connector_state(connectorId, STATE_RESTARTING);
 			olr_client_shutdown();
+			publish_worker_run(connectorId, run, &next, reqcopy);
+			request_consumed = true;
 			sleep(5);
-			try_reconnect_olr(&newConnInfo);
+			try_reconnect_olr(connInfo);
 			set_shm_connector_state(connectorId, STATE_SYNCING);
 		}
 		else
 #endif
 		{
-			elog(WARNING, "stopping dbz engine...");
 			ret = dbz_engine_stop();
 			if (ret)
 			{
-				elog(WARNING, "failed to stop dbz engine...");
-				reset_shm_request_state(connectorId);
+				synchdb_registry_complete_request(sdb_state, &worker.owner, reqcopy->command_id, false,
+					ERRCODE_EXTERNAL_ROUTINE_EXCEPTION, "failed to confirm Debezium runner shutdown while restarting");
+				worker.command_id = 0;
 				pfree(reqcopy);
 				pfree(currstatecopy);
-				set_shm_connector_state(connectorId, STATE_SYNCING);
-				return;
+				ereport(ERROR,
+					(errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
+					 errmsg("failed to confirm Debezium runner shutdown while restarting")));
 			}
+			publish_worker_run(connectorId, run, &next, reqcopy);
+			request_consumed = true;
 			sleep(1);
-
-			elog(LOG, "resuimg dbz engine with host %s, port %u, user %s, src_db %s, "
-					"dst_db %s, table %s, snapshotMode %s",
-					newConnInfo.hostname, newConnInfo.port, newConnInfo.user,
-					strlen(newConnInfo.srcdb) > 0 ? newConnInfo.srcdb : "N/A",
-					newConnInfo.dstdb,
-					strlen(newConnInfo.table) ? newConnInfo.table : "N/A",
-					reqcopy->reqdata);
-
-			elog(WARNING, "resuimg dbz engine with snapshot_mode %s...", reqcopy->reqdata);
-			ret = dbz_engine_start(&newConnInfo, type, reqcopy->reqdata);
-			if (ret < 0)
-			{
-				elog(WARNING, "Failed to restart dbz engine");
-				reset_shm_request_state(connectorId);
-				pfree(reqcopy);
-				pfree(currstatecopy);
-				set_shm_connector_state(connectorId, STATE_STOPPED);
-				return;
-			}
-			set_shm_connector_state(connectorId, STATE_SYNCING);
+			completed = !start_snapshot_run(type, connInfo, snapshotMode);
 		}
 	}
-	else if (reqcopy->reqstate == STATE_MEMDUMP)
-	{
-		ConnectorState oldstate = get_shm_connector_state_enum(connectorId);
+		else if (reqcopy->reqstate == STATE_MEMDUMP)
+		{
+			ConnectorState oldstate = get_shm_connector_state_enum(connectorId);
 
 		elog(LOG, "Requesting memdump for %s connector", connInfo->name);
 		set_shm_connector_state(connectorId, STATE_MEMDUMP);
-		dbz_engine_memory_dump();
+		ret = dbz_engine_memory_dump();
 		set_shm_connector_state(connectorId, oldstate);
+		if (ret != 0)
+		{
+			synchdb_registry_complete_request(sdb_state, &worker.owner, reqcopy->command_id, false,
+				ERRCODE_EXTERNAL_ROUTINE_EXCEPTION, "could not dump Debezium Java memory status");
+			worker.command_id = 0;
+		}
 	}
-	else if (reqcopy->reqstate == STATE_RELOAD_OBJMAP)
-	{
-		ConnectorState oldstate = get_shm_connector_state_enum(connectorId);
+		else if (reqcopy->reqstate == STATE_RELOAD_OBJMAP)
+		{
+			ConnectorState oldstate = get_shm_connector_state_enum(connectorId);
 
 		elog(LOG, "Reloading objmap for %s connector", connInfo->name);
 		set_shm_connector_state(connectorId, STATE_RELOAD_OBJMAP);
-		fc_load_objmap(connInfo->name, type);
-		set_shm_connector_state(connectorId, oldstate);
+		/* A rejected candidate does not stop the engine using the old snapshot. */
+		PG_TRY();
+		{
+				load_worker_rules(connInfo->name, type);
+		}
+		PG_CATCH();
+		{
+			ErrorData *error;
+
+			MemoryContextSwitchTo(TopMemoryContext);
+			error = CopyErrorData();
+			FlushErrorState();
+			set_shm_connector_errmsg(connectorId, error->message);
+			ereport(WARNING, (errmsg("mapping reload rejected; keeping the previous rules: %s",
+								   error->message)));
+            synchdb_registry_complete_request(sdb_state,&worker.owner,reqcopy->command_id,false,
+                error->sqlerrcode,error->message);
+            worker.command_id=0;
+            FreeErrorData(error);
+        }
+        PG_END_TRY();
+        set_shm_connector_state(connectorId, oldstate);
 	}
 	else if (reqcopy->reqstate == STATE_DBZ_LOGLEVEL_UPDATE)
 	{
 		ConnectorState oldstate = get_shm_connector_state_enum(connectorId);
-		int level = atoi(reqcopy->reqdata);
+		int level = pg_strtoint32(reqcopy->reqdata);
 
 		elog(LOG, "Updating log level for %s connector to %d", connInfo->name, level);
 		set_shm_connector_state(connectorId, STATE_DBZ_LOGLEVEL_UPDATE);
-		dbz_engine_set_loglevel(level);
+		if (level < LOG_LEVEL_ALL || level > LOG_LEVEL_TRACE || dbz_engine_set_loglevel(level) != 0)
+		{
+			synchdb_registry_complete_request(sdb_state, &worker.owner, reqcopy->command_id, false,
+				level < LOG_LEVEL_ALL || level > LOG_LEVEL_TRACE ?
+				ERRCODE_INVALID_PARAMETER_VALUE : ERRCODE_EXTERNAL_ROUTINE_EXCEPTION,
+				"could not update Debezium log level");
+			worker.command_id = 0;
+			set_shm_connector_state(connectorId, oldstate);
+			pfree(reqcopy);
+			pfree(currstatecopy);
+			return false;
+		}
+		run->spec.connection.run_options.dbz_log_level = level;
+		run->execution.run_options.dbz_log_level = level;
+		synchdb_registry_publish_loglevel(sdb_state, &worker.owner, level);
 		set_shm_connector_state(connectorId, oldstate);
 	}
 	else
@@ -1926,12 +1165,17 @@ processRequestInterrupt(ConnectionInfo *connInfo, ConnectorType type, int connec
 			 connectorTypeToString(type),
 			 connectorStateAsString(*currstatecopy),
 			 connectorStateAsString(reqcopy->reqstate));
+		synchdb_registry_complete_request(sdb_state, &worker.owner, reqcopy->command_id, false,
+			ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, "connector state does not permit the requested operation");
+		worker.command_id = 0;
 	}
 
 	/* reset request state so we can receive more requests to process */
-	reset_shm_request_state(connectorId);
+	if (!request_consumed)
+		reset_shm_request_state(connectorId);
 	pfree(reqcopy);
 	pfree(currstatecopy);
+	return completed;
 }
 
 /*
@@ -1945,62 +1189,67 @@ processRequestInterrupt(ConnectionInfo *connInfo, ConnectorType type, int connec
  * @param snapshotMode: The snapshot mode requested
  */
 static void
-setup_environment(ConnectorType * connectorType, ConnectionInfo *conninfo, char ** snapshotMode)
+worker_sigterm(SIGNAL_ARGS)
 {
-	pid_t enginepid;
+	SignalHandlerForShutdownRequest(postgres_signal_arg);
+	if (synchdb_worker_sql_interruptible())
+		die(postgres_signal_arg);
+}
 
-	/* Establish signal handlers */
-	pqsignal(SIGTERM, SignalHandlerForShutdownRequest);
+static void
+setup_environment(SynchdbWorkerRun *run)
+{
+	SynchdbWorkerStartup startup;
+	SynchdbRunGate gate;
+
+	Assert(run == &worker.run);
+
+	/* Stale registrations terminate normally, including those configured to retry. */
+	if (!MyBgworkerEntry)
+		proc_exit(0);
+	memcpy(&startup, MyBgworkerEntry->bgw_extra, sizeof(startup));
+	if (startup.version != SYNCHDB_WORKER_STARTUP_VERSION ||
+		!synchdb_connector_key_is_valid(&startup.key) || startup.config_revision <= 0 ||
+		startup.run.slot != myConnectorId || !OidIsValid(startup.execution_role) ||
+		!synchdb_registry_controller_valid(synchdb_registry_try_attach(synchdb_max_connector_workers),
+			startup.key.database_oid,startup.controller_generation))
+		proc_exit(0);
+
+	pqsignal(SIGTERM, worker_sigterm);
 	pqsignal(SIGHUP, SignalHandlerForConfigReload);
 	pqsignal(SIGUSR1, procsignal_sigusr1_handler);
-
-	/* Unblock signals to allow handling */
 	BackgroundWorkerUnblockSignals();
-
-	/* Initialize or attach to SynchDB shared memory and set cleanup handler */
 	synchdb_init_shmem();
-	on_shmem_exit(synchdb_detach_shmem, UInt32GetDatum(myConnectorId));
-
-	/* Check if the worker is already running */
-	enginepid = get_shm_connector_pid(myConnectorId);
-	if (enginepid != InvalidPid)
-		ereport(ERROR,
-				(errmsg("synchdb worker is already running under PID %d",
-						(int)enginepid)));
-
-	/* read the connector type, conninfo and snapshot mode from synchdb shared memory */
-	*connectorType = sdb_state->connectors[myConnectorId].type;
-	*snapshotMode = pstrdup(sdb_state->connectors[myConnectorId].snapshotMode);
-	memcpy(conninfo, &(sdb_state->connectors[myConnectorId].conninfo), sizeof(ConnectionInfo));
-
-	/* Register this process as the worker for this connector type */
-	set_shm_connector_pid(myConnectorId, MyProcPid);
-
-	/* Connect to current database: NULL user - bootstrap superuser is used */
-	BackgroundWorkerInitializeConnection(conninfo->dstdb, NULL, 0);
-
-	/* [ivorysql] enable oracle compatible mode if specified */
-	if (conninfo->isOraCompat)
+	synchdb_worker_init(&worker, sdb_state, &worker_resources);
+	/* Manual runtimes use DSM, which core unmaps before on_shmem_exit. */
+	before_shmem_exit(synchdb_detach_shmem, PointerGetDatum(&worker));
+	if (!synchdb_worker_claim(&worker, &startup, myConnectorId))
+		proc_exit(0);
+	/* A registration can fork before its SQL transaction commits, but cannot act. */
+	for (;;)
+	{
+		ResetLatch(MyLatch);
+		gate = synchdb_worker_gate(&worker);
+		if (ShutdownRequestPending || gate == SYNCHDB_GATE_STOP)
+			proc_exit(0);
+		if (gate == SYNCHDB_GATE_READY)
+			break;
+		(void) WaitLatch(MyLatch, WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
+						 100L, PG_WAIT_EXTENSION);
+		CHECK_FOR_INTERRUPTS();
+	}
+	/* Startup SQL precedes native engine creation. A stop can safely abort a
+	 * connection/rule-loading lock wait without entering JNI or OLR cleanup. */
+	synchdb_worker_sql_enter();
+	synchdb_pg_worker_initialize_connection(run->execution.key.database_oid, startup.execution_role);
+	synchdb_letter_casing_strategy = run->spec.connection.run_options.synchdb_letter_casing_strategy;
+	if (run->execution.isOraCompat)
 	{
 		SetConfigOption("ivorysql.compatible_mode", "oracle", PGC_USERSET, PGC_S_OVERRIDE);
 		SetConfigOption("ivorysql.identifier_case_switch", "normal", PGC_USERSET, PGC_S_OVERRIDE);
-		elog(LOG,"IvorySQL Oracle compatible mode enabled");
 	}
-
-	elog(LOG, "obtained conninfo from shm: myConnectorId %d, name %s, host %s, port %u, "
-			"user %s, src_db %s, dst_db %s, table %s, snapshottable %s, connectorType %u (%s), conninfo_name %s"
-			" snapshotMode %s",
-			myConnectorId, conninfo->name,
-			conninfo->hostname, conninfo->port, conninfo->user,
-			strlen(conninfo->srcdb) > 0 ? conninfo->srcdb : "N/A",
-			conninfo->dstdb,
-			strlen(conninfo->table) > 0 ? conninfo->table : "N/A",
-			strlen(conninfo->snapshottable) > 0 ? conninfo->snapshottable : "N/A",
-			*connectorType, connectorTypeToString(*connectorType),
-			conninfo->name, *snapshotMode);
-
-	elog(LOG, "Environment setup completed for SynchDB %s worker (type %u)",
-		 connectorTypeToString(*connectorType), *connectorType);
+	elog(LOG, "loaded accepted run configuration for connector %s (type %s, mode %s)",
+		 run->spec.connection.name, connectorTypeToString(run->spec.legacy_type), run->spec.snapshot_mode);
 }
 
 /*
@@ -2010,7 +1259,7 @@ setup_environment(ConnectorType * connectorType, ConnectionInfo *conninfo, char 
  * creates a Java VM, and initializes the Debezium engine.
  */
 static void
-initialize_jvm(JMXConnectionInfo * jmx)
+initialize_jvm(const JMXConnectionInfo *jmx, const SynchdbRunOptions *run_options)
 {
 	JavaVMInitArgs vm_args;
 	JavaVMOption options[30];	/* ensure we do not exceed this max number of java options */
@@ -2018,6 +1267,9 @@ initialize_jvm(JMXConnectionInfo * jmx)
 	const char *dbzpath = getenv("DBZ_ENGINE_DIR");
 	MemoryContext jvmContext, oldContext;
 	int ret, optcount = 0, i = 0;
+
+	if (worker.java.creation_attempted)
+		elog(ERROR, "a JVM has already been created or attempted in this worker");
 
 	/* Determine the path to the Debezium engine JAR file */
 	if (dbzpath)
@@ -2035,90 +1287,105 @@ initialize_jvm(JMXConnectionInfo * jmx)
 	jvmContext = AllocSetContextCreate(TopMemoryContext, "JVMINIT", ALLOCSET_DEFAULT_SIZES);
 	oldContext = MemoryContextSwitchTo(jvmContext);
 
-	/* Configure JVM options */
-	options[optcount++].optionString = psprintf("-Djava.class.path=%s", jar_path);
-	options[optcount++].optionString = "-Xrs"; // Reduce use of OS signals by JVM
-	options[optcount++].optionString = psprintf("-Xmx%dm", jvm_max_heap_size);
-	options[optcount++].optionString = psprintf("-XX:MaxDirectMemorySize=%dm", jvm_max_direct_buffer_size);
-
-	/* jmx parameters if enabled */
-	if (jmx && strcasecmp(jmx->jmx_listenaddr, "null") &&
-			strcasecmp(jmx->jmx_rmiserveraddr, "null"))
+	PG_TRY();
 	{
-		options[optcount++].optionString = "-Dcom.sun.management.jmxremote";
-		options[optcount++].optionString = psprintf("-Dcom.sun.management.jmxremote.host=%s", jmx->jmx_listenaddr);
-		options[optcount++].optionString = psprintf("-Dcom.sun.management.jmxremote.port=%u", jmx->jmx_port);
-		options[optcount++].optionString = psprintf("-Djava.rmi.server.hostname=%s", jmx->jmx_rmiserveraddr);
-		options[optcount++].optionString = psprintf("-Dcom.sun.management.jmxremote.rmi.port=%u", jmx->jmx_rmiport);
+		/* Configure JVM options */
+		options[optcount++].optionString = psprintf("-Djava.class.path=%s", jar_path);
+		options[optcount++].optionString = "-Xrs"; // Reduce use of OS signals by JVM
+		options[optcount++].optionString = psprintf("-Xmx%dm", run_options->jvm_max_heap_size);
+		options[optcount++].optionString = psprintf("-XX:MaxDirectMemorySize=%dm", run_options->jvm_max_direct_buffer_size);
 
-		/* optional jmx auth options */
-		if (jmx->jmx_auth)
+		/* jmx parameters if enabled */
+		if (jmx && strcasecmp(jmx->jmx_listenaddr, "null") &&
+				strcasecmp(jmx->jmx_rmiserveraddr, "null"))
 		{
-			options[optcount++].optionString = "-Dcom.sun.management.jmxremote.authenticate=true";
-			options[optcount++].optionString = psprintf("-Dcom.sun.management.jmxremote.password.file=%s",
-					jmx->jmx_auth_passwdfile);
-			options[optcount++].optionString = psprintf("-Dcom.sun.management.jmxremote.access.file=%s",
-					jmx->jmx_auth_accessfile);
-		}
-		else
-			options[optcount++].optionString = "-Dcom.sun.management.jmxremote.authenticate=false";
+			options[optcount++].optionString = "-Dcom.sun.management.jmxremote";
+			options[optcount++].optionString = psprintf("-Dcom.sun.management.jmxremote.host=%s", jmx->jmx_listenaddr);
+			options[optcount++].optionString = psprintf("-Dcom.sun.management.jmxremote.port=%u", jmx->jmx_port);
+			options[optcount++].optionString = psprintf("-Djava.rmi.server.hostname=%s", jmx->jmx_rmiserveraddr);
+			options[optcount++].optionString = psprintf("-Dcom.sun.management.jmxremote.rmi.port=%u", jmx->jmx_rmiport);
 
-		/* optional jmx ssl options */
-		if (jmx->jmx_ssl)
-		{
-			options[optcount++].optionString = "-Dcom.sun.management.jmxremote.ssl=true";
-			options[optcount++].optionString = psprintf("-Djavax.net.ssl.keyStore=%s", jmx->jmx_ssl_keystore);
-			options[optcount++].optionString = psprintf("-Djavax.net.ssl.keyStorePassword=%s", jmx->jmx_ssl_keystore_pass);
-
-			/* optional truststore options for authenticating clients */
-			if (strcasecmp(jmx->jmx_ssl_truststore, "null"))
+			/* optional jmx auth options */
+			if (jmx->jmx_auth)
 			{
-				options[optcount++].optionString = psprintf("-Djavax.net.ssl.trustStore=%s", jmx->jmx_ssl_truststore);
-				options[optcount++].optionString = psprintf("-Djavax.net.ssl.trustStorePassword=%s", jmx->jmx_ssl_truststore_pass);
+				options[optcount++].optionString = "-Dcom.sun.management.jmxremote.authenticate=true";
+				options[optcount++].optionString = psprintf("-Dcom.sun.management.jmxremote.password.file=%s",
+						jmx->jmx_auth_passwdfile);
+				options[optcount++].optionString = psprintf("-Dcom.sun.management.jmxremote.access.file=%s",
+						jmx->jmx_auth_accessfile);
 			}
+			else
+				options[optcount++].optionString = "-Dcom.sun.management.jmxremote.authenticate=false";
+
+			/* optional jmx ssl options */
+			if (jmx->jmx_ssl)
+			{
+				options[optcount++].optionString = "-Dcom.sun.management.jmxremote.ssl=true";
+				options[optcount++].optionString = psprintf("-Djavax.net.ssl.keyStore=%s", jmx->jmx_ssl_keystore);
+				options[optcount++].optionString = psprintf("-Djavax.net.ssl.keyStorePassword=%s", jmx->jmx_ssl_keystore_pass);
+
+				/* optional truststore options for authenticating clients */
+				if (strcasecmp(jmx->jmx_ssl_truststore, "null"))
+				{
+					options[optcount++].optionString = psprintf("-Djavax.net.ssl.trustStore=%s", jmx->jmx_ssl_truststore);
+					options[optcount++].optionString = psprintf("-Djavax.net.ssl.trustStorePassword=%s", jmx->jmx_ssl_truststore_pass);
+				}
+			}
+			else
+				options[optcount++].optionString = "-Dcom.sun.management.jmxremote.ssl=false";
 		}
-		else
-			options[optcount++].optionString = "-Dcom.sun.management.jmxremote.ssl=false";
-	}
 
-	/* jmx exporter settings - for prometheus and graphana */
-	if (jmx && strcasecmp(jmx->jmx_exporter_conf, "null") && strcasecmp(jmx->jmx_exporter, "null"))
+		/* jmx exporter settings - for prometheus and graphana */
+		if (jmx && strcasecmp(jmx->jmx_exporter_conf, "null") && strcasecmp(jmx->jmx_exporter, "null"))
+		{
+			options[optcount++].optionString = psprintf("-javaagent:%s=%u:%s",jmx->jmx_exporter,
+					jmx->jmx_exporter_port, jmx->jmx_exporter_conf);
+		}
+
+		elog(LOG, "Initialize JVM with %d options:", optcount);
+		for (i = 0; i < optcount; i++)
+		{
+			if (strstr(options[i].optionString, "Password=") != NULL)
+				elog(LOG, "options[%d]=<redacted password option>", i);
+			else
+				elog(LOG, "options[%d]=%s", i, options[i].optionString);
+		}
+
+		vm_args.version = JNI_VERSION_10;
+		vm_args.nOptions = optcount;
+		vm_args.options = options;
+		vm_args.ignoreUnrecognized = JNI_FALSE;
+
+		/* Create the Java VM */
+		if (worker_should_stop())
+			proc_exit(0);
+		worker.java.creation_attempted = true;
+		ret = JNI_CreateJavaVM(&worker.java.vm, (void **)&worker.java.env, &vm_args);
+		worker.java.creation_succeeded = ret == JNI_OK && worker.java.vm != NULL;
+		if (!worker.java.creation_succeeded || !worker.java.env)
+		{
+			set_shm_connector_errmsg(myConnectorId, "Unable to Launch JVM");
+			elog(ERROR, "Failed to create Java VM (return code: %d)", ret);
+		}
+
+		elog(INFO, "Java VM created successfully");
+
+		/* Initialize the Debezium engine */
+		ret = synchdb_java_bind(&worker.java);
+		if (ret < 0)
+		{
+			set_shm_connector_errmsg(myConnectorId, "Failed to initialize Debezium engine");
+			elog(ERROR, "Failed to initialize Debezium engine");
+		}
+
+		elog(INFO, "Debezium engine initialized successfully");
+	}
+	PG_FINALLY();
 	{
-		options[optcount++].optionString = psprintf("-javaagent:%s=%u:%s",jmx->jmx_exporter,
-				jmx->jmx_exporter_port, jmx->jmx_exporter_conf);
+		MemoryContextSwitchTo(oldContext);
+		MemoryContextDelete(jvmContext);
 	}
-
-	elog(LOG, "Initialize JVM with %d options:", optcount);
-	for (i = 0; i < optcount; i++)
-		elog(LOG, "options[%d]=%s", i, options[i].optionString);
-
-	vm_args.version = JNI_VERSION_10;
-	vm_args.nOptions = optcount;
-	vm_args.options = options;
-	vm_args.ignoreUnrecognized = JNI_FALSE;
-
-	/* Create the Java VM */
-	ret = JNI_CreateJavaVM(&jvm, (void **)&env, &vm_args);
-	if (ret < 0 || !env)
-	{
-		set_shm_connector_errmsg(myConnectorId, "Unable to Launch JVM");
-		elog(ERROR, "Failed to create Java VM (return code: %d)", ret);
-	}
-
-	elog(INFO, "Java VM created successfully");
-
-	/* Initialize the Debezium engine */
-	ret = dbz_engine_init(env, &cls, &obj);
-	if (ret < 0)
-	{
-		set_shm_connector_errmsg(myConnectorId, "Failed to initialize Debezium engine");
-		elog(ERROR, "Failed to initialize Debezium engine");
-	}
-
-	elog(INFO, "Debezium engine initialized successfully");
-
-	MemoryContextSwitchTo(oldContext);
-	MemoryContextDelete(jvmContext);
+	PG_END_TRY();
 }
 
 /*
@@ -2134,7 +1401,11 @@ initialize_jvm(JMXConnectionInfo * jmx)
 static void
 start_debezium_engine(ConnectorType connectorType, const ConnectionInfo *connInfo, const char * snapshotMode)
 {
-	int ret = dbz_engine_start(connInfo, connectorType, snapshotMode);
+	int ret;
+
+	if (worker_should_stop())
+		proc_exit(0);
+	ret = dbz_engine_start(connInfo, connectorType, snapshotMode);
 	if (ret < 0)
 	{
 		set_shm_connector_errmsg(myConnectorId, "Failed to start dbz engine");
@@ -2147,136 +1418,48 @@ start_debezium_engine(ConnectorType connectorType, const ConnectionInfo *connInf
 		 connInfo->hostname, connInfo->port, connectorType);
 }
 
-/*
- * populate_debezium_metadata - Create debezium metadata file based on current conditions
- *
- * This function writes the Debezium offset produced by an FDW snapshot and,
- * where supported, exports schema_history_{} into Debezium's history file.
- *
- * @param name: The name of the connector
- * @param connectorType: The type of connector
- * @param dstdb: destination database name
- */
-static int
-populate_debezium_metadata(ConnectionInfo * connInfo, ConnectorType connectorType,
-		const char * dstdb, const char * srcdb)
+static void
+validate_schema_sync_request(ConnectorType type, int snapshotEngine, int flag)
 {
-	int ret = -1;
-	jmethodID createoffsets;
-	char * offsetstr = NULL;
-	jstring joffsetstr = NULL, jdb = NULL, jfile = NULL;
-	jthrowable exception = NULL;
-	char * sql = NULL;
-	char * offsetfile = psprintf(SYNCHDB_OFFSET_FILE_PATTERN,
-			get_shm_connector_name(connectorType), connInfo->name, dstdb);
-	char * schemahistoryfile = psprintf(SYNCHDB_SCHEMA_FILE_PATTERN,
-			get_shm_connector_name(connectorType), connInfo->name, dstdb);
+	if (type == TYPE_POSTGRES && snapshotEngine == ENGINE_DEBEZIUM &&
+		(flag & CONNFLAG_SCHEMA_SYNC_MODE))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("PostgreSQL Debezium connectors do not support automatic schema sync"),
+				 errhint("Use the FDW snapshot engine for schema sync.")));
+}
 
-	if (!jvm)
+/* Select this run's work without turning a snapshot-only request into CDC. */
+static bool
+start_snapshot_run(ConnectorType type, ConnectionInfo *connInfo, const char *snapshotMode)
+{
+	if (worker_should_stop())
+		proc_exit(0);
+	connInfo->flag &= ~(CONNFLAG_NO_CDC_MODE | CONNFLAG_INITIAL_SNAPSHOT_MODE);
+	if (!strcasecmp(snapshotMode, "initial_only"))
+		connInfo->flag |= CONNFLAG_NO_CDC_MODE;
+
+	validate_schema_sync_request(type, connInfo->snapengine, connInfo->flag);
+
+	if (connInfo->snapengine == ENGINE_DEBEZIUM)
 	{
-		elog(WARNING, "jvm not initialized");
-		goto end;
+		start_debezium_engine(type, connInfo, snapshotMode);
+		return true;
 	}
+	if (connInfo->snapengine != ENGINE_FDW)
+		elog(ERROR, "unsupported snapshot engine %d", connInfo->snapengine);
 
-	if (!env)
+	synchdb_bootstrap_require_mode(snapshotMode,
+			(connInfo->flag & CONNFLAG_SCHEMA_SYNC_MODE) != 0);
+	if (worker.bootstrap)
 	{
-		elog(WARNING, "jvm env not initialized");
-		goto end;
+		pfree(worker.bootstrap->detail);
+		pfree(worker.bootstrap);
+		worker.bootstrap = NULL;
 	}
-
-	/* Find the createOffsetFile method */
-	createoffsets = (*env)->GetMethodID(env, cls, "createOffsetFile",
-									 "(Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;)V");
-	if (createoffsets == NULL)
-	{
-		elog(WARNING, "Failed to find createoffsets method");
-		goto end;
-	}
-
-	/* Create Java strings from C strings */
-	if (connectorType == TYPE_ORACLE)
-		offsetstr = psprintf("{\"commit_scn\":\"%llu\",\"snapshot_scn\":\"%llu\",\"scn\":\"%llu\"}",
-				connInfo->offsetdata.data.oracle.oracle_scn + 1,
-				connInfo->offsetdata.data.oracle.oracle_scn,
-				connInfo->offsetdata.data.oracle.oracle_scn);
-	else if (connectorType == TYPE_MYSQL)
-		offsetstr = psprintf("{\"file\":\"%s\",\"pos\":%llu,\"server_id\":\"%s\",\"snapshot_completed\":true}",
-				connInfo->offsetdata.data.mysql.binlog_file,
-				connInfo->offsetdata.data.mysql.binlog_pos,
-				connInfo->offsetdata.data.mysql.server_id);
-	else if (connectorType == TYPE_POSTGRES)
-		offsetstr = psprintf("{\"lsn\":%llu}",
-				connInfo->offsetdata.data.postgres.lsn);
-	else if (connectorType == TYPE_SQLSERVER)
-		offsetstr = psprintf("{\"commit_lsn\":\"%s\",\"change_lsn\":\"NULL\","
-				"\"snapshot\":true,\"snapshot_completed\":false}",
-				connInfo->offsetdata.data.sqlserver.commit_lsn);
-	else
-	{
-		elog(WARNING, "unsupported connector type to populate metadata");
-		goto end;
-	}
-
-	joffsetstr = (*env)->NewStringUTF(env, offsetstr);
-	jdb = (*env)->NewStringUTF(env, srcdb);
-	jfile = (*env)->NewStringUTF(env, offsetfile);
-
-	/* Call the Java method */
-	(*env)->CallVoidMethod(env, obj, createoffsets, jfile, (int)connectorType, jdb, joffsetstr);
-
-	/* Check for exceptions */
-	exception = (*env)->ExceptionOccurred(env);
-	if (exception)
-	{
-		(*env)->ExceptionDescribe(env);
-		(*env)->ExceptionClear(env);
-		(*env)->DeleteLocalRef(env, exception);
-		elog(WARNING, "Exception occurred while creating connector offset");
-		goto end;
-	}
-
-	/*
-	 * PostgreSQL does not use Debezium schema history.  SQL Server cannot use
-	 * the generic history rows produced by the FDW workflow either; its
-	 * connector is started in recovery mode below so Debezium rebuilds the
-	 * history while preserving the cutoff offset written above.
-	 */
-	if (connectorType == TYPE_POSTGRES || connectorType == TYPE_SQLSERVER)
-	{
-		ret = 0;
-		goto end;
-	}
-
-	/* populate schema history file for connectors supported by the SQL builder */
-	ret = dump_schema_history_to_file(connInfo->name, schemahistoryfile);
-	if (ret)
-	{
-		elog(WARNING, "Failed to populate schema history file %s",
-				schemahistoryfile);
-		goto end;
-	}
-
-	/* after schema history file is populated we can drop the source schema history table */
-	sql = psprintf("DROP TABLE IF EXISTS schema_history_%s", connInfo->name);
-	ra_executeCommand(sql);
-	pfree(sql);
-
-	ret = 0;
-end:
-	if (offsetfile)
-		pfree(offsetfile);
-	if (schemahistoryfile)
-		pfree(schemahistoryfile);
-	if (offsetstr)
-		pfree(offsetstr);
-	if (joffsetstr)
-		(*env)->DeleteLocalRef(env, joffsetstr);
-	if (jdb)
-		(*env)->DeleteLocalRef(env, jdb);
-	if (jfile)
-		(*env)->DeleteLocalRef(env, jfile);
-
-	return ret;
+	connInfo->flag |= CONNFLAG_INITIAL_SNAPSHOT_MODE | CONNFLAG_NO_CDC_MODE;
+	set_shm_connector_state(myConnectorId, STATE_SYNCING);
+	return true;
 }
 
 /*
@@ -2468,22 +1651,27 @@ dbz_read_snapshot_state(ConnectorType type, const char * offset)
  * @param connInfo: Pointer to the ConnectionInfo structure containing connection details
  * @param snapshotMode: Snapshot mode requested
  */
-static void
-main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshotMode)
+static bool
+main_loop(SynchdbWorkerRun *run)
 {
+	ConnectorType connectorType = run->spec.legacy_type;
+	ConnectionInfo *connInfo = &run->execution;
+	char *snapshotMode = run->snapshot_mode;
 	ConnectorState currstate;
 	bool dbzExitSignal = false;
-	BatchInfo myBatchInfo = {0};
 	SynchdbStatistics myBatchStats = {0};
+
 
 	elog(LOG, "Main LOOP ENTER ");
 
-	while (!ShutdownRequestPending)
+	while (!worker_should_stop())
 	{
 		if (ConfigReloadPending)
 		{
 			ConfigReloadPending = false;
 			ProcessConfigFile(PGC_SIGHUP);
+			/* Converter normalization remains fixed for this worker's targets. */
+			synchdb_letter_casing_strategy = run->spec.connection.run_options.synchdb_letter_casing_strategy;
 		}
 
 		if (dbzExitSignal)
@@ -2494,8 +1682,15 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 
 		CHECK_FOR_INTERRUPTS();
 
-		processRequestInterrupt(connInfo, connectorType, myConnectorId);
+		if (processRequestInterrupt(run, myConnectorId))
+			return true;
 
+		if (worker.bootstrap && worker.bootstrap->stop_after &&
+			worker.bootstrap->status == SYNCHDB_BOOTSTRAP_COMPLETE)
+		{
+			dbzExitSignal = true;
+			break;
+		}
 		currstate = get_shm_connector_state_enum(myConnectorId);
 		switch (currstate)
 		{
@@ -2525,40 +1720,8 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 						else
 						{
 							/* Debezium based snapshot, schema and CDC processing logics here */
-							myBatchInfo.batchId = SYNCHDB_INVALID_BATCH_ID;
-							myBatchInfo.batchSize = 0;
-							memset(&myBatchStats, 0, sizeof(myBatchStats));
-
-							dbz_engine_get_change(jvm, env, &cls, &obj, myConnectorId, &dbzExitSignal,
-									&myBatchInfo, &myBatchStats,
-									connInfo->flag);
-
-							/*
-							 * postgres connector under debezium snapshot engine requires user to create
-							 * schema manually, so there is not really a schema sync action here, so we
-							 * just mark it as done for now.
-							 */
-							if (connectorType == TYPE_POSTGRES && (connInfo->flag & CONNFLAG_SCHEMA_SYNC_MODE))
-								set_shm_connector_state(myConnectorId, STATE_SCHEMA_SYNC_DONE);
-
-							/*
-							 * if a valid batchid is set by dbz_engine_get_change(), it means we have
-							 * successfully completed a batch change request and we shall notify dbz
-							 * that it's been completed.
-							 */
-							if (myBatchInfo.batchId != SYNCHDB_INVALID_BATCH_ID)
-							{
-								dbz_mark_batch_complete(myBatchInfo.batchId);
-
-								/* increment batch connector statistics */
-								increment_connector_statistics(&myBatchStats, STATS_BATCH_COMPLETION, 1);
-
-								/* update the batch statistics to shared memory */
-								set_shm_connector_statistics(myConnectorId, &myBatchStats);
-
-								/* update offset for displaying to user */
-								set_shm_dbz_offset(myConnectorId);
-							}
+							process_debezium_batch(myConnectorId, &dbzExitSignal,
+												  &myBatchStats, connInfo->flag, true);
 						}
 						break;
 					}
@@ -2572,28 +1735,8 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 							if (connInfo->snapengine == ENGINE_DEBEZIUM)
 							{
 								/* continuously poll changes from debezium engine */
-								myBatchInfo.batchId = SYNCHDB_INVALID_BATCH_ID;
-								myBatchInfo.batchSize = 0;
-								memset(&myBatchStats, 0, sizeof(myBatchStats));
-
-								dbz_engine_get_change(jvm, env, &cls, &obj, myConnectorId, &dbzExitSignal,
-										&myBatchInfo, &myBatchStats, connInfo->flag);
-
-								/*
-								 * if a valid batchid is set by dbz_engine_get_change(), it means we have
-								 * successfully completed a batch change request and we shall notify dbz
-								 * that it's been completed.
-								 */
-								if (myBatchInfo.batchId != SYNCHDB_INVALID_BATCH_ID)
-								{
-									dbz_mark_batch_complete(myBatchInfo.batchId);
-
-									/* increment batch connector statistics */
-									increment_connector_statistics(&myBatchStats, STATS_BATCH_COMPLETION, 1);
-
-									/* update the batch statistics to shared memory */
-									set_shm_connector_statistics(myConnectorId, &myBatchStats);
-								}
+								process_debezium_batch(myConnectorId, &dbzExitSignal,
+													  &myBatchStats, connInfo->flag, false);
 							}
 							else if (connInfo->snapengine == ENGINE_FDW)
 							{
@@ -2686,6 +1829,8 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 			}
 			case STATE_SCHEMA_SYNC_DONE:
 			{
+				if (connInfo->snapengine == ENGINE_FDW)
+					elog(ERROR, "FDW bootstrap cannot enter a CDC handoff state");
 				switch(connectorType)
 				{
 					case TYPE_MYSQL:
@@ -2696,33 +1841,15 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 						/* exit schema sync mode if set and enter pause state - takes precedence */
 						if ((connInfo->flag & CONNFLAG_SCHEMA_SYNC_MODE))
 						{
-							connInfo->flag &= ~CONNFLAG_SCHEMA_SYNC_MODE;
-							set_shm_connector_state(myConnectorId, STATE_PAUSED);
-
-							/* remove the snapshot flag as well if set, so cdc can commence when resumed */
-							if ((connInfo->flag & CONNFLAG_INITIAL_SNAPSHOT_MODE))
-								connInfo->flag &= ~CONNFLAG_INITIAL_SNAPSHOT_MODE;
-
-							/* set the stage to change data capture */
-							set_shm_connector_stage(myConnectorId, STAGE_CHANGE_DATA_CAPTURE);
-
-							/*
-							 * when schema sync is done, we will put connector into pause state so the user
-							 * can review the table schema and attribute mappings before proceeding.
-							 */
-							elog(DEBUG1, "shut down dbz engine...");
+							/* Finish the handoff before advertising that resume is safe. */
 							if (dbz_engine_stop())
-							{
-								elog(WARNING, "failed to stop dbz engine...");
-							}
+								elog(ERROR, "failed to stop Debezium engine after schema sync");
 
-							if (connInfo->snapengine == ENGINE_FDW)
-							{
-								/* Populate the cutoff metadata used when CDC is resumed. */
-								if (populate_debezium_metadata(connInfo, connectorType,
-										connInfo->dstdb, connInfo->srcdb) != 0)
-									elog(ERROR, "failed to populate Debezium metadata after FDW schema sync");
-							}
+
+							connInfo->flag &= ~(CONNFLAG_SCHEMA_SYNC_MODE |
+								CONNFLAG_INITIAL_SNAPSHOT_MODE | CONNFLAG_NO_CDC_MODE);
+							set_shm_connector_stage(myConnectorId, STAGE_CHANGE_DATA_CAPTURE);
+							set_shm_connector_state(myConnectorId, STATE_PAUSED);
 						}
 						else
 						{
@@ -2732,12 +1859,12 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 								connInfo->flag &= ~CONNFLAG_INITIAL_SNAPSHOT_MODE;
 								set_shm_connector_state(myConnectorId, STATE_SYNCING);
 
-								if (connInfo->snapengine == ENGINE_FDW)
+
+								if (connInfo->flag & CONNFLAG_NO_CDC_MODE)
 								{
-									/* post FDW snapshot: populate metadata for Debezium to resume CDC */
-									if (populate_debezium_metadata(connInfo, connectorType,
-											connInfo->dstdb, connInfo->srcdb) != 0)
-										elog(ERROR, "failed to populate Debezium metadata after FDW snapshot");
+									/* The FDW workflow and its error check have both succeeded. */
+									dbzExitSignal = true;
+									break;
 								}
 
 								/*
@@ -2745,22 +1872,19 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 								 * captures schema only and, unlike an initial snapshot, preserves
 								 * the cutoff offset produced by the FDW snapshot.
 								 */
-								if (snapshotMode)
-								{
-									pfree(snapshotMode);
-									snapshotMode = pstrdup(connectorType == TYPE_SQLSERVER &&
-											connInfo->snapengine == ENGINE_FDW ? "recovery" : "initial");
-								}
+								strlcpy(snapshotMode, connectorType == TYPE_SQLSERVER &&
+										connInfo->snapengine == ENGINE_FDW ? "recovery" : "initial",
+										sizeof(run->snapshot_mode));
 
 								/* clear error messages */
 								set_shm_connector_errmsg(myConnectorId, NULL);
 
 								/*
-								 * if cdc_start_delay_ms is set > 0, we need to delay here before the
+								 * if connInfo->run_options.cdc_start_delay_ms is set > 0, we need to delay here before the
 								 * next iteration, which will begin the CDC process
 								 */
-								if (cdc_start_delay_ms > 0)
-									usleep(cdc_start_delay_ms * 1000);
+								if (connInfo->run_options.cdc_start_delay_ms > 0)
+									usleep(connInfo->run_options.cdc_start_delay_ms * 1000);
 
 								/* start debezium now */
 								start_debezium_engine(connectorType, connInfo, snapshotMode);
@@ -2774,77 +1898,56 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 					case TYPE_OLR:
 					{
 #ifdef WITH_OLR
-						/* exit schema sync mode if set and enter pause state - takes precedence */
-						if ((connInfo->flag & CONNFLAG_SCHEMA_SYNC_MODE))
+						bool schema_only = (connInfo->flag & CONNFLAG_SCHEMA_SYNC_MODE) != 0;
+
+						if ((connInfo->flag & CONNFLAG_NO_CDC_MODE) &&
+							connInfo->snapengine == ENGINE_DEBEZIUM)
 						{
-							connInfo->flag &= ~CONNFLAG_SCHEMA_SYNC_MODE;
-							set_shm_connector_state(myConnectorId, STATE_PAUSED);
-
-							/* remove the snapshot flag as well if set, so cdc can commence when resumed */
-							if ((connInfo->flag & CONNFLAG_INITIAL_SNAPSHOT_MODE))
-								connInfo->flag &= ~CONNFLAG_INITIAL_SNAPSHOT_MODE;
-
-							/* set the stage to change data capture */
-							set_shm_connector_stage(myConnectorId, STAGE_CHANGE_DATA_CAPTURE);
+							/* A last snapshot record is not the Java drain/ack boundary. */
+							set_shm_connector_state(myConnectorId, STATE_SYNCING);
+							break;
 						}
-						else
-						{
-							/* exit initial snapshot mode if set and resume syncing state */
-							if ((connInfo->flag & CONNFLAG_INITIAL_SNAPSHOT_MODE))
-							{
-								connInfo->flag &= ~CONNFLAG_INITIAL_SNAPSHOT_MODE;
-								set_shm_connector_state(myConnectorId, STATE_SYNCING);
-							}
-
-							/* set the stage to change data capture */
-							set_shm_connector_stage(myConnectorId, STAGE_CHANGE_DATA_CAPTURE);
-						}
-						/* update and write resume SCN */
-						olr_client_set_scns(connInfo->offsetdata.data.oracle.oracle_scn,
-								connInfo->offsetdata.data.oracle.oracle_scn, 0);
-						olr_client_write_scn_state(TYPE_OLR, connInfo->name, connInfo->dstdb, true);
-
-						/* update schema history metadata file to indicate we have completed a snapshot */
-						if (!olr_client_write_snapshot_state(connectorType, connInfo->name,
-								connInfo->dstdb, true))
-						{
-							elog(WARNING, "failed to write snapshot state...");
-						}
-
-						/* shutdown debezium only if we use debezium engine for snapshot */
+						/* Teardown must succeed before writing a completed snapshot marker. */
 						if (connInfo->snapengine == ENGINE_DEBEZIUM)
 						{
-							elog(WARNING, "shut down dbz engine...");
 							if (dbz_engine_stop())
-							{
-								elog(WARNING, "failed to stop dbz engine...");
-							}
+								elog(ERROR, "failed to stop Debezium engine after OLR snapshot");
 
-							/* destroy JVM */
-							elog(WARNING, "destroying jvm...");
-							(*jvm)->DetachCurrentThread(jvm);
-							(*jvm)->DestroyJavaVM(jvm);
+							if (!synchdb_java_destroy(&worker.java))
+								elog(ERROR, "failed to destroy JVM after OLR snapshot");
 
 							/* destroy the data cache created during dbz based snapshot */
 							fc_resetDataCache();
 						}
+						if (connInfo->snapengine == ENGINE_FDW)
+							olr_client_set_scns(connInfo->offsetdata.data.oracle.oracle_scn,
+									connInfo->offsetdata.data.oracle.oracle_scn, 0);
+						if (!olr_client_write_scn_state(TYPE_OLR, connInfo->name,
+								connInfo->dstdb, true))
+							elog(ERROR, "failed to persist SCN after OLR snapshot");
+						if (!olr_client_write_snapshot_state(TYPE_OLR, connInfo->name,
+								connInfo->dstdb, true))
+							elog(ERROR, "failed to persist completed OLR snapshot state");
 
 						/* change snapshot mode back to normal */
-						if (snapshotMode)
-						{
-							pfree(snapshotMode);
-							snapshotMode = pstrdup("initial");
-						}
+						strlcpy(snapshotMode, "initial", sizeof(run->snapshot_mode));
 
 						/* clear error messages */
 						set_shm_connector_errmsg(myConnectorId, NULL);
 
 						/*
-						 * if cdc_start_delay_ms is set > 0, we need to delay here before the
+						 * if connInfo->run_options.cdc_start_delay_ms is set > 0, we need to delay here before the
 						 * next iteration, which will begin the CDC process
 						 */
-						if (cdc_start_delay_ms > 0)
-							usleep(cdc_start_delay_ms * 1000);
+						if (connInfo->run_options.cdc_start_delay_ms > 0)
+							usleep(connInfo->run_options.cdc_start_delay_ms * 1000);
+
+						connInfo->flag &= ~CONNFLAG_INITIAL_SNAPSHOT_MODE;
+						if (schema_only)
+							connInfo->flag &= ~(CONNFLAG_SCHEMA_SYNC_MODE | CONNFLAG_NO_CDC_MODE);
+						set_shm_connector_stage(myConnectorId, STAGE_CHANGE_DATA_CAPTURE);
+						set_shm_connector_state(myConnectorId,
+								schema_only ? STATE_PAUSED : STATE_SYNCING);
 #endif
 						break;
 					}
@@ -2868,6 +1971,19 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
 		ResetLatch(MyLatch);
 	}
 	elog(LOG, "Main LOOP QUIT");
+#ifdef WITH_OLR
+	if (dbzExitSignal && !ShutdownRequestPending && connectorType == TYPE_OLR &&
+		(connInfo->flag & CONNFLAG_NO_CDC_MODE) &&
+		connInfo->snapengine == ENGINE_DEBEZIUM && olr_client_get_scn() > 0)
+	{
+		/* Preserve the real last snapshot SCN only after Java completed its drain. */
+		if (!olr_client_write_scn_state(TYPE_OLR, connInfo->name, connInfo->dstdb, true) ||
+			!olr_client_write_snapshot_state(TYPE_OLR, connInfo->name, connInfo->dstdb, true))
+			elog(ERROR, "could not persist completed OLR snapshot state");
+	}
+#endif
+	return dbzExitSignal && !ShutdownRequestPending &&
+		(connInfo->flag & CONNFLAG_NO_CDC_MODE) != 0;
 }
 
 /*
@@ -2878,120 +1994,51 @@ main_loop(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshot
  *
  * @param connectorType: The type of connector being started
  */
-static void
+static bool
 cleanup(ConnectorType connectorType)
 {
-	int ret;
+	Assert(connectorType == worker.run.spec.legacy_type);
+	return synchdb_worker_cleanup(&worker);
+}
 
-	elog(WARNING, "synchdb_engine_main shutting down");
-
+static bool
+prepare_worker_close(SynchdbWorkerContext *context)
+{
 #ifdef WITH_OLR
-	if (connectorType == TYPE_OLR)
-	{
-		/* force flush scn file before shutdown */
-		elog(WARNING, "force flushing scn file prior to shutdown");
-		olr_client_write_scn_state(connectorType,
-				sdb_state->connectors[myConnectorId].conninfo.name,
-				sdb_state->connectors[myConnectorId].conninfo.dstdb,
-				true);
-	}
-	else
+	const SynchdbRunSpec *spec = &context->run.spec;
 #endif
-	{
-		ret = dbz_engine_stop();
-		if (ret)
-		{
-			elog(DEBUG1, "Failed to call dbz engine stop method");
-		}
 
-		if (jvm != NULL)
-		{
-			(*jvm)->DestroyJavaVM(jvm);
-			jvm = NULL;
-			env = NULL;
-		}
+	/* Exit can also bypass the normal per-frame ERROR boundary. */
+	g_eventStr = NULL;
+#ifdef WITH_OLR
+	if (spec->legacy_type == TYPE_OLR && context->java.vm == NULL && olr_client_get_scn() > 0)
+	{
+		/* A snapshot JVM must drain before its last SCN can be persisted. */
+		return olr_client_write_scn_state(TYPE_OLR, spec->connection.name,
+										   spec->connection.dstdb, true);
 	}
-	fc_deinitFormatConverter(connectorType);
-	fc_deinitDataCache();
+#endif
+	return true;
 }
 
-/*
- * assign_connector_id - Requests a new connector ID
- *
- * This function returns a free connector ID associated with the given name
- *
- * @param name: The name of the connector to request a connector ID
- *
- * @return the connector ID associated with the given name, -1 if
- * no free connector ID is available.
- */
-static int
-assign_connector_id(const char * name, const char * dstdb)
+static bool
+close_worker_local(SynchdbWorkerContext *context)
 {
-	int i = 0;
-
-	/*
-	 * first, check if "name" has been used in one of the connector slots.
-	 * If yes, return its index
-	 */
-	for (i = 0; i < synchdb_max_connector_workers; i++)
+#ifdef WITH_OLR
+	if (context->run.spec.legacy_type == TYPE_OLR)
+		olr_client_shutdown();
+#endif
+	if (context->converter_live)
 	{
-		if (!strcasecmp(sdb_state->connectors[i].conninfo.name, name) &&
-			!strcasecmp(sdb_state->connectors[i].conninfo.dstdb, dstdb))
-		{
-			return i;
-		}
+		fc_deinitFormatConverter(context->run.spec.legacy_type);
+		context->converter_live = false;
 	}
-
-	/* if not, find the next unnamed free slot */
-	for (i = 0; i < synchdb_max_connector_workers; i++)
+	if (context->cache_live)
 	{
-		if (sdb_state->connectors[i].state == STATE_UNDEF &&
-				strlen(sdb_state->connectors[i].conninfo.name) == 0 &&
-				strlen(sdb_state->connectors[i].conninfo.dstdb) == 0)
-		{
-			return i;
-		}
+		fc_deinitDataCache();
+		context->cache_live = false;
 	}
-
-	/* if not, find the next free slot */
-	for (i = 0; i < synchdb_max_connector_workers; i++)
-	{
-		if (sdb_state->connectors[i].state == STATE_UNDEF)
-		{
-			return i;
-		}
-	}
-	return -1;
-}
-
-/*
- * get_shm_connector_id_by_name - get connector ID from given name
- *
- * This function returns a connector ID associated with the given name
- *
- * @param name: The name of the connector to request a connector ID
- *
- * @return: The connector ID associated with the given name, -1 if
- * no free connector ID is available.
- */
-static int
-get_shm_connector_id_by_name(const char * name, const char * dstdb)
-{
-	int i = 0;
-
-	if (!sdb_state)
-		return -1;
-
-	for (i = 0; i < synchdb_max_connector_workers; i++)
-	{
-		if (!strcmp(sdb_state->connectors[i].conninfo.name, name) &&
-			!strcmp(sdb_state->connectors[i].conninfo.dstdb, dstdb))
-		{
-			return i;
-		}
-	}
-	return -1;
+	return true;
 }
 
 /*
@@ -3006,258 +2053,28 @@ get_shm_connector_id_by_name(const char * name, const char * dstdb)
 static int
 dbz_mark_batch_complete(int batchid)
 {
-	jthrowable exception;
-	jboolean jmarkall = JNI_TRUE;
-
-	if (!jvm)
-	{
-		elog(WARNING, "jvm not initialized");
-		return -1;
-	}
-
-	if (!env)
-	{
-		elog(WARNING, "jvm env not initialized");
-		return -1;
-	}
-
-	/* Find the markBatchComplete method if needed */
-	if (!markBatchComplete)
-	{
-		markBatchComplete = (*env)->GetMethodID(env, cls, "markBatchComplete",
-										 "(IZII)V");
-		if (markBatchComplete == NULL)
-		{
-			elog(WARNING, "Failed to find markBatchComplete method");
-			return -1;
-		}
-	}
-
-	/* Call the Java method */
-	(*env)->CallVoidMethod(env, obj, markBatchComplete, batchid, jmarkall, -1, -1);
-
-	/* Check for exceptions */
-	exception = (*env)->ExceptionOccurred(env);
-	if (exception)
-	{
-		(*env)->ExceptionDescribe(env);
-		(*env)->ExceptionClear(env);
-		(*env)->DeleteLocalRef(env, exception);
-		elog(WARNING, "Exception occurred while calling markBatchComplete");
-		return -1;
-	}
-	return 0;
+	return synchdb_java_ack_batch(&worker.java, batchid);
 }
 
+/* Target commit and source acknowledgement publish distinct statistics deltas. */
 static void
-remove_dbz_metadata_files(const char * name)
+process_debezium_batch(int connectorId, bool *exit_signal,
+					   SynchdbStatistics *statistics, int flag, bool refresh_offset)
 {
-	struct dirent *entry;
-	char filepath[SYNCHDB_METADATA_PATH_SIZE] = {0};
-	char keyword[SYNCHDB_CONNINFO_NAME_SIZE + 2] = {0};
+	BatchInfo batch = {SYNCHDB_INVALID_BATCH_ID, 0};
 
-	DIR *dir = opendir(SYNCHDB_METADATA_DIR);
-	if (!dir)
-		elog(ERROR, "failed to open synchdb metadata dir %s : %m",
-				SYNCHDB_METADATA_DIR);
-
-	snprintf(keyword, SYNCHDB_CONNINFO_NAME_SIZE + 2, "_%s_", name);
-
-	while ((entry = readdir(dir)) != NULL)
-	{
-		if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
-			continue;
-
-		if (strstr(entry->d_name, keyword) != NULL)
-		{
-			memset(filepath, 0, SYNCHDB_METADATA_PATH_SIZE);
-			snprintf(filepath, SYNCHDB_METADATA_PATH_SIZE, "%s/%s",
-					SYNCHDB_METADATA_DIR, entry->d_name);
-			if (remove(filepath) != 0)
-				elog(ERROR, "Failed to delete metadata file %s %m",
-						filepath);
-		}
-	}
-	closedir(dir);
-}
-
-/*
- * synchdb_auto_launcher_main - auto connector launcher main routine
- *
- * This is the main routine of auto connector launcher
- *
- * @param main_arg: not used
- */
-void
-synchdb_auto_launcher_main(Datum main_arg)
-{
-	int ret = -1, numdb = 0, i = 0;
-	char ** dbnames;
-	char *query = "SELECT datname FROM pg_database WHERE datallowconn AND NOT datistemplate;";
-	MemoryContext oldcontext;
-
-	/* Establish signal handlers; once that's done, unblock signals. */
-	pqsignal(SIGTERM, SignalHandlerForShutdownRequest);
-	pqsignal(SIGHUP, SignalHandlerForConfigReload);
-	pqsignal(SIGUSR1, procsignal_sigusr1_handler);
-	BackgroundWorkerUnblockSignals();
-
-	elog(DEBUG1, "start synchdb_auto_launcher_main");
-	BackgroundWorkerInitializeConnection("postgres", NULL, 0);
-
-	/* Enumerate all connectable non-template databases */
-	StartTransactionCommand();
-	PushActiveSnapshot(GetTransactionSnapshot());
-
-	if (SPI_connect() != SPI_OK_CONNECT)
-	{
-		elog(WARNING, "Failed to connect to SPI manager");
-		PopActiveSnapshot();
-		CommitTransactionCommand();
+	MemSet(statistics, 0, sizeof(*statistics));
+	dbz_engine_get_change(connectorId, exit_signal, &batch, statistics, flag);
+	if (batch.batchId == SYNCHDB_INVALID_BATCH_ID)
 		return;
-	}
-
-	ret = SPI_execute(query, true, 0);
-	if (ret != SPI_OK_SELECT)
-	{
-		SPI_finish();
-		PopActiveSnapshot();
-		CommitTransactionCommand();
-		elog(WARNING, "Failed to execute query to enumerate databases");
-		return;
-	}
-
-	numdb = SPI_processed;
-	oldcontext = MemoryContextSwitchTo(TopMemoryContext);
-	dbnames = palloc0(sizeof(char *) * numdb);
-	for (i = 0; i < numdb; i++)
-	{
-		/* get database name and store in array */
-		dbnames[i] = pstrdup(SPI_getvalue(SPI_tuptable->vals[i],
-				SPI_tuptable->tupdesc, 1));
-	}
-	MemoryContextSwitchTo(oldcontext);
-
-	SPI_finish();
-	PopActiveSnapshot();
-	CommitTransactionCommand();
-
-	/*
-	 * Spawn per-database sub-launchers one at a time and wait for each to
-	 * finish before starting the next. This keeps the extra slot usage at
-	 * one sub-launcher at a time, avoiding slot exhaustion when many
-	 * databases are present.
-	 */
-	for (i = 0; i < numdb; i++)
-	{
-		BackgroundWorker worker;
-		BackgroundWorkerHandle *handle;
-
-		MemSet(&worker, 0, sizeof(BackgroundWorker));
-		worker.bgw_flags = BGWORKER_SHMEM_ACCESS |
-				BGWORKER_BACKEND_DATABASE_CONNECTION;
-		worker.bgw_start_time = BgWorkerStart_ConsistentState;
-		worker.bgw_restart_time = BGW_NEVER_RESTART;
-		strcpy(worker.bgw_library_name, "synchdb");
-		strcpy(worker.bgw_function_name, "synchdb_db_launcher_main");
-		snprintf(worker.bgw_name, BGW_MAXLEN, "synchdb db launcher for %s", dbnames[i]);
-		snprintf(worker.bgw_type, BGW_MAXLEN, "synchdb db launcher");
-		strlcpy(worker.bgw_extra, dbnames[i], BGW_MAXLEN);
-		worker.bgw_notify_pid = MyProcPid;
-
-		if (!RegisterDynamicBackgroundWorker(&worker, &handle))
-		{
-			elog(WARNING, "synchdb_auto_launcher: Failed to register background worker for database %s",
-				dbnames[i]);
-			continue;
-		}
-
-		/* Wait for the worker to start before launching the next one */
-		WaitForBackgroundWorkerShutdown(handle);
-		pfree(handle);
-	}
-
-	pfree(dbnames);
-	elog(DEBUG1, "end synchdb_auto_launcher_main");
-}
-
-/*
- * synchdb_db_launcher_main - per-database connector auto-launcher
-*/
-void
-synchdb_db_launcher_main(Datum main_arg)
-{
-	int ret = -1, numout = 0, i = 0;
-	char **out;
-	char *dbname = MyBgworkerEntry->bgw_extra;
-
-	/* Establish signal handlers; once that's done, unblock signals. */
-	pqsignal(SIGTERM, SignalHandlerForShutdownRequest);
-	pqsignal(SIGHUP, SignalHandlerForConfigReload);
-	pqsignal(SIGUSR1, procsignal_sigusr1_handler);
-	BackgroundWorkerUnblockSignals();
-
-	elog(DEBUG1, "start synchdb_db_launcher_main for database: %s", dbname);
-	BackgroundWorkerInitializeConnection(dbname, NULL, 0);
-
-	out = palloc0(sizeof(char *) * synchdb_max_connector_workers);
-
-	PG_TRY();
-	{
-		ret = ra_listConnInfoNames(out, &numout);
-	}
-	PG_CATCH();
-	{
-		/* synchdb is likely not installed in this database */
-		AbortCurrentTransaction();
-		FlushErrorState();
-		pfree(out);
-		elog(DEBUG1, "synchdb not found in database %s, skipping auto-launch", dbname);
-		return;
-	}
-	PG_END_TRY();
-
-	if (ret == 0)
-	{
-		for (i = 0; i < (numout > synchdb_max_connector_workers ?
-				synchdb_max_connector_workers : numout); i++)
-		{
-			elog(WARNING, "launching %s in database %s...", out[i], dbname);
-			StartTransactionCommand();
-			PushActiveSnapshot(GetTransactionSnapshot());
-
-			DirectFunctionCall1(synchdb_start_engine_bgw, CStringGetDatum(out[i]));
-
-			PopActiveSnapshot();
-			CommitTransactionCommand();
-			sleep(2);
-		}
-	}
-	pfree(out);
-	elog(DEBUG1, "end synchdb_db_launcher_main for database: %s", dbname);
-}
-
-/*
- * synchdb_start_leader_worker
- *
- * Helper function to start a auto connector launcher background worker
- */
-static void
-synchdb_start_leader_worker(void)
-{
-	BackgroundWorker worker;
-
-	MemSet(&worker, 0, sizeof(BackgroundWorker));
-	worker.bgw_flags = BGWORKER_SHMEM_ACCESS |
-			BGWORKER_BACKEND_DATABASE_CONNECTION;
-	worker.bgw_start_time = BgWorkerStart_ConsistentState;
-	worker.bgw_restart_time = BGW_NEVER_RESTART;
-	strcpy(worker.bgw_library_name, "synchdb");
-	strcpy(worker.bgw_function_name, "synchdb_auto_launcher_main");
-	strcpy(worker.bgw_name, "synchdb auto launcher");
-	strcpy(worker.bgw_type, "synchdb auto launcher");
-
-	RegisterBackgroundWorker(&worker);
+	/* Committed target work remains visible if subsequent ACK fails. */
+	set_shm_connector_statistics(connectorId, statistics);
+	if (dbz_mark_batch_complete(batch.batchId) < 0)
+		elog(ERROR, "Debezium batch confirmation failed after target commit; source session is frozen");
+	synchdb_registry_report_batch_completion(sdb_state, &worker.owner);
+	synchdb_registry_report_ready(sdb_state, &worker.owner, true);
+	if (refresh_offset)
+		set_shm_dbz_offset(connectorId);
 }
 
 /*
@@ -3360,29 +2177,9 @@ get_shm_connector_name(ConnectorType type)
 pid_t
 get_shm_connector_pid(int connectorId)
 {
-	if (!sdb_state)
-		return InvalidPid;
+	SynchdbRunView view;
 
-	return sdb_state->connectors[connectorId].pid;
-}
-
-/*
- * set_shm_connector_pid
- *
- * This function sets pid of the given connectorID
- *
- * @param connectorId: Connector ID of interest
- * @param pid: New pid value
- */
-void
-set_shm_connector_pid(int connectorId, pid_t pid)
-{
-	if (!sdb_state)
-		return;
-
-	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
-	sdb_state->connectors[connectorId].pid = pid;
-	LWLockRelease(&sdb_state->lock);
+	return read_connector_view(connectorId, &view) ? view.pid : InvalidPid;
 }
 
 /*
@@ -3397,11 +2194,13 @@ set_shm_connector_pid(int connectorId, pid_t pid)
 const char *
 get_shm_connector_errmsg(int connectorId)
 {
-	if (!sdb_state)
-		return "no error";
+	static char value[SYNCHDB_ERRMSG_SIZE];
+	SynchdbRunView view;
 
-	return (sdb_state->connectors[connectorId].errmsg[0] != '\0') ?
-			sdb_state->connectors[connectorId].errmsg : "no error";
+	strlcpy(value, "no error", sizeof(value));
+	if (read_connector_view(connectorId, &view) && view.errmsg[0] != '\0')
+		strlcpy(value, view.errmsg, sizeof(value));
+	return value;
 }
 
 /*
@@ -3416,63 +2215,8 @@ get_shm_connector_errmsg(int connectorId)
 void
 set_shm_connector_errmsg(int connectorId, const char *err)
 {
-	if (!sdb_state)
-		return;
-
-	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
-	strlcpy(sdb_state->connectors[connectorId].errmsg, err ? err : "", SYNCHDB_ERRMSG_SIZE);
-	LWLockRelease(&sdb_state->lock);
-}
-
-/*
- * get_shm_connector_stage - Get the current connector stage
- *
- * This function gets current connector stage based on the change request received.
- *
- * @param connectorId: Connector ID of interest
- *
- * @return connector stage in string
- */
-static const char *
-get_shm_connector_stage(int connectorId)
-{
-	ConnectorStage stage;
-
-	if (!sdb_state)
-		return "unknown";
-
-	/*
-	 * We're only reading, so shared lock is sufficient.
-	 * This ensures thread-safety without blocking other readers.
-	 */
-	LWLockAcquire(&sdb_state->lock, LW_SHARED);
-	stage = sdb_state->connectors[connectorId].stage;
-	LWLockRelease(&sdb_state->lock);
-
-	switch(stage)
-	{
-		case STAGE_INITIAL_SNAPSHOT:
-		{
-			return "initial snapshot";
-			break;
-		}
-		case STAGE_CHANGE_DATA_CAPTURE:
-		{
-			return "change data capture";
-			break;
-		}
-		case STAGE_SCHEMA_SYNC:
-		{
-			return "schema sync";
-			break;
-		}
-		case STAGE_UNDEF:
-		default:
-		{
-			break;
-		}
-	}
-	return "unknown";
+	if (connectorId == worker.owner.run.slot)
+		synchdb_registry_report_error(sdb_state, &worker.owner, err);
 }
 
 /*
@@ -3487,87 +2231,12 @@ get_shm_connector_stage(int connectorId)
 static void
 set_shm_connector_statistics(int connectorId, SynchdbStatistics * stats)
 {
-	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
-	/* CDC stats */
-	sdb_state->connectors[connectorId].stats.cdcstats.stats_ddl +=
-			stats->cdcstats.stats_ddl;
-	sdb_state->connectors[connectorId].stats.cdcstats.stats_dml +=
-			stats->cdcstats.stats_dml;
-	sdb_state->connectors[connectorId].stats.cdcstats.stats_create +=
-			stats->cdcstats.stats_create;
-	sdb_state->connectors[connectorId].stats.cdcstats.stats_update +=
-			stats->cdcstats.stats_update;
-	sdb_state->connectors[connectorId].stats.cdcstats.stats_delete +=
-			stats->cdcstats.stats_delete;
-	sdb_state->connectors[connectorId].stats.cdcstats.stats_tx +=
-			stats->cdcstats.stats_tx;
-	sdb_state->connectors[connectorId].stats.cdcstats.stats_truncate +=
-			stats->cdcstats.stats_truncate;
-
-	/* General stats */
-	sdb_state->connectors[connectorId].stats.genstats.stats_bad_change_event +=
-			stats->genstats.stats_bad_change_event;
-	sdb_state->connectors[connectorId].stats.genstats.stats_total_change_event +=
-			stats->genstats.stats_total_change_event;
-	sdb_state->connectors[connectorId].stats.genstats.stats_batch_completion +=
-			stats->genstats.stats_batch_completion;
-	/* the following should be overwritten \n */
-	sdb_state->connectors[connectorId].stats.genstats.stats_first_src_ts =
-			stats->genstats.stats_first_src_ts;
-	sdb_state->connectors[connectorId].stats.genstats.stats_first_pg_ts =
-			stats->genstats.stats_first_pg_ts;
-	sdb_state->connectors[connectorId].stats.genstats.stats_last_src_ts =
-			stats->genstats.stats_last_src_ts;
-	sdb_state->connectors[connectorId].stats.genstats.stats_last_pg_ts =
-			stats->genstats.stats_last_pg_ts;
-
-	/* Snapshot stats */
-	sdb_state->connectors[connectorId].stats.snapstats.snapstats_tables +=
-			stats->snapstats.snapstats_tables;
-	sdb_state->connectors[connectorId].stats.snapstats.snapstats_rows +=
-			stats->snapstats.snapstats_rows;
-
-	/* the following should be overwritten \n */
-	if (stats->snapstats.snapstats_begintime_ts > 0)
-	{
-		sdb_state->connectors[connectorId].stats.snapstats.snapstats_begintime_ts =
-				stats->snapstats.snapstats_begintime_ts;
-		/*
-		 * when begintime_ts is set, we assume it is the beginning of a snapshot, so
-		 * we set endtime_ts to 0 to indicate a fresh start.
-		 */
-		sdb_state->connectors[connectorId].stats.snapstats.snapstats_endtime_ts = 0;
-	}
-	if (stats->snapstats.snapstats_endtime_ts > 0)
-		sdb_state->connectors[connectorId].stats.snapstats.snapstats_endtime_ts =
-				stats->snapstats.snapstats_endtime_ts;
-	LWLockRelease(&sdb_state->lock);
+	if (connectorId == worker.owner.run.slot)
+		synchdb_registry_report_stats(sdb_state, &worker.owner, stats);
 }
 
-static void
-set_shm_connector_snapshot_statistics(int connectorId, SnapshotStatistics * snapstats)
-{
-	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
-	sdb_state->connectors[connectorId].stats.snapstats.snapstats_tables +=
-				snapstats->snapstats_tables;
-	sdb_state->connectors[connectorId].stats.snapstats.snapstats_rows +=
-				snapstats->snapstats_rows;
-	if (snapstats->snapstats_begintime_ts > 0)
-	{
-		sdb_state->connectors[connectorId].stats.snapstats.snapstats_begintime_ts =
-				snapstats->snapstats_begintime_ts;
-		/*
-		 * when begintime_ts is set, we assume it is the beginning of a snapshot, so
-		 * we set endtime_ts to 0 to indicate a fresh start.
-		 */
-		sdb_state->connectors[connectorId].stats.snapstats.snapstats_endtime_ts = 0;
-	}
-	if (snapstats->snapstats_endtime_ts > 0)
-		sdb_state->connectors[connectorId].stats.snapstats.snapstats_endtime_ts =
-				snapstats->snapstats_endtime_ts;
-	LWLockRelease(&sdb_state->lock);
-}
 
+#ifdef WITH_OLR
 static void
 is_snapshot_cdc_needed(const char* snapshotMode, bool isSnapshotDone, bool * snapshot, bool * cdc)
 {
@@ -3598,18 +2267,19 @@ is_snapshot_cdc_needed(const char* snapshotMode, bool isSnapshotDone, bool * sna
 	}
 	else
 	{
-		elog(WARNING, "snapshot mode %s not handled for OLR connector. Default to initial",
-				snapshotMode);
-		*snapshot = isSnapshotDone ? false : true;
-		*cdc = true;
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("snapshot mode \"%s\" is not supported by this snapshot engine",
+						snapshotMode)));
 	}
 }
-#ifdef WITH_OLR
 static void
 try_reconnect_olr(ConnectionInfo * connInfo)
 {
 	int ret = -1;
 
+	if (worker_should_stop())
+		proc_exit(0);
 	if (olr_client_get_connect_status())
 	{
 		elog(WARNING, "already connected.");
@@ -3732,7 +2402,7 @@ synchdb_ProcessUtility(PlannedStmt *pstmt,
                     const char *dbname = get_database_name(MyDatabaseId);
 
                     if (!sdb_state)
-                        synchdb_init_shmem();
+                        sdb_state = synchdb_registry_try_attach(synchdb_max_connector_workers);
 
                     if (has_running_connectors_for_db(dbname, running_name, sizeof(running_name)))
                     {
@@ -3759,173 +2429,70 @@ synchdb_ProcessUtility(PlannedStmt *pstmt,
 }
 
 static int
-launch_fdw_based_snapshot(ConnectorType connectorType, ConnectionInfo *connInfo, char * snapshotMode, bool schemahistory)
+launch_fdw_based_snapshot(ConnectorType connectorType, ConnectionInfo *connInfo,
+						  char *snapshotMode, bool schemahistory)
 {
-	/* FDW based snapshot and schema only sync processing logics here. */
-	char * snapshot_str = NULL;
-	int ret = -1, ntables = 0;
-	char * tbl_list = NULL;
-	char * err_offset = NULL;
+	SynchdbRunSpec spec = worker.run.spec;
+	SynchdbBootstrapResult *volatile result = NULL;
+	bool own_transaction = !IsTransactionOrTransactionBlock();
+	bool previous = synchdb_worker_sql_interruptible();
+	char *compatible_mode = NULL;
 
-	ret = ra_get_fdw_snapshot_err_table_list(connInfo->name, &tbl_list, &ntables, &err_offset);
-
-	if (ntables > 0 && tbl_list != NULL && err_offset != NULL)
+	(void) connectorType;
+	(void) schemahistory; /* History publication belongs to verified handoff. */
+	spec.connection = *connInfo;
+	strlcpy(spec.snapshot_mode, snapshotMode, sizeof(spec.snapshot_mode));
+	synchdb_bootstrap_require_mode(snapshotMode,
+			(connInfo->flag & CONNFLAG_SCHEMA_SYNC_MODE) != 0);
+	set_shm_connector_stage(myConnectorId,
+		(connInfo->flag & CONNFLAG_SCHEMA_SYNC_MODE) ? STAGE_SCHEMA_SYNC : STAGE_INITIAL_SNAPSHOT);
+	if (connInfo->isOraCompat)
+		compatible_mode = pstrdup(GetConfigOption("ivorysql.compatible_mode", false, false));
+	PG_TRY();
 	{
-		elog(WARNING, "Retry on failed snapshot tables %s at offset %s for %s",
-				tbl_list, err_offset, connInfo->name);
+		synchdb_worker_sql_enter();
+		if (own_transaction)
+		{
+			StartTransactionCommand();
+			PushActiveSnapshot(GetTransactionSnapshot());
+		}
+		if (compatible_mode)
+			SetConfigOption("ivorysql.compatible_mode", "pg", PGC_USERSET, PGC_S_OVERRIDE);
+		result = synchdb_bootstrap_execute(&spec, TopMemoryContext);
+		if (own_transaction)
+		{
+			PopActiveSnapshot();
+			CommitTransactionCommand();
+		}
 	}
-
-	/* sets the current stage based on request flag */
-	if (connInfo->flag & CONNFLAG_SCHEMA_SYNC_MODE)
+	PG_FINALLY();
 	{
-		if (get_shm_connector_stage_enum(myConnectorId) != STAGE_SCHEMA_SYNC)
-			set_shm_connector_stage(myConnectorId, STAGE_SCHEMA_SYNC);
+		synchdb_worker_sql_restore(previous);
+		if (compatible_mode)
+		{
+			SetConfigOption("ivorysql.compatible_mode", compatible_mode, PGC_USERSET, PGC_S_OVERRIDE);
+			pfree(compatible_mode);
+		}
+	}
+	PG_END_TRY();
+	worker.bootstrap = result;
+	synchdb_registry_report_bootstrap(sdb_state, &worker.owner, (int) result->status + 1);
+	/* Retain bootstrap flags: a resume command cannot jump into CDC. */
+	set_shm_connector_state(myConnectorId, STATE_PAUSED);
+	if (result->status != SYNCHDB_BOOTSTRAP_COMPLETE)
+	{
+		char *message = psprintf("FDW bootstrap %s: %llu complete, %llu failed tables. No CDC handoff; inspect the structured result before a new bootstrap.",
+			result->status == SYNCHDB_BOOTSTRAP_PARTIAL ? "PARTIAL" : "FAILED",
+			(unsigned long long) result->completed_tables, (unsigned long long) result->failed_tables);
+		set_shm_connector_errmsg(myConnectorId, message);
+		pfree(message);
 	}
 	else
-	{
-		if (get_shm_connector_stage_enum(myConnectorId) != STAGE_INITIAL_SNAPSHOT)
-			set_shm_connector_stage(myConnectorId, STAGE_INITIAL_SNAPSHOT);
-	}
-
-	/*
-	 * the fdw initial snapshot scripts are written according to pg parsing
-	 * standard, so we need to temporarily change to pg compatible mode for
-	 * the duration of the fdw snapshot
-	 */
-	if (connInfo->isOraCompat)
-	{
-		SetConfigOption("ivorysql.compatible_mode", "pg", PGC_USERSET, PGC_S_OVERRIDE);
-	}
-
-	/* invoke initial snapshot or schema sync PL/pgSQL workflow */
-	snapshot_str = ra_run_orafdw_initial_snapshot_spi(connectorType, connInfo, connInfo->flag, tbl_list,
-			err_offset, synchdb_fdw_use_subtx, schemahistory, snapshotMode, synchdb_letter_casing_strategy);
-
-	if (connInfo->isOraCompat)
-	{
-		SetConfigOption("ivorysql.compatible_mode", "oracle", PGC_USERSET, PGC_S_OVERRIDE);
-	}
-
-	if (snapshot_str)
-	{
-		if (connectorType == TYPE_ORACLE || connectorType == TYPE_OLR)
-		{
-			/* snapshot_str represents the scn */
-			connInfo->offsetdata.type = connectorType;
-			connInfo->offsetdata.data.oracle.oracle_scn = strtoull(snapshot_str, NULL, 10);
-			errno = 0;
-			if (errno != 0)
-			{
-				elog(ERROR, "failed to parse SCN '%s' as unsigned long long", snapshot_str);
-			}
-			elog(WARNING, "FDW based snapshot is done with SCN = %llu",
-					connInfo->offsetdata.data.oracle.oracle_scn);
-		}
-		else if (connectorType == TYPE_MYSQL)
-		{
-			/* todo snapshot_str represents binlog_file;binlog_pos;serverid */
-			connInfo->offsetdata.type = connectorType;
-			strlcpy(connInfo->offsetdata.data.mysql.binlog_file, strtok(snapshot_str, ";"),
-					sizeof(connInfo->offsetdata.data.mysql.binlog_file));
-
-			connInfo->offsetdata.data.mysql.binlog_pos = strtoull(strtok(NULL, ";"), NULL, 10);
-			errno = 0;
-			if (errno != 0)
-			{
-				elog(ERROR, "failed to parse SCN '%s' as unsigned long long", snapshot_str);
-			}
-
-			strlcpy(connInfo->offsetdata.data.mysql.server_id, strtok(NULL, ";"),
-					sizeof(connInfo->offsetdata.data.mysql.binlog_file));
-
-			elog(WARNING, "FDW based snapshot is done with binlog_file = %s, binlog_pos = %llu"
-					" server_id = %s",
-					connInfo->offsetdata.data.mysql.binlog_file,
-					connInfo->offsetdata.data.mysql.binlog_pos,
-					connInfo->offsetdata.data.mysql.server_id);
-		}
-		else if (connectorType == TYPE_POSTGRES)
-		{
-			/* snapshot_str represents lsn */
-			connInfo->offsetdata.type = connectorType;
-			connInfo->offsetdata.data.postgres.lsn = strtoull(snapshot_str, NULL, 10);
-			errno = 0;
-			if (errno != 0)
-			{
-				elog(ERROR, "failed to parse LSN '%s' as unsigned long long", snapshot_str);
-			}
-			elog(WARNING, "FDW based snapshot is done with LSN = %llu",
-					connInfo->offsetdata.data.postgres.lsn);
-		}
-		else if (connectorType == TYPE_SQLSERVER)
-		{
-			/* snapshot_str represents the commit_lsn, already formatted as Debezium's Lsn string */
-			connInfo->offsetdata.type = connectorType;
-			strlcpy(connInfo->offsetdata.data.sqlserver.commit_lsn, snapshot_str,
-					sizeof(connInfo->offsetdata.data.sqlserver.commit_lsn));
-
-			elog(WARNING, "FDW based snapshot is done with commit_lsn = %s",
-					connInfo->offsetdata.data.sqlserver.commit_lsn);
-		}
-		else
-		{
-			set_shm_connector_errmsg(myConnectorId, "unsupported connector type for fdw based snapshot");
-			elog(ERROR, "unsupported connector type for fdw based snapshot");
-		}
-
-		/* clean tbl_list and offset if needed */
-		if (tbl_list != NULL)
-		{
-			pfree(tbl_list);
-			tbl_list = NULL;
-		}
-
-		/* clean tbl_list and offset if needed */
-		if (err_offset != NULL)
-		{
-			pfree(err_offset);
-			err_offset = NULL;
-		}
-
-		ret = ra_get_fdw_snapshot_err_table_list(connInfo->name, &tbl_list, &ntables, &err_offset);
-		if (ret != 0 || ntables == 0 || tbl_list == NULL)
-		{
-			/* change the state to STATE_SCHEMA_SYNC_DONE to handle the transition */
-			set_shm_connector_state(myConnectorId, STATE_SCHEMA_SYNC_DONE);
-		}
-		else
-		{
-			/* some tables have failed... */
-			elog(WARNING, "FDW based snapshot is done with errors: failed tables are: %s",
-					tbl_list);
-
-			set_shm_connector_state(myConnectorId, STATE_PAUSED);
-			set_shm_connector_errmsg(myConnectorId, "some tables have failed the snapshot. "
-					"Check synchdb_fdw_snapshot_errors_x tables for datails. "
-					"Resume connector to try again");
-
-			if (tbl_list != NULL)
-				pfree(tbl_list);
-
-			if (err_offset != NULL)
-				pfree(err_offset);
-		}
-	}
-	else
-	{
-		elog(WARNING, "FDW based snapshot is not successfully done");
-
-		/* clean tbl_list if needed */
-		if (tbl_list != NULL)
-			pfree(tbl_list);
-
-		set_shm_connector_state(myConnectorId, STATE_PAUSED);
-		set_shm_connector_errmsg(myConnectorId, "FDW based snapshot "
-				"is not successfully done - connector paused for troubleshooting. "
-				"Send resume command to try again");
-	}
+		set_shm_connector_errmsg(myConnectorId, result->stop_after ? NULL :
+			"Schema bootstrap completed. CDC handoff is unavailable; resume is blocked.");
 	return 0;
 }
+
 /*
  * increment_connector_statistics - increment statistics
  *
@@ -3999,20 +2566,9 @@ increment_connector_statistics(SynchdbStatistics * myStats, ConnectorStatistics 
 ConnectorType
 get_shm_connector_type_enum(int connectorId)
 {
-	ConnectorType type;
+	SynchdbRunView view;
 
-	if (!sdb_state)
-		return TYPE_UNDEF;
-
-	/*
-	 * We're only reading, so shared lock is sufficient.
-	 * This ensures thread-safety without blocking other readers.
-	 */
-	LWLockAcquire(&sdb_state->lock, LW_SHARED);
-	type = sdb_state->connectors[connectorId].type;
-	LWLockRelease(&sdb_state->lock);
-
-	return type;
+	return read_connector_view(connectorId, &view) ? view.type : TYPE_UNDEF;
 }
 
 /*
@@ -4027,20 +2583,9 @@ get_shm_connector_type_enum(int connectorId)
 ConnectorStage
 get_shm_connector_stage_enum(int connectorId)
 {
-	ConnectorStage stage;
+	SynchdbRunView view;
 
-	if (!sdb_state)
-		return STAGE_UNDEF;
-
-	/*
-	 * We're only reading, so shared lock is sufficient.
-	 * This ensures thread-safety without blocking other readers.
-	 */
-	LWLockAcquire(&sdb_state->lock, LW_SHARED);
-	stage = sdb_state->connectors[connectorId].stage;
-	LWLockRelease(&sdb_state->lock);
-
-	return stage;
+	return read_connector_view(connectorId, &view) ? view.stage : STAGE_UNDEF;
 }
 
 /*
@@ -4054,12 +2599,8 @@ get_shm_connector_stage_enum(int connectorId)
 void
 set_shm_connector_stage(int connectorId, ConnectorStage stage)
 {
-	if (!sdb_state)
-		return;
-
-	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
-	sdb_state->connectors[connectorId].stage = stage;
-	LWLockRelease(&sdb_state->lock);
+	if (connectorId == worker.owner.run.slot)
+		synchdb_registry_report_stage(sdb_state, &worker.owner, stage);
 }
 
 /*
@@ -4077,20 +2618,9 @@ set_shm_connector_stage(int connectorId, ConnectorStage stage)
 const char *
 get_shm_connector_state(int connectorId)
 {
-	ConnectorState state;
-
-	if (!sdb_state)
+	if (!shm_connector_id_is_valid(connectorId))
 		return "stopped";
-
-	/*
-	 * We're only reading, so shared lock is sufficient.
-	 * This ensures thread-safety without blocking other readers.
-	 */
-	LWLockAcquire(&sdb_state->lock, LW_SHARED);
-	state = sdb_state->connectors[connectorId].state;
-	LWLockRelease(&sdb_state->lock);
-
-	return connectorStateAsString(state);
+	return connectorStateAsString(get_shm_connector_state_enum(connectorId));
 }
 
 /*
@@ -4107,20 +2637,9 @@ get_shm_connector_state(int connectorId)
 ConnectorState
 get_shm_connector_state_enum(int connectorId)
 {
-	ConnectorState state;
+	SynchdbRunView view;
 
-	if (!sdb_state)
-		return STATE_UNDEF;
-
-	/*
-	 * We're only reading, so shared lock is sufficient.
-	 * This ensures thread-safety without blocking other readers.
-	 */
-	LWLockAcquire(&sdb_state->lock, LW_SHARED);
-	state = sdb_state->connectors[connectorId].state;
-	LWLockRelease(&sdb_state->lock);
-
-	return state;
+	return read_connector_view(connectorId, &view) ? view.state : STATE_UNDEF;
 }
 
 /*
@@ -4135,12 +2654,8 @@ get_shm_connector_state_enum(int connectorId)
 void
 set_shm_connector_state(int connectorId, ConnectorState state)
 {
-	if (!sdb_state)
-		return;
-
-	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
-	sdb_state->connectors[connectorId].state = state;
-	LWLockRelease(&sdb_state->lock);
+	if (connectorId == worker.owner.run.slot)
+		synchdb_registry_report_state(sdb_state, &worker.owner, state);
 }
 
 /*
@@ -4160,11 +2675,11 @@ set_shm_dbz_offset(int connectorId)
 {
 	char *offset;
 
-	if (!sdb_state)
+	if (!shm_connector_id_is_valid(connectorId))
 		return;
 
 #ifdef WITH_OLR
-	if (sdb_state->connectors[connectorId].type == TYPE_OLR)
+	if (worker.run.spec.legacy_type == TYPE_OLR)
 	{
 		offset = psprintf("{\"scn\":%llu, \"c_scn\":%llu, \"c_idx\":%llu}",
 				olr_client_get_scn(), olr_client_get_c_scn(),
@@ -4178,10 +2693,8 @@ set_shm_dbz_offset(int connectorId)
 			return;
 	}
 
-	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
-	strlcpy(sdb_state->connectors[connectorId].dbzoffset, offset, SYNCHDB_ERRMSG_SIZE);
-	LWLockRelease(&sdb_state->lock);
-
+	if (connectorId == worker.owner.run.slot)
+		synchdb_registry_report_offset(sdb_state, &worker.owner, offset);
 	pfree(offset);
 }
 
@@ -4195,11 +2708,13 @@ set_shm_dbz_offset(int connectorId)
 const char *
 get_shm_dbz_offset(int connectorId)
 {
-	if (!sdb_state)
-		return "n/a";
+	static char value[SYNCHDB_ERRMSG_SIZE];
+	SynchdbRunView view;
 
-	return (sdb_state->connectors[connectorId].dbzoffset[0] != '\0') ?
-			sdb_state->connectors[connectorId].dbzoffset : "no offset";
+	strlcpy(value, "no offset", sizeof(value));
+	if (read_connector_view(connectorId, &view) && view.dbzoffset[0] != '\0')
+		strlcpy(value, view.dbzoffset, sizeof(value));
+	return value;
 }
 
 /*
@@ -4212,11 +2727,13 @@ get_shm_dbz_offset(int connectorId)
 const char *
 get_shm_connector_name_by_id(int connectorId)
 {
-	if (!sdb_state)
-		return "n/a";
+	static char value[SYNCHDB_ERRMSG_SIZE];
+	SynchdbRunView view;
 
-	return (sdb_state->connectors[connectorId].conninfo.name[0] != '\0') ?
-			sdb_state->connectors[connectorId].conninfo.name : "no name";
+	strlcpy(value, "no name", sizeof(value));
+	if (read_connector_view(connectorId, &view) && view.name[0] != '\0')
+		strlcpy(value, view.name, sizeof(value));
+	return value;
 }
 
 /*
@@ -4229,11 +2746,13 @@ get_shm_connector_name_by_id(int connectorId)
 const char *
 get_shm_connector_user_by_id(int connectorId)
 {
-	if (!sdb_state)
-		return "n/a";
+	static char value[SYNCHDB_ERRMSG_SIZE];
+	SynchdbRunView view;
 
-	return (sdb_state->connectors[connectorId].conninfo.user[0] != '\0') ?
-			sdb_state->connectors[connectorId].conninfo.user : "no user";
+	strlcpy(value, "no user", sizeof(value));
+	if (read_connector_view(connectorId, &view) && view.user[0] != '\0')
+		strlcpy(value, view.user, sizeof(value));
+	return value;
 }
 
 /*
@@ -4246,18 +2765,29 @@ get_shm_connector_user_by_id(int connectorId)
 bool
 get_shm_ora_compat(int connectorId)
 {
-	if (!sdb_state)
-		return false;
+	SynchdbRunView view;
 
-	return sdb_state->connectors[connectorId].conninfo.isOraCompat;
+	return read_connector_view(connectorId, &view) && view.isOraCompat;
 }
 
 /*
  * _PG_init - Initialize the SynchDB extension
  */
+static bool
+check_connector_capacity(int *value, void **extra, GucSource source)
+{
+	if (!synchdb_registry_capacity_compatible(*value))
+	{
+		GUC_check_errdetail("Connector capacity is fixed for the current server runtime; restart PostgreSQL to change it.");
+		return false;
+	}
+	return true;
+}
+
 void
 _PG_init(void)
 {
+	synchdb_credentials_register_guc();
 	DefineCustomIntVariable("synchdb.naptime",
 							"Duration between each data polling (in milliseconds).",
 							NULL,
@@ -4347,7 +2877,7 @@ _PG_init(void)
 							"number of threads to perform Debezium initial snapshot",
 							NULL,
 							&dbz_snapshot_thread_num,
-							2,
+							1,
 							1,
 							16,
 							PGC_SIGHUP,
@@ -4418,17 +2948,21 @@ _PG_init(void)
 							 NULL,
 							 NULL);
 
-	DefineCustomIntVariable("synchdb.max_connector_workers",
-							"max number of connector workers that can be run at any time. Higher number would occupy more"
-							"shared memory space",
-							NULL,
-							&synchdb_max_connector_workers,
-							30,
-							1,
-							65535,
-							PGC_SIGHUP,
-							0,
-							NULL, NULL, NULL);
+	/* Shared-array capacity cannot change after server startup. */
+	{
+		DefineCustomIntVariable("synchdb.max_connector_workers",
+								"max number of connector workers that can be run at any time. Higher number would occupy more"
+								"shared memory space",
+								NULL,
+								&synchdb_max_connector_workers,
+								30,
+								1,
+								65535,
+								/* Late definitions must replay SIGHUP-sourced placeholders. */
+								process_shared_preload_libraries_in_progress ? PGC_POSTMASTER : PGC_SIGHUP,
+								0,
+								check_connector_capacity, NULL, NULL);
+	}
 
 	DefineCustomEnumVariable("synchdb.error_handling_strategy",
 							 "strategy to handle error. Possible values are skip, exit, or retry",
@@ -4565,22 +3099,23 @@ _PG_init(void)
 							 NULL,
 							 NULL);
 
+	if (process_shared_preload_libraries_in_progress)
+		synchdb_registry_register_shmem(synchdb_max_connector_workers);
+
 	/* initialize data type mapping engine for all connectors */
 	fc_initFormatConverter(TYPE_MYSQL);
 	fc_initFormatConverter(TYPE_SQLSERVER);
 	fc_initFormatConverter(TYPE_ORACLE);
 	fc_initFormatConverter(TYPE_POSTGRES);
 
-	if (process_shared_preload_libraries_in_progress)
 	{
-		/* can't define PGC_POSTMASTER variable after startup */
 		DefineCustomBoolVariable("synchdb.synchdb_auto_launcher",
-								 "option to automatic launch connector workers at server restarts. This option "
-								 "only works when synchdb is included in shared_preload_library option. Default true",
+								 "Legacy compatibility option; durable controller recovery is always enabled "
+								 "when synchdb is preloaded. Legacy isactive rows require an explicit START.",
 								 NULL,
 								 &synchdb_auto_launcher,
 								 true,
-								 PGC_POSTMASTER,
+								 process_shared_preload_libraries_in_progress ? PGC_POSTMASTER : PGC_SIGHUP,
 								 0,
 								 NULL,
 								 NULL,
@@ -4606,10 +3141,8 @@ _PG_init(void)
 	}
 
 	/* Register synchdb auto launch worker, if enabled. */
-	if (synchdb_auto_launcher && process_shared_preload_libraries_in_progress)
-	{
-		synchdb_start_leader_worker();
-	}
+	if (process_shared_preload_libraries_in_progress)
+		synchdb_control_register_launcher();
 
  	prev_ProcessUtility = ProcessUtility_hook;
     ProcessUtility_hook = synchdb_ProcessUtility;
@@ -4618,18 +3151,21 @@ _PG_init(void)
 /*
  * synchdb_engine_main - Main entry point for the SynchDB background worker
  */
-void
-synchdb_engine_main(Datum main_arg)
+static void
+synchdb_engine_run(Datum main_arg)
 {
+	SynchdbWorkerRun *run = &worker.run;
 	ConnectorType connectorType;
-	ConnectionInfo connInfo = {0};
-	char * snapshotMode = NULL;
+	ConnectionInfo *connInfo = &run->execution;
+	char *snapshotMode = run->snapshot_mode;
+	bool completed = false;
 
 	/* extract connectorId from main_arg */
 	myConnectorId = DatumGetUInt32(main_arg);
 
 	/* Set up signal handlers, initialize shared memory and obtain connInfo*/
-	setup_environment(&connectorType, &connInfo, &snapshotMode);
+	setup_environment(run);
+	connectorType = run->spec.legacy_type;
 
 	/* Initialize the connector state */
 	set_shm_connector_state(myConnectorId, STATE_INITIALIZING);
@@ -4642,11 +3178,14 @@ synchdb_engine_main(Datum main_arg)
 	set_shm_connector_errmsg(myConnectorId, NULL);
 
 	/* initialize format converter and its cache */
+	worker.converter_live = true;
 	fc_initFormatConverter(connectorType);
+	worker.cache_live = true;
 	fc_initDataCache();
 
 	/* load custom object mappings */
-	fc_load_objmap(connInfo.name, connectorType);
+	load_worker_rules(connInfo->name, connectorType);
+	synchdb_worker_sql_restore(false);
 
 	switch (connectorType)
 	{
@@ -4655,67 +3194,24 @@ synchdb_engine_main(Datum main_arg)
 		case TYPE_ORACLE:
 		case TYPE_POSTGRES:
 		{
-			/* Initialize JVM */
-			initialize_jvm(&connInfo.jmx);
-
-			/* read current offset and update shm */
-			memset(sdb_state->connectors[myConnectorId].dbzoffset, 0, SYNCHDB_ERRMSG_SIZE);
-			set_shm_dbz_offset(myConnectorId);
-
-			/* set the desired snapshot engine */
-			connInfo.snapengine = synchdb_snapshot_engine;
-
-			if (connInfo.snapengine == ENGINE_DEBEZIUM)
+			/* A local bootstrap needs neither a JVM nor offset/history files. */
+			if (connInfo->snapengine == ENGINE_FDW)
+				synchdb_bootstrap_require_mode(snapshotMode,
+					(connInfo->flag & CONNFLAG_SCHEMA_SYNC_MODE) != 0);
+			else
 			{
-				/*
-				 * All debezium based connectors support debezium-based snapshot,
-				 * so, just launch debezium and let it take care of everything in
-				 * the main_loop. Debezium knows whether or not a snapshot has
-				 * been done before or needs to do again.
-				 */
-				start_debezium_engine(connectorType, &connInfo, snapshotMode);
+				initialize_jvm(&connInfo->jmx, &connInfo->run_options);
+				set_shm_dbz_offset(myConnectorId);
 			}
-			else if (connInfo.snapengine == ENGINE_FDW)
+
+			if (!start_snapshot_run(connectorType, connInfo, snapshotMode))
 			{
-				/*
-				 * FDW based snapshot is selected, we have to check if a snapshot
-				 * has been done before and whether or not the given snapshotMode
-				 * requires us to do snapshot again
-				 */
-				const char * curroffset = get_shm_dbz_offset(myConnectorId);
-				bool isSnapshotDone = false;
-				bool snapshot = false, cdc = false;;
-
-				isSnapshotDone = dbz_read_snapshot_state(connectorType, curroffset);
-				is_snapshot_cdc_needed(snapshotMode, isSnapshotDone, &snapshot, &cdc);
-
-				elog(WARNING,"snapshot mode %s: isSnapshotDone %d, snapshot %d, cdc %d",
-						snapshotMode, isSnapshotDone, snapshot, cdc);
-
-				/* xxx set no cdc flag if requested - does it apply here?? */
-				if (!cdc)
-					connInfo.flag |= CONNFLAG_NO_CDC_MODE;
-
-				if (snapshot)
-				{
-					/*
-					 * indicate to main_loop that we want to do initial snapshot
-					 * via FDW by ourselves and not use debezium engine.
-					 */
-					connInfo.flag |= CONNFLAG_INITIAL_SNAPSHOT_MODE;
-
-					/* set to the right state */
-					set_shm_connector_state(myConnectorId, STATE_SYNCING);
-				}
-				else
-				{
-					/* snapshot already done, start debezium and resume CDC normally */
-					start_debezium_engine(connectorType, &connInfo, snapshotMode);
-				}
+				completed = true;
+				break;
 			}
 
 			elog(LOG, "Going to main loop .... ");
-			main_loop(connectorType, &connInfo, snapshotMode);
+			completed = main_loop(run);
 			break;
 		}
 		case TYPE_OLR:
@@ -4724,11 +3220,17 @@ synchdb_engine_main(Datum main_arg)
 			bool isSnapshotDone = false;
 			bool snapshot = false, cdc = false;
 
-			/* set the desired snapshot engine */
-			connInfo.snapengine = synchdb_snapshot_engine;
-
-			if (!olr_client_read_snapshot_state(connectorType, connInfo.name,
-					connInfo.dstdb, &isSnapshotDone))
+			if (connInfo->snapengine == ENGINE_FDW)
+			{
+				synchdb_bootstrap_require_mode(snapshotMode,
+					(connInfo->flag & CONNFLAG_SCHEMA_SYNC_MODE) != 0);
+				connInfo->flag |= CONNFLAG_INITIAL_SNAPSHOT_MODE | CONNFLAG_NO_CDC_MODE;
+				set_shm_connector_state(myConnectorId, STATE_SYNCING);
+				completed = main_loop(run);
+				break;
+			}
+			if (!olr_client_read_snapshot_state(connectorType, connInfo->name,
+					connInfo->dstdb, &isSnapshotDone))
 			{
 				elog(WARNING, "Snapshot file absent. Assuming snapshot is not done...");
 			}
@@ -4740,23 +3242,23 @@ synchdb_engine_main(Datum main_arg)
 
 			/* set no cdc flag if requested */
 			if (!cdc)
-				connInfo.flag |= CONNFLAG_NO_CDC_MODE;
+				connInfo->flag |= CONNFLAG_NO_CDC_MODE;
 
 			if (snapshot)
 			{
 				/* indicate to main_loop that we need to do initial snapshot */
-				connInfo.flag |= CONNFLAG_INITIAL_SNAPSHOT_MODE;
+				connInfo->flag |= CONNFLAG_INITIAL_SNAPSHOT_MODE;
 
 				/* start JVM if needed */
-				if (connInfo.snapengine == ENGINE_DEBEZIUM)
+				if (connInfo->snapengine == ENGINE_DEBEZIUM)
 				{
 					/* Initialize JVM */
-					initialize_jvm(&connInfo.jmx);
+					initialize_jvm(&connInfo->jmx, &connInfo->run_options);
 
 					/* start Debezium engine */
-					start_debezium_engine(connectorType, &connInfo, snapshotMode);
+					start_debezium_engine(connectorType, connInfo, snapshotMode);
 				}
-				else if (connInfo.snapengine == ENGINE_FDW)
+				else if (connInfo->snapengine == ENGINE_FDW)
 				{
 					/* no preparation needed, just set the state */
 					set_shm_connector_state(myConnectorId, STATE_SYNCING);
@@ -4764,41 +3266,40 @@ synchdb_engine_main(Datum main_arg)
 				else
 				{
 					set_shm_connector_errmsg(myConnectorId, "unsupported snapshot engine");
-					elog(ERROR, "unsupported snapshot engine %d", connInfo.snapengine);
+					elog(ERROR, "unsupported snapshot engine %d", connInfo->snapengine);
 				}
 
 				elog(LOG, "Going to main loop .... ");
-				main_loop(connectorType, &connInfo, snapshotMode);
+				completed = main_loop(run);
 			}
 			else
 			{
 				int ret = -1;
 
-				if (connInfo.flag & CONNFLAG_NO_CDC_MODE)
+				if (connInfo->flag & CONNFLAG_NO_CDC_MODE)
 				{
 					elog(WARNING, "CDC is not requested in snapshot mode '%s'. Exit...", snapshotMode);
-					set_shm_connector_errmsg(myConnectorId, "CDC not requested");
-					proc_exit(0);
+					completed = true;
+					break;
 				}
 				/* read resume scn if exists */
-				if (!olr_client_init_scn_state(connectorType, connInfo.name, connInfo.dstdb))
+				if (!olr_client_init_scn_state(connectorType, connInfo->name, connInfo->dstdb))
 					elog(WARNING, "scn file not flushed yet");
 				else
 				{
 					/* set current scn offset in shared memory for state display */
-					memset(sdb_state->connectors[myConnectorId].dbzoffset, 0, SYNCHDB_ERRMSG_SIZE);
-					set_shm_dbz_offset(myConnectorId);
+							set_shm_dbz_offset(myConnectorId);
 				}
 
-				ret = olr_client_init(connInfo.olr.olr_host, connInfo.olr.olr_port);
+				ret = olr_client_init(connInfo->olr.olr_host, connInfo->olr.olr_port);
 				if (ret)
 				{
 					set_shm_connector_errmsg(myConnectorId, "failed to init and connect to olr server");
 					elog(ERROR, "failed to init and connect to olr server");
 				}
 
-				/* connInfo.srcdb is used as data source for OLR */
-				ret = olr_client_start_or_cont_replication(connInfo.olr.olr_source, true);
+				/* connInfo->srcdb is used as data source for OLR */
+				ret = olr_client_start_or_cont_replication(connInfo->olr.olr_source, true);
 				if (ret == -1)
 				{
 					set_shm_connector_errmsg(myConnectorId, "failed to start replication with olr server");
@@ -4808,7 +3309,7 @@ synchdb_engine_main(Datum main_arg)
 				if (ret == RES_ALREADY_STARTED || ret == RES_STARTING)
 				{
 					elog(WARNING, "replication already started or starting - sending continue");
-					ret = olr_client_start_or_cont_replication(connInfo.olr.olr_source, false);
+					ret = olr_client_start_or_cont_replication(connInfo->olr.olr_source, false);
 					if (ret == -1)
 					{
 						set_shm_connector_errmsg(myConnectorId, "failed to start replication with olr server");
@@ -4821,7 +3322,7 @@ synchdb_engine_main(Datum main_arg)
 					set_shm_connector_state(myConnectorId, STATE_SYNCING);
 
 					elog(LOG, "Going to main loop .... ");
-					main_loop(connectorType, &connInfo, snapshotMode);
+					main_loop(run);
 				}
 				else if (ret == RES_INVALID_DATABASE)
 				{
@@ -4861,11 +3362,117 @@ synchdb_engine_main(Datum main_arg)
 		}
 	}
 
-	if (snapshotMode)
-		pfree(snapshotMode);
+	if (completed)
+	{
+		if (!cleanup(connectorType))
+			elog(ERROR, "could not finish cleanup of snapshot-only connector %s", connInfo->name);
+		/* The controller retires the compatibility active flag after this
+		 * process exits; terminal worker cleanup must not wait on catalog rows. */
+		elog(LOG, "snapshot-only connector %s completed", connInfo->name);
+	}
 
 	elog(LOG, "synchdb worker shutting down .... ");
 	proc_exit(0);
+}
+
+void
+synchdb_engine_main(Datum main_arg)
+{
+    PG_TRY();
+    {
+        synchdb_engine_run(main_arg);
+    }
+    PG_CATCH();
+    {
+        ErrorData *error;
+
+        MemoryContextSwitchTo(TopMemoryContext);
+        error=CopyErrorData();
+        synchdb_registry_report_failure(sdb_state,&worker.owner,error->sqlerrcode,error->message);
+        FreeErrorData(error);
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+}
+
+/* The controller owns native handles and decides whether to retry. */
+BackgroundWorkerHandle *
+synchdb_control_start_worker(const SynchdbRunSpec *spec, Oid execution_role,
+                            uint64 controller_generation, SynchdbRunHandle *run)
+{
+    BackgroundWorker bgw={0};
+    BackgroundWorkerHandle *volatile handle=NULL;
+    SynchdbWorkerStartup startup;
+    MemoryContext caller=CurrentMemoryContext;
+
+    synchdb_init_shmem();
+    *run=synchdb_registry_reserve(sdb_state,spec,false);
+    PG_TRY();
+    {
+        if (!synchdb_registry_assign_controller(sdb_state,run,controller_generation))
+            elog(ERROR,"could not assign connector controller");
+        bgw.bgw_flags=BGWORKER_SHMEM_ACCESS|BGWORKER_BACKEND_DATABASE_CONNECTION;
+        bgw.bgw_start_time=BgWorkerStart_ConsistentState;
+        bgw.bgw_restart_time=BGW_NEVER_RESTART;
+        bgw.bgw_notify_pid=MyProcPid;
+        strlcpy(bgw.bgw_library_name,SYNCHDB_LIBRARY_NAME,BGW_MAXLEN);
+        strlcpy(bgw.bgw_function_name,"synchdb_engine_main",BGW_MAXLEN);
+        prepare_bgw(&bgw,spec,run);
+        memcpy(&startup,bgw.bgw_extra,sizeof(startup));
+        startup.execution_role=execution_role;
+        startup.controller_generation=controller_generation;
+        memcpy(bgw.bgw_extra,&startup,sizeof(startup));
+        MemoryContextSwitchTo(TopMemoryContext);
+        if (!RegisterDynamicBackgroundWorker(&bgw,(BackgroundWorkerHandle **)&handle))
+            ereport(ERROR,(errcode(ERRCODE_INSUFFICIENT_RESOURCES),
+                            errmsg("no background worker slot for connector")));
+        MemoryContextSwitchTo(caller);
+    }
+    PG_CATCH();
+    {
+        MemoryContextSwitchTo(caller);
+        if (handle)
+            TerminateBackgroundWorker(handle);
+        (void) synchdb_registry_cancel(sdb_state,run);
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+    return handle;
+}
+
+void
+synchdb_control_capture_spec(const char *name, const char *mode, SynchdbRunSpec *spec)
+{
+    ConnectionInfo connection={0};
+    char *connector=NULL;
+
+    if (ra_getConninfoByName(name,&connection,&connector)!=0)
+        ereport(ERROR,(errcode(ERRCODE_UNDEFINED_OBJECT),errmsg("connector does not exist")));
+    build_run_spec(spec,&connection,fc_get_connector_type(connector),mode);
+}
+
+void
+synchdb_control_build_spec(const char *name, const char *mode, Jsonb *options,
+                          int snapshot_engine, bool schema_sync, bool oracle_compatible,
+                          SynchdbRunSpec *spec)
+{
+    ConnectionInfo connection={0};
+    char *connector=NULL;
+
+    if (ra_getConninfoByName(name,&connection,&connector)!=0)
+        ereport(ERROR,(errcode(ERRCODE_UNDEFINED_OBJECT),errmsg("connector does not exist")));
+    connection.snapengine=snapshot_engine;
+    connection.isOraCompat=oracle_compatible;
+    if (schema_sync)
+        connection.flag |= CONNFLAG_SCHEMA_SYNC_MODE;
+    synchdb_run_options_from_json(options,&connection.run_options);
+    synchdb_run_spec_init(spec,fc_get_connector_type(connector),&connection,mode);
+}
+
+static int32
+start_registered_worker(const SynchdbRunSpec *spec)
+{
+    return synchdb_control_receipt(synchdb_control_enqueue(spec->connection.name,"START",spec,NULL));
 }
 
 /*
@@ -4876,14 +3483,10 @@ synchdb_engine_main(Datum main_arg)
 Datum
 synchdb_start_engine_bgw_snapshot_mode(PG_FUNCTION_ARGS)
 {
-	BackgroundWorker worker;
-	BackgroundWorkerHandle *handle;
-	BgwHandleStatus status;
-	pid_t pid;
 	ConnectionInfo connInfo = {0};
+	SynchdbRunSpec run;
 	char *connector = NULL;
-	int ret = -1, connectorid = -1;
-	StringInfoData strinfo;
+	int ret = -1;
 	char * _snapshotMode = "initial";
 
 	/* Parse input arguments */
@@ -4894,7 +3497,7 @@ synchdb_start_engine_bgw_snapshot_mode(PG_FUNCTION_ARGS)
 	if (ret)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("[synchdb_start_engine_bgw_snapshot_mode] connection name does not exist: %s", name),
+				 errmsg("[synchdb_start_engine_bgw_snapshot_mode] connection name does not exist: %s", NameStr(*name)),
 				 errhint("use synchdb_add_conninfo to add one first")));
 
 	_snapshotMode = NameStr(*snapshotmode);
@@ -4903,6 +3506,7 @@ synchdb_start_engine_bgw_snapshot_mode(PG_FUNCTION_ARGS)
 		_snapshotMode = "no_data";
 		connInfo.flag |= CONNFLAG_SCHEMA_SYNC_MODE;
 	}
+
 
 #ifdef WITH_OLR
 	/* check if OLR conninfo exists and warn user to add it as needed */
@@ -4917,64 +3521,9 @@ synchdb_start_engine_bgw_snapshot_mode(PG_FUNCTION_ARGS)
 				 errhint("use synchdb_add_olr_conninfo to add it")));
 	}
 #endif
-	/*
-	 * attach or initialize synchdb shared memory area so we can assign
-	 * a connector ID for this worker
-	 */
-	synchdb_init_shmem();
-	if (!sdb_state)
-		ereport(ERROR,
-				(errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("failed to init or attach to synchdb shared memory")));
+	build_run_spec(&run, &connInfo, fc_get_connector_type(connector), _snapshotMode);
 
-	connectorid = assign_connector_id(connInfo.name, connInfo.dstdb);
-	if (connectorid == -1)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("max number of connectors reached"),
-				 errhint("use synchdb_stop_engine_bgw to stop some active connectors")));
-
-	/* prepare background worker */
-	MemSet(&worker, 0, sizeof(BackgroundWorker));
-	worker.bgw_flags = BGWORKER_SHMEM_ACCESS |
-					   BGWORKER_BACKEND_DATABASE_CONNECTION;
-	worker.bgw_start_time = BgWorkerStart_ConsistentState;
-	if (synchdb_error_strategy == STRAT_RETRY_ON_ERROR)
-		worker.bgw_restart_time = 5;
-	else
-		worker.bgw_restart_time = BGW_NEVER_RESTART;
-	worker.bgw_notify_pid = MyProcPid;
-
-	strcpy(worker.bgw_library_name, "synchdb");
-	strcpy(worker.bgw_function_name, "synchdb_engine_main");
-
-	prepare_bgw(&worker, &connInfo, connector, connectorid, _snapshotMode);
-
-	if (!RegisterDynamicBackgroundWorker(&worker, &handle))
-		ereport(ERROR,
-				(errcode(ERRCODE_INSUFFICIENT_RESOURCES),
-				 errmsg("could not register background process"),
-				 errhint("You may need to increase max_worker_processes.")));
-
-	status = WaitForBackgroundWorkerStartup(handle, &pid);
-	if (status != BGWH_STARTED)
-		ereport(ERROR,
-				(errcode(ERRCODE_INSUFFICIENT_RESOURCES),
-				 errmsg("could not start background process"),
-				 errhint("More details may be available in the server log.")));
-
-	/*
-	 * mark this conninfo as active so it can automatically resume running at
-	 * postgresql server restarts given that synchdb is included in
-	 * shared_preload_library GUC
-	 */
-	initStringInfo(&strinfo);
-	appendStringInfo(&strinfo, "UPDATE synchdb_conninfo set isactive = true "
-			"WHERE name = '%s'", NameStr(*name));
-
-	ra_executeCommand(strinfo.data);
-
-	PG_RETURN_INT32(0);
+	PG_RETURN_INT32(start_registered_worker(&run));
 }
 
 /*
@@ -4985,14 +3534,10 @@ synchdb_start_engine_bgw_snapshot_mode(PG_FUNCTION_ARGS)
 Datum
 synchdb_start_engine_bgw(PG_FUNCTION_ARGS)
 {
-	BackgroundWorker worker;
-	BackgroundWorkerHandle *handle;
-	BgwHandleStatus status;
-	pid_t pid;
 	ConnectionInfo connInfo = {0};
+	SynchdbRunSpec run;
 	char *connector = NULL;
-	int ret = -1, connectorid = -1;
-	StringInfoData strinfo;
+	int ret = -1;
 	/* By default, we use snapshot mode = initial */
 	char * snapshotMode = "initial";
 
@@ -5003,7 +3548,7 @@ synchdb_start_engine_bgw(PG_FUNCTION_ARGS)
 	if (ret)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("[synchdb_start_engine_bgw] connection name does not exist: %s", name),
+				 errmsg("[synchdb_start_engine_bgw] connection name does not exist: %s", NameStr(*name)),
 				 errhint("use synchdb_add_conninfo to add one first")));
 
 #ifdef WITH_OLR
@@ -5019,64 +3564,9 @@ synchdb_start_engine_bgw(PG_FUNCTION_ARGS)
 				 errhint("use synchdb_add_olr_conninfo to add it")));
 	}
 #endif
-	/*
-	 * attach or initialize synchdb shared memory area so we can assign
-	 * a connector ID for this worker
-	 */
-	synchdb_init_shmem();
-	if (!sdb_state)
-		ereport(ERROR,
-				(errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("failed to init or attach to synchdb shared memory")));
+	build_run_spec(&run, &connInfo, fc_get_connector_type(connector), snapshotMode);
 
-	connectorid = assign_connector_id(connInfo.name, connInfo.dstdb);
-	if (connectorid == -1)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("max number of connectors reached"),
-				 errhint("use synchdb_stop_engine_bgw to stop some active connectors")));
-
-	/* prepare background worker */
-	MemSet(&worker, 0, sizeof(BackgroundWorker));
-	worker.bgw_flags = BGWORKER_SHMEM_ACCESS |
-					   BGWORKER_BACKEND_DATABASE_CONNECTION;
-	worker.bgw_start_time = BgWorkerStart_ConsistentState;
-	if (synchdb_error_strategy == STRAT_RETRY_ON_ERROR)
-		worker.bgw_restart_time = 5;
-	else
-		worker.bgw_restart_time = BGW_NEVER_RESTART;
-	worker.bgw_notify_pid = MyProcPid;
-
-	strcpy(worker.bgw_library_name, "synchdb");
-	strcpy(worker.bgw_function_name, "synchdb_engine_main");
-
-	prepare_bgw(&worker, &connInfo, connector, connectorid, snapshotMode);
-
-	if (!RegisterDynamicBackgroundWorker(&worker, &handle))
-		ereport(ERROR,
-				(errcode(ERRCODE_INSUFFICIENT_RESOURCES),
-				 errmsg("could not register background process"),
-				 errhint("You may need to increase max_worker_processes.")));
-
-	status = WaitForBackgroundWorkerStartup(handle, &pid);
-	if (status != BGWH_STARTED)
-		ereport(ERROR,
-				(errcode(ERRCODE_INSUFFICIENT_RESOURCES),
-				 errmsg("could not start background process"),
-				 errhint("More details may be available in the server log.")));
-
-	/*
-	 * mark this conninfo as active so it can automatically resume running at
-	 * postgresql server restarts given that synchdb is included in
-	 * shared_preload_library GUC
-	 */
-	initStringInfo(&strinfo);
-	appendStringInfo(&strinfo, "UPDATE synchdb_conninfo set isactive = true "
-			"WHERE name = '%s'", NameStr(*name));
-
-	ra_executeCommand(strinfo.data);
-
-	PG_RETURN_INT32(0);
+	PG_RETURN_INT32(start_registered_worker(&run));
 }
 
 /*
@@ -5087,57 +3577,9 @@ synchdb_start_engine_bgw(PG_FUNCTION_ARGS)
 Datum
 synchdb_stop_engine_bgw(PG_FUNCTION_ARGS)
 {
-	int connectorId;
-	pid_t pid;
-	StringInfoData strinfo;
+    Name name=PG_GETARG_NAME(0);
 
-	/* Parse input arguments */
-	Name name = PG_GETARG_NAME(0);
-
-	/*
-	 * attach or initialize synchdb shared memory area so we know what is
-	 * going on
-	 */
-	synchdb_init_shmem();
-	if (!sdb_state)
-		ereport(ERROR,
-				(errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("failed to init or attach to synchdb shared memory")));
-
-	connectorId = get_shm_connector_id_by_name(NameStr(*name), get_database_name(MyDatabaseId));
-	if (connectorId < 0)
-		ereport(ERROR,
-				(errmsg("dbz connector (%s) does not have connector ID assigned",
-						NameStr(*name)),
-				 errhint("use synchdb_start_engine_bgw() to assign one first")));
-
-	/*
-	 * mark this conninfo as inactive so it will not automatically resume running
-	 * at postgresql server restarts given that synchdb is included in
-	 * shared_preload_library GUC
-	 */
-	initStringInfo(&strinfo);
-	appendStringInfo(&strinfo, "UPDATE synchdb_conninfo set isactive = false "
-			"WHERE name = '%s'", NameStr(*name));
-
-	ra_executeCommand(strinfo.data);
-
-	pid = get_shm_connector_pid(connectorId);
-	if (pid != InvalidPid)
-	{
-		elog(WARNING, "terminating dbz connector (%s) with pid %d. Shutdown timeout: %d ms",
-				NameStr(*name), (int)pid, DEBEZIUM_SHUTDOWN_TIMEOUT_MSEC);
-		DirectFunctionCall2(pg_terminate_backend, UInt32GetDatum(pid), Int64GetDatum(DEBEZIUM_SHUTDOWN_TIMEOUT_MSEC));
-		set_shm_connector_pid(connectorId, InvalidPid);
-
-	}
-	else
-	{
-		ereport(ERROR,
-				(errmsg("dbz connector (%s) is not running", NameStr(*name)),
-				 errhint("use synchdb_start_engine_bgw() to start a worker first")));
-	}
-	PG_RETURN_INT32(0);
+    PG_RETURN_INT32(synchdb_control_receipt(synchdb_control_enqueue(NameStr(*name),"STOP",NULL,NULL)));
 }
 
 /*
@@ -5145,6 +3587,57 @@ synchdb_stop_engine_bgw(PG_FUNCTION_ARGS)
  *
  * This function dumps the states of all connectors
  */
+/* Catalog identity resolution stays outside the runtime registry. */
+static SynchdbControllerTarget
+controller_target(const char *name, const SynchdbConnectorKey *known_key, bool running)
+{
+	SynchdbControllerTarget target = {0};
+	SynchdbConnectorKey key;
+	int64 revision;
+
+	synchdb_init_shmem();
+	if (!sdb_state)
+		elog(ERROR, "could not attach to connector registry");
+	if (known_key)
+		key = *known_key;
+	else if (!synchdb_connector_store_get_identity(name, &key, &revision))
+		ereport(ERROR, (errcode(ERRCODE_UNDEFINED_OBJECT),
+						errmsg("connector \"%s\" does not exist", name)));
+	if (!synchdb_registry_capture(sdb_state, &key, running, &target))
+	{
+		if (target.run.slot < 0)
+			ereport(ERROR, (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+							errmsg("connector \"%s\" has no assigned worker slot", name)));
+		ereport(ERROR, (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+						errmsg("connector \"%s\" has no running worker", name)));
+	}
+	return target;
+}
+
+static const char *
+controller_stage_name(ConnectorStage stage)
+{
+	switch (stage)
+	{
+		case STAGE_INITIAL_SNAPSHOT: return "initial snapshot";
+		case STAGE_CHANGE_DATA_CAPTURE: return "change data capture";
+		case STAGE_SCHEMA_SYNC: return "schema sync";
+		default: return "unknown";
+	}
+}
+
+static const char *
+controller_state_name(const SynchdbRunView *entry)
+{
+	switch (entry->lifecycle)
+	{
+		case SYNCHDB_RUN_RESERVED: return "reserved";
+		case SYNCHDB_RUN_RETRY_WAIT: return "retry_wait";
+		case SYNCHDB_RUN_STOPPING: return "stopping";
+		default: return connectorStateAsString(entry->state);
+	}
+}
+
 Datum
 synchdb_get_state(PG_FUNCTION_ARGS)
 {
@@ -5156,11 +3649,6 @@ synchdb_get_state(PG_FUNCTION_ARGS)
 	 * going on
 	 */
 	synchdb_init_shmem();
-	if (!sdb_state)
-		ereport(ERROR,
-				(errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("failed to init or attach to synchdb shared memory")));
-
 	if (SRF_IS_FIRSTCALL())
 	{
 		MemoryContext oldcontext;
@@ -5175,38 +3663,22 @@ synchdb_get_state(PG_FUNCTION_ARGS)
 	funcctx = SRF_PERCALL_SETUP();
 	idx = (int *)funcctx->user_fctx;
 
-	while (*idx < synchdb_max_connector_workers)
+	while (true)
 	{
 		Datum values[7];
 		bool nulls[7] = {0};
 		HeapTuple tuple;
+		SynchdbRunView row;
 
-		/* skip slots cleared by synchdb_del_conninfo */
-		if (sdb_state->connectors[*idx].conninfo.name[0] == '\0')
-		{
-				(*idx)++;
-				continue;
-		}
-
-		/* we only want to show the connectors created in current database */
-		if (strcasecmp(sdb_state->connectors[*idx].conninfo.dstdb,
-				get_database_name(MyDatabaseId)))
-		{
-	        (*idx)++;
-	        continue;
-		}
-
-		LWLockAcquire(&sdb_state->lock, LW_SHARED);
-		values[0] = CStringGetTextDatum(sdb_state->connectors[*idx].conninfo.name);
-		values[1] = CStringGetTextDatum(get_shm_connector_name(sdb_state->connectors[*idx].type));
-		values[2] = Int32GetDatum((int)get_shm_connector_pid(*idx));
-		values[3] = CStringGetTextDatum(get_shm_connector_stage(*idx));
-		values[4] = CStringGetTextDatum(get_shm_connector_state(*idx));
-		values[5] = CStringGetTextDatum(get_shm_connector_errmsg(*idx));
-		values[6] = CStringGetTextDatum(get_shm_dbz_offset(*idx));
-		LWLockRelease(&sdb_state->lock);
-
-		*idx += 1;
+		if (!synchdb_registry_next_view(sdb_state, MyDatabaseId, idx, &row))
+			break;
+		values[0] = CStringGetTextDatum(row.name);
+		values[1] = CStringGetTextDatum(get_shm_connector_name(row.type));
+		values[2] = Int32GetDatum((int)row.pid);
+		values[3] = CStringGetTextDatum(controller_stage_name(row.stage));
+		values[4] = CStringGetTextDatum(controller_state_name(&row));
+		values[5] = CStringGetTextDatum(row.errmsg[0] ? row.errmsg : "no error");
+		values[6] = CStringGetTextDatum(row.dbzoffset[0] ? row.dbzoffset : "no offset");
 
 		tuple = heap_form_tuple(funcctx->tuple_desc, values, nulls);
 		SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(tuple));
@@ -5230,11 +3702,6 @@ synchdb_get_stats(PG_FUNCTION_ARGS)
 	 * going on
 	 */
 	synchdb_init_shmem();
-	if (!sdb_state)
-		ereport(ERROR,
-				(errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("failed to init or attach to synchdb shared memory")));
-
 	if (SRF_IS_FIRSTCALL())
 	{
 		MemoryContext oldcontext;
@@ -5249,59 +3716,43 @@ synchdb_get_stats(PG_FUNCTION_ARGS)
 	funcctx = SRF_PERCALL_SETUP();
 	idx = (int *)funcctx->user_fctx;
 
-	while (*idx < synchdb_max_connector_workers)
+	while (true)
 	{
 		Datum values[20];
 		bool nulls[20] = {0};
 		HeapTuple tuple;
+		SynchdbRunView row;
 
-		/* skip slots cleared by synchdb_del_conninfo */
-		if (sdb_state->connectors[*idx].conninfo.name[0] == '\0')
-		{
-				(*idx)++;
-				continue;
-		}
-
-		/* we only want to show the connectors created in current database */
-		if (strcasecmp(sdb_state->connectors[*idx].conninfo.dstdb,
-				get_database_name(MyDatabaseId)))
-		{
-	        (*idx)++;
-	        continue;
-		}
-
-		LWLockAcquire(&sdb_state->lock, LW_SHARED);
-		values[0] = CStringGetTextDatum(sdb_state->connectors[*idx].conninfo.name);
+		if (!synchdb_registry_next_view(sdb_state, MyDatabaseId, idx, &row))
+			break;
+		values[0] = CStringGetTextDatum(row.name);
 		/* cdc stats */
-		values[1] = Int64GetDatum(sdb_state->connectors[*idx].stats.cdcstats.stats_ddl);
-		values[2] = Int64GetDatum(sdb_state->connectors[*idx].stats.cdcstats.stats_dml);
-		values[3] = Int64GetDatum(sdb_state->connectors[*idx].stats.cdcstats.stats_create);
-		values[4] = Int64GetDatum(sdb_state->connectors[*idx].stats.cdcstats.stats_update);
-		values[5] = Int64GetDatum(sdb_state->connectors[*idx].stats.cdcstats.stats_delete);
-		values[6] = Int64GetDatum(sdb_state->connectors[*idx].stats.cdcstats.stats_tx);
-		values[7] = Int64GetDatum(sdb_state->connectors[*idx].stats.cdcstats.stats_truncate);
+		values[1] = Int64GetDatum(row.stats.cdcstats.stats_ddl);
+		values[2] = Int64GetDatum(row.stats.cdcstats.stats_dml);
+		values[3] = Int64GetDatum(row.stats.cdcstats.stats_create);
+		values[4] = Int64GetDatum(row.stats.cdcstats.stats_update);
+		values[5] = Int64GetDatum(row.stats.cdcstats.stats_delete);
+		values[6] = Int64GetDatum(row.stats.cdcstats.stats_tx);
+		values[7] = Int64GetDatum(row.stats.cdcstats.stats_truncate);
 
 		/* general stats */
-		values[8] = Int64GetDatum(sdb_state->connectors[*idx].stats.genstats.stats_bad_change_event);
-		values[9] = Int64GetDatum(sdb_state->connectors[*idx].stats.genstats.stats_total_change_event);
-		values[10] = Int64GetDatum(sdb_state->connectors[*idx].stats.genstats.stats_batch_completion);
-		values[11] = sdb_state->connectors[*idx].stats.genstats.stats_batch_completion > 0?
-					Int64GetDatum(sdb_state->connectors[*idx].stats.genstats.stats_total_change_event /
-							sdb_state->connectors[*idx].stats.genstats.stats_batch_completion) :
+		values[8] = Int64GetDatum(row.stats.genstats.stats_bad_change_event);
+		values[9] = Int64GetDatum(row.stats.genstats.stats_total_change_event);
+		values[10] = Int64GetDatum(row.stats.genstats.stats_batch_completion);
+		values[11] = row.stats.genstats.stats_batch_completion > 0?
+					Int64GetDatum(row.stats.genstats.stats_total_change_event /
+							row.stats.genstats.stats_batch_completion) :
 					Int64GetDatum(0);
-		values[12] = Int64GetDatum(sdb_state->connectors[*idx].stats.genstats.stats_first_src_ts);
-		values[13] = Int64GetDatum(sdb_state->connectors[*idx].stats.genstats.stats_first_pg_ts);
-		values[14] = Int64GetDatum(sdb_state->connectors[*idx].stats.genstats.stats_last_src_ts);
-		values[15] = Int64GetDatum(sdb_state->connectors[*idx].stats.genstats.stats_last_pg_ts);
+		values[12] = Int64GetDatum(row.stats.genstats.stats_first_src_ts);
+		values[13] = Int64GetDatum(row.stats.genstats.stats_first_pg_ts);
+		values[14] = Int64GetDatum(row.stats.genstats.stats_last_src_ts);
+		values[15] = Int64GetDatum(row.stats.genstats.stats_last_pg_ts);
 
 		/* snapshot stats */
-		values[16] = Int64GetDatum(sdb_state->connectors[*idx].stats.snapstats.snapstats_tables);
-		values[17] = Int64GetDatum(sdb_state->connectors[*idx].stats.snapstats.snapstats_rows);
-		values[18] = Int64GetDatum(sdb_state->connectors[*idx].stats.snapstats.snapstats_begintime_ts);
-		values[19] = Int64GetDatum(sdb_state->connectors[*idx].stats.snapstats.snapstats_endtime_ts);
-		LWLockRelease(&sdb_state->lock);
-
-		*idx += 1;
+		values[16] = Int64GetDatum(row.stats.snapstats.snapstats_tables);
+		values[17] = Int64GetDatum(row.stats.snapstats.snapstats_rows);
+		values[18] = Int64GetDatum(row.stats.snapstats.snapstats_begintime_ts);
+		values[19] = Int64GetDatum(row.stats.snapstats.snapstats_endtime_ts);
 
 		tuple = heap_form_tuple(funcctx->tuple_desc, values, nulls);
 		SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(tuple));
@@ -5317,33 +3768,9 @@ synchdb_get_stats(PG_FUNCTION_ARGS)
 Datum
 synchdb_reset_stats(PG_FUNCTION_ARGS)
 {
-	int connectorId;
+    Name name=PG_GETARG_NAME(0);
 
-	/* Parse input arguments */
-	Name name = PG_GETARG_NAME(0);
-
-	/*
-	 * attach or initialize synchdb shared memory area so we know what is
-	 * going on
-	 */
-	synchdb_init_shmem();
-	if (!sdb_state)
-		ereport(ERROR,
-				(errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("failed to init or attach to synchdb shared memory")));
-
-	connectorId = get_shm_connector_id_by_name(NameStr(*name), get_database_name(MyDatabaseId));
-	if (connectorId < 0)
-		ereport(ERROR,
-				(errmsg("dbz connector (%s) does not have connector ID assigned",
-						NameStr(*name)),
-				 errhint("use synchdb_start_engine_bgw() to assign one first")));
-
-	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
-	memset(&sdb_state->connectors[connectorId].stats, 0, sizeof(SynchdbStatistics));
-	LWLockRelease(&sdb_state->lock);
-
-	PG_RETURN_INT32(0);
+    PG_RETURN_INT32(synchdb_control_receipt(synchdb_control_enqueue(NameStr(*name),"RESET_STATS",NULL,NULL)));
 }
 
 /*
@@ -5354,53 +3781,9 @@ synchdb_reset_stats(PG_FUNCTION_ARGS)
 Datum
 synchdb_pause_engine(PG_FUNCTION_ARGS)
 {
-	int connectorId = -1;
-	pid_t pid;
-	SynchdbRequest *req;
+    Name name=PG_GETARG_NAME(0);
 
-	/* Parse input arguments */
-	Name name = PG_GETARG_NAME(0);
-
-	/*
-	 * attach or initialize synchdb shared memory area so we know what is
-	 * going on
-	 */
-	synchdb_init_shmem();
-	if (!sdb_state)
-		ereport(ERROR,
-				(errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("failed to init or attach to synchdb shared memory")));
-
-	connectorId = get_shm_connector_id_by_name(NameStr(*name), get_database_name(MyDatabaseId));
-	if (connectorId < 0)
-		ereport(ERROR,
-				(errmsg("dbz connector (%s) does not have connector ID assigned",
-						NameStr(*name)),
-				 errhint("use synchdb_start_engine_bgw() to assign one first")));
-
-	pid = get_shm_connector_pid(connectorId);
-	if (pid == InvalidPid)
-		ereport(ERROR,
-				(errmsg("dbz connector (%s) is not running", NameStr(*name)),
-				 errhint("use synchdb_start_engine_bgw() to start a worker first")));
-
-	/* point to the right construct based on type */
-	req = &(sdb_state->connectors[connectorId].req);
-
-	/* an active state change request is currently in progress */
-	if (req->reqstate != STATE_UNDEF)
-		ereport(ERROR,
-				(errmsg("an active request is currently active for connector %s",
-						NameStr(*name)),
-				 errhint("wait for it to finish and try again later")));
-
-	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
-	req->reqstate = STATE_PAUSED;
-	LWLockRelease(&sdb_state->lock);
-
-	elog(WARNING, "sent pause request interrupt to dbz connector %s (%d)",
-			NameStr(*name), connectorId);
-	PG_RETURN_INT32(0);
+    PG_RETURN_INT32(synchdb_control_receipt(synchdb_control_enqueue(NameStr(*name),"PAUSE",NULL,NULL)));
 }
 
 /*
@@ -5411,53 +3794,9 @@ synchdb_pause_engine(PG_FUNCTION_ARGS)
 Datum
 synchdb_resume_engine(PG_FUNCTION_ARGS)
 {
-	int connectorId = -1;
-	pid_t pid;
-	SynchdbRequest *req;
+    Name name=PG_GETARG_NAME(0);
 
-	/* Parse input arguments */
-	Name name = PG_GETARG_NAME(0);
-
-	/*
-	 * attach or initialize synchdb shared memory area so we know what is
-	 * going on
-	 */
-	synchdb_init_shmem();
-	if (!sdb_state)
-		ereport(ERROR,
-				(errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("failed to init or attach to synchdb shared memory")));
-
-	connectorId = get_shm_connector_id_by_name(NameStr(*name), get_database_name(MyDatabaseId));
-	if (connectorId < 0)
-		ereport(ERROR,
-				(errmsg("dbz connector (%s) does not have connector ID assigned",
-						NameStr(*name)),
-				 errhint("use synchdb_start_engine_bgw() to assign one first")));
-
-	pid = get_shm_connector_pid(connectorId);
-	if (pid == InvalidPid)
-		ereport(ERROR,
-				(errmsg("dbz connector id (%s) is not running", NameStr(*name)),
-				 errhint("use synchdb_start_engine_bgw() to start a worker first")));
-
-	/* point to the right construct based on type */
-	req = &(sdb_state->connectors[connectorId].req);
-
-	/* an active state change request is currently in progress */
-	if (req->reqstate != STATE_UNDEF)
-		ereport(ERROR,
-				(errmsg("an active request is currently active for connector id %s",
-						NameStr(*name)),
-				 errhint("wait for it to finish and try again later")));
-
-	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
-	req->reqstate = STATE_SYNCING;
-	LWLockRelease(&sdb_state->lock);
-
-	elog(WARNING, "sent resume request interrupt to dbz connector (%s)",
-			NameStr(*name));
-	PG_RETURN_INT32(0);
+    PG_RETURN_INT32(synchdb_control_receipt(synchdb_control_enqueue(NameStr(*name),"RESUME",NULL,NULL)));
 }
 
 /*
@@ -5468,65 +3807,10 @@ synchdb_resume_engine(PG_FUNCTION_ARGS)
 Datum
 synchdb_set_offset(PG_FUNCTION_ARGS)
 {
-	pid_t pid;
-	int connectorId = -1;
-	char *offsetstr;
-	SynchdbRequest *req;
-	ConnectorState currstate;
+    Name name=PG_GETARG_NAME(0);
+    char *offset=text_to_cstring(PG_GETARG_TEXT_PP(1));
 
-	/* Parse input arguments */
-	Name name = PG_GETARG_NAME(0);
-	offsetstr = text_to_cstring(PG_GETARG_TEXT_P(1));
-
-	/*
-	 * attach or initialize synchdb shared memory area so we know what is
-	 * going on
-	 */
-	synchdb_init_shmem();
-	if (!sdb_state)
-		ereport(ERROR,
-				(errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("failed to init or attach to synchdb shared memory")));
-
-	connectorId = get_shm_connector_id_by_name(NameStr(*name), get_database_name(MyDatabaseId));
-	if (connectorId < 0)
-		ereport(ERROR,
-				(errmsg("dbz connector (%s) does not have connector ID assigned",
-						NameStr(*name)),
-				 errhint("use synchdb_start_engine_bgw() to assign one first")));
-
-	pid = get_shm_connector_pid(connectorId);
-	if (pid == InvalidPid)
-		ereport(ERROR,
-				(errmsg("dbz connector (%s) is not running",
-						NameStr(*name)),
-				 errhint("use synchdb_start_engine_bgw() to start a worker first")));
-
-	currstate = get_shm_connector_state_enum(connectorId);
-	if (currstate != STATE_PAUSED)
-		ereport(ERROR,
-				(errmsg("dbz connector (%s) is not in paused state.",
-						NameStr(*name)),
-				 errhint("use synchdb_pause_engine() to pause the worker first")));
-
-	/* point to the right construct based on type */
-	req = &(sdb_state->connectors[connectorId].req);
-
-	/* an active state change request is currently in progress */
-	if (req->reqstate != STATE_UNDEF)
-		ereport(ERROR,
-				(errmsg("an active request is currently active for connector %s",
-						NameStr(*name)),
-				 errhint("wait for it to finish and try again later")));
-
-	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
-	req->reqstate = STATE_OFFSET_UPDATE;
-	strncpy(req->reqdata, offsetstr, SYNCHDB_ERRMSG_SIZE);
-	LWLockRelease(&sdb_state->lock);
-
-	elog(WARNING, "sent update offset request interrupt to dbz connector (%s)",
-			NameStr(*name));
-	PG_RETURN_INT32(0);
+    PG_RETURN_INT32(synchdb_control_receipt(synchdb_control_enqueue(NameStr(*name),"OFFSET",NULL,offset)));
 }
 
 /*
@@ -5550,19 +3834,17 @@ synchdb_add_conninfo(PG_FUNCTION_ARGS)
 	char *connector = NULL;
 
 	ConnectionInfo connInfo = {0};
-	StringInfoData strinfo;
-	initStringInfo(&strinfo);
 
 	strlcpy(connInfo.name, NameStr(*name), SYNCHDB_CONNINFO_NAME_SIZE);
 
 	/* Sanity check on input arguments */
-	if (VARSIZE(hostname_text) - VARHDRSZ == 0 ||
-			VARSIZE(hostname_text) - VARHDRSZ > SYNCHDB_CONNINFO_HOSTNAME_SIZE)
+	if (VARSIZE_ANY_EXHDR(hostname_text) == 0 ||
+			VARSIZE_ANY_EXHDR(hostname_text) >= SYNCHDB_CONNINFO_HOSTNAME_SIZE)
 	{
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("hostname cannot be empty or longer than %d",
-						 SYNCHDB_CONNINFO_HOSTNAME_SIZE)));
+						 SYNCHDB_CONNINFO_HOSTNAME_SIZE - 1)));
 	}
 	strlcpy(connInfo.hostname, text_to_cstring(hostname_text), SYNCHDB_CONNINFO_HOSTNAME_SIZE);
 
@@ -5574,44 +3856,44 @@ synchdb_add_conninfo(PG_FUNCTION_ARGS)
 				 errmsg("invalid port number")));
 	}
 
-	if (VARSIZE(user_text) - VARHDRSZ == 0 ||
-			VARSIZE(user_text) - VARHDRSZ > SYNCHDB_CONNINFO_USERNAME_SIZE)
+	if (VARSIZE_ANY_EXHDR(user_text) == 0 ||
+			VARSIZE_ANY_EXHDR(user_text) >= SYNCHDB_CONNINFO_USERNAME_SIZE)
 	{
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("username cannot be empty or longer than %d",
-						 SYNCHDB_CONNINFO_USERNAME_SIZE)));
+						 SYNCHDB_CONNINFO_USERNAME_SIZE - 1)));
 	}
 	strlcpy(connInfo.user, text_to_cstring(user_text), SYNCHDB_CONNINFO_USERNAME_SIZE);
 
-	if (VARSIZE(pwd_text) - VARHDRSZ == 0 ||
-			VARSIZE(pwd_text) - VARHDRSZ > SYNCHDB_CONNINFO_PASSWORD_SIZE)
+	if (VARSIZE_ANY_EXHDR(pwd_text) == 0 ||
+			VARSIZE_ANY_EXHDR(pwd_text) >= SYNCHDB_CONNINFO_PASSWORD_SIZE)
 	{
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("password cannot be empty or longer than %d",
-						 SYNCHDB_CONNINFO_PASSWORD_SIZE)));
+						 SYNCHDB_CONNINFO_PASSWORD_SIZE - 1)));
 	}
 	strlcpy(connInfo.pwd, text_to_cstring(pwd_text), SYNCHDB_CONNINFO_PASSWORD_SIZE);
 
-	if (VARSIZE(src_db_text) - VARHDRSZ == 0 ||
-			VARSIZE(src_db_text) - VARHDRSZ > SYNCHDB_CONNINFO_DB_NAME_SIZE)
+	if (VARSIZE_ANY_EXHDR(src_db_text) == 0 ||
+			VARSIZE_ANY_EXHDR(src_db_text) >= SYNCHDB_CONNINFO_DB_NAME_SIZE)
 	{
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("source database cannot be empty or longer than %d",
-						 SYNCHDB_CONNINFO_PASSWORD_SIZE)));
+						 SYNCHDB_CONNINFO_DB_NAME_SIZE - 1)));
 	}
 	strlcpy(connInfo.srcdb, text_to_cstring(src_db_text), SYNCHDB_CONNINFO_DB_NAME_SIZE);
 
 	/* source schema can be empty or NULL but only with MySQL connector */
-	if (VARSIZE(src_schema_text) - VARHDRSZ == 0)
+	if (VARSIZE_ANY_EXHDR(src_schema_text) == 0)
 		strlcpy(connInfo.srcschema, "null", SYNCHDB_CONNINFO_DB_NAME_SIZE);
-	else if (VARSIZE(src_schema_text) - VARHDRSZ > SYNCHDB_CONNINFO_DB_NAME_SIZE)
+	else if (VARSIZE_ANY_EXHDR(src_schema_text) >= SYNCHDB_CONNINFO_DB_NAME_SIZE)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("source schema cannot be longer than %d",
-						 SYNCHDB_CONNINFO_DB_NAME_SIZE)));
+						 SYNCHDB_CONNINFO_DB_NAME_SIZE - 1)));
 	else
 		strlcpy(connInfo.srcschema, text_to_cstring(src_schema_text), SYNCHDB_CONNINFO_DB_NAME_SIZE);
 
@@ -5619,29 +3901,29 @@ synchdb_add_conninfo(PG_FUNCTION_ARGS)
 	strlcpy(connInfo.dstdb, get_database_name(MyDatabaseId), SYNCHDB_CONNINFO_DB_NAME_SIZE);
 
 	/* table can be empty or NULL */
-	if (VARSIZE(table_text) - VARHDRSZ == 0)
+	if (VARSIZE_ANY_EXHDR(table_text) == 0)
 		strlcpy(connInfo.table, "null", SYNCHDB_CONNINFO_TABLELIST_SIZE);
-	else if (VARSIZE(table_text) - VARHDRSZ > SYNCHDB_CONNINFO_TABLELIST_SIZE)
+	else if (VARSIZE_ANY_EXHDR(table_text) >= SYNCHDB_CONNINFO_TABLELIST_SIZE)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("table list cannot be longer than %d",
-						 SYNCHDB_CONNINFO_TABLELIST_SIZE)));
+						 SYNCHDB_CONNINFO_TABLELIST_SIZE - 1)));
 	else
 		strlcpy(connInfo.table, text_to_cstring(table_text), SYNCHDB_CONNINFO_TABLELIST_SIZE);
 
 	/* snapshot table can be empty or NULL */
-	if (VARSIZE(snapshottable_text) - VARHDRSZ == 0)
+	if (VARSIZE_ANY_EXHDR(snapshottable_text) == 0)
 		strlcpy(connInfo.snapshottable, "null", SYNCHDB_CONNINFO_TABLELIST_SIZE);
-	else if (VARSIZE(snapshottable_text) - VARHDRSZ > SYNCHDB_CONNINFO_TABLELIST_SIZE)
+	else if (VARSIZE_ANY_EXHDR(snapshottable_text) >= SYNCHDB_CONNINFO_TABLELIST_SIZE)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("snapshot table cannot be longer than %d",
-						 SYNCHDB_CONNINFO_TABLELIST_SIZE)));
+						 SYNCHDB_CONNINFO_TABLELIST_SIZE - 1)));
 	else
 		strlcpy(connInfo.snapshottable, text_to_cstring(snapshottable_text),
 				SYNCHDB_CONNINFO_TABLELIST_SIZE);
 
-	if (VARSIZE(connector_text) - VARHDRSZ == 0)
+	if (VARSIZE_ANY_EXHDR(connector_text) == 0)
 	{
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
@@ -5670,37 +3952,8 @@ synchdb_add_conninfo(PG_FUNCTION_ARGS)
 				 errmsg("schema cannot be null for creating a %s connector",
 						 connector)));
 
-	appendStringInfo(&strinfo, "INSERT INTO %s (name, isactive, data)"
-			" VALUES ('%s', %s, jsonb_build_object("
-			"'hostname', '%s', "
-			"'port', %d, "
-			"'user', '%s', "
-			"'pwd', pgp_sym_encrypt('%s', '%s'), "
-			"'srcdb', '%s', "
-			"'dstdb', '%s', "
-			"'srcschema', (CASE WHEN '%s' = 'null' THEN null ELSE '%s' END),  "
-			"'table', (CASE WHEN '%s' = 'null' THEN null ELSE '%s' END), "
-			"'snapshottable', (CASE WHEN '%s' = 'null' THEN null ELSE '%s' END), "
-			"'connector', '%s'));",
-			SYNCHDB_CONNINFO_TABLE,
-			connInfo.name,
-			"false",
-			connInfo.hostname,
-			connInfo.port,
-			connInfo.user,
-			connInfo.pwd,
-			SYNCHDB_SECRET,
-			connInfo.srcdb,
-			connInfo.dstdb,
-			connInfo.srcschema,
-			connInfo.srcschema,
-			connInfo.table,
-			connInfo.table,
-			connInfo.snapshottable,
-			connInfo.snapshottable,
-			connector);
-
-	PG_RETURN_INT32(ra_executeCommand(strinfo.data));
+	synchdb_connector_store_create(&connInfo, connector);
+	PG_RETURN_INT32(0);
 }
 
 /*
@@ -5711,92 +3964,12 @@ synchdb_add_conninfo(PG_FUNCTION_ARGS)
 Datum
 synchdb_restart_connector(PG_FUNCTION_ARGS)
 {
-	Name name = PG_GETARG_NAME(0);
-	Name snapshot_mode = PG_GETARG_NAME(1);
-	ConnectionInfo connInfo;
-	int ret = -1, connectorId = -1;
-	pid_t pid;
-	char * _snapshot_mode;
-	char *connector = NULL;
+    Name name=PG_GETARG_NAME(0);
+    Name mode=PG_GETARG_NAME(1);
+    SynchdbRunSpec spec;
 
-	SynchdbRequest *req;
-
-	/* Sanity check on input arguments */
-	if (VARSIZE(name_text) - VARHDRSZ == 0)
-	{
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("[synchdb_restart_connector] connection name cannot be empty")));
-	}
-
-	/* snapshot_mode can be empty or NULL */
-	if (strlen(NameStr(*snapshot_mode)) == 0)
-		_snapshot_mode = "null";
-	else
-		_snapshot_mode = NameStr(*snapshot_mode);
-
-	ret = ra_getConninfoByName(NameStr(*name), &connInfo, &connector);
-	if (ret)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("[synchdb_restart_connector] connection name does not exist: %s", name),
-				 errhint("use synchdb_add_conninfo to add one first")));
-
-	/*
-	 * attach or initialize synchdb shared memory area so we know what is
-	 * going on
-	 */
-	synchdb_init_shmem();
-	if (!sdb_state)
-		ereport(ERROR,
-				(errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("failed to init or attach to synchdb shared memory")));
-
-	connectorId = get_shm_connector_id_by_name(NameStr(*name), get_database_name(MyDatabaseId));
-	if (connectorId < 0)
-		ereport(ERROR,
-				(errmsg("dbz connector (%s) does not have connector ID assigned",
-						NameStr(*name)),
-				 errhint("use synchdb_start_engine_bgw() to assign one first")));
-
-	pid = get_shm_connector_pid(connectorId);
-	if (pid == InvalidPid)
-		ereport(ERROR,
-				(errmsg("dbz connector (%s) is not running",
-						NameStr(*name)),
-				 errhint("use synchdb_start_engine_bgw() to start a worker first")));
-
-	/* point to the right construct based on type */
-	req = &(sdb_state->connectors[connectorId].req);
-
-	/* an active state change request is currently in progress */
-	if (req->reqstate != STATE_UNDEF)
-		ereport(ERROR,
-				(errmsg("an active request is currently active for connector %s",
-						NameStr(*name)),
-				 errhint("wait for it to finish and try again later")));
-
-	/*
-	 * connector info may have been changed, so let's pass the latest conninfo
-	 * to the connector worker in the same way as synchdb_start_engine_bgw()
-	 */
-	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
-	req->reqstate = STATE_RESTARTING;
-
-	/* reqdata contains snapshot mode */
-	memset(req->reqdata, 0, SYNCHDB_ERRMSG_SIZE);
-	snprintf(req->reqdata, SYNCHDB_ERRMSG_SIZE,"%s", _snapshot_mode);
-
-	/*
-	 * reqconninfo contains a copy of conninfo recently read in case it has been
-	 * changed since connector start
-	 */
-	memcpy(&req->reqconninfo, &connInfo, sizeof(ConnectionInfo));
-	LWLockRelease(&sdb_state->lock);
-
-	elog(WARNING, "sent restart request interrupt to dbz connector (%s)",
-			NameStr(*name));
-	PG_RETURN_INT32(0);
+    synchdb_control_capture_spec(NameStr(*name),NameStr(*mode)[0] ? NameStr(*mode) : "initial",&spec);
+    PG_RETURN_INT32(synchdb_control_receipt(synchdb_control_enqueue(NameStr(*name),"RESTART",&spec,NULL)));
 }
 
 /*
@@ -5807,97 +3980,37 @@ synchdb_restart_connector(PG_FUNCTION_ARGS)
 Datum
 synchdb_log_jvm_meminfo(PG_FUNCTION_ARGS)
 {
-	int connectorId = -1;
-	pid_t pid;
-	SynchdbRequest *req;
+    Name name=PG_GETARG_NAME(0);
 
-	/* Parse input arguments */
+    PG_RETURN_INT32(synchdb_control_receipt(synchdb_control_enqueue(NameStr(*name),"MEMDUMP",NULL,NULL)));
+}
+
+Datum
+synchdb_add_objmap_text(PG_FUNCTION_ARGS)
+{
 	Name name = PG_GETARG_NAME(0);
+	Name objtype = PG_GETARG_NAME(1);
+	char *source = text_to_cstring(PG_GETARG_TEXT_PP(2));
+	char *destination = text_to_cstring(PG_GETARG_TEXT_PP(3));
 
-	/*
-	 * attach or initialize synchdb shared memory area so we know what is
-	 * going on
-	 */
-	synchdb_init_shmem();
-	if (!sdb_state)
-		ereport(ERROR,
-				(errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("failed to init or attach to synchdb shared memory")));
-
-	connectorId = get_shm_connector_id_by_name(NameStr(*name), get_database_name(MyDatabaseId));
-	if (connectorId < 0)
-		ereport(ERROR,
-				(errmsg("dbz connector (%s) does not have connector ID assigned",
-						NameStr(*name)),
-				 errhint("use synchdb_start_engine_bgw() to assign one first")));
-
-	pid = get_shm_connector_pid(connectorId);
-	if (pid == InvalidPid)
-		ereport(ERROR,
-				(errmsg("dbz connector (%s) is not running", NameStr(*name)),
-				 errhint("use synchdb_start_engine_bgw() to start a worker first")));
-
-	/* point to the right construct based on type */
-	req = &(sdb_state->connectors[connectorId].req);
-
-	/* an active state change request is currently in progress */
-	if (req->reqstate != STATE_UNDEF)
-		ereport(ERROR,
-				(errmsg("an active request is currently active for connector %s",
-						NameStr(*name)),
-				 errhint("wait for it to finish and try again later")));
-
-	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
-	req->reqstate = STATE_MEMDUMP;
-	LWLockRelease(&sdb_state->lock);
-
-	elog(WARNING, "sent memdump request interrupt to dbz connector %s (%d)",
-			NameStr(*name), connectorId);
+	(void) synchdb_mapping_store_upsert(NameStr(*name),
+										 synchdb_mapping_kind(NameStr(*objtype)),
+										 source, destination);
 	PG_RETURN_INT32(0);
 }
 
 Datum
 synchdb_add_objmap(PG_FUNCTION_ARGS)
 {
-	/* Parse input arguments */
 	Name name = PG_GETARG_NAME(0);
 	Name objtype = PG_GETARG_NAME(1);
 	Name srcobj = PG_GETARG_NAME(2);
-	text * dstobj = PG_GETARG_TEXT_PP(3);
+	char *destination = text_to_cstring(PG_GETARG_TEXT_PP(3));
 
-	StringInfoData strinfo;
-	initStringInfo(&strinfo);
-	/*
-	 * attach or initialize synchdb shared memory area so we know what is
-	 * going on
-	 */
-	synchdb_init_shmem();
-	if (!sdb_state)
-		ereport(ERROR,
-				(errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("failed to init or attach to synchdb shared memory")));
-
-	if (strcasecmp(NameStr(*objtype), "table") && strcasecmp(NameStr(*objtype), "column") &&
-		strcasecmp(NameStr(*objtype), "datatype") && strcasecmp(NameStr(*objtype), "transform"))
-	{
-		ereport(ERROR,
-				(errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("unsupported object type %s", NameStr(*objtype))));
-	}
-	appendStringInfo(&strinfo, "INSERT INTO %s (name, objtype, enabled, srcobj, dstobj)"
-			" VALUES (trim(lower('%s')), trim(lower('%s')), true, trim('%s'), '%s')",
-			SYNCHDB_OBJECT_MAPPING_TABLE,
-			NameStr(*name),
-			NameStr(*objtype),
-			NameStr(*srcobj),
-			escapeSingleQuote(text_to_cstring(dstobj), false));
-
-	appendStringInfo(&strinfo, " ON CONFLICT(name, objtype, srcobj) "
-			"DO UPDATE SET "
-			"enabled = EXCLUDED.enabled,"
-			"dstobj = EXCLUDED.dstobj;");
-
-	PG_RETURN_INT32(ra_executeCommand(strinfo.data));
+	(void) synchdb_mapping_store_upsert(NameStr(*name),
+										 synchdb_mapping_kind(NameStr(*objtype)),
+										 NameStr(*srcobj), destination);
+	PG_RETURN_INT32(0);
 }
 
 /*
@@ -5908,53 +4021,9 @@ synchdb_add_objmap(PG_FUNCTION_ARGS)
 Datum
 synchdb_reload_objmap(PG_FUNCTION_ARGS)
 {
-	int connectorId = -1;
-	pid_t pid;
-	SynchdbRequest *req;
+    Name name=PG_GETARG_NAME(0);
 
-	/* Parse input arguments */
-	Name name = PG_GETARG_NAME(0);
-
-	/*
-	 * attach or initialize synchdb shared memory area so we know what is
-	 * going on
-	 */
-	synchdb_init_shmem();
-	if (!sdb_state)
-		ereport(ERROR,
-				(errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("failed to init or attach to synchdb shared memory")));
-
-	connectorId = get_shm_connector_id_by_name(NameStr(*name), get_database_name(MyDatabaseId));
-	if (connectorId < 0)
-		ereport(ERROR,
-				(errmsg("dbz connector (%s) does not have connector ID assigned",
-						NameStr(*name)),
-				 errhint("use synchdb_start_engine_bgw() to assign one first")));
-
-	pid = get_shm_connector_pid(connectorId);
-	if (pid == InvalidPid)
-		ereport(ERROR,
-				(errmsg("dbz connector (%s) is not running", NameStr(*name)),
-				 errhint("use synchdb_start_engine_bgw() to start a worker first")));
-
-	/* point to the right construct based on type */
-	req = &(sdb_state->connectors[connectorId].req);
-
-	/* an active state change request is currently in progress */
-	if (req->reqstate != STATE_UNDEF)
-		ereport(ERROR,
-				(errmsg("an active request is currently active for connector %s",
-						NameStr(*name)),
-				 errhint("wait for it to finish and try again later")));
-
-	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
-	req->reqstate = STATE_RELOAD_OBJMAP;
-	LWLockRelease(&sdb_state->lock);
-
-	elog(WARNING, "sent reload objmap request interrupt to dbz connector %s (%d)",
-			NameStr(*name), connectorId);
-	PG_RETURN_INT32(0);
+    PG_RETURN_INT32(synchdb_control_receipt(synchdb_control_enqueue(NameStr(*name),"RELOAD",NULL,NULL)));
 }
 
 /*
@@ -5973,73 +4042,51 @@ synchdb_add_extra_conninfo(PG_FUNCTION_ARGS)
 	text * ssl_truststore_pass_text = PG_GETARG_TEXT_PP(5);
 
 	ExtraConnectionInfo extraconninfo = {0};
-	StringInfoData strinfo;
-	initStringInfo(&strinfo);
 
 	strlcpy(extraconninfo.ssl_mode, NameStr(*sslmode), SYNCHDB_CONNINFO_NAME_SIZE);
 
-	if (VARSIZE(ssl_keystore_text) - VARHDRSZ == 0)
+	if (VARSIZE_ANY_EXHDR(ssl_keystore_text) == 0)
 		strlcpy(extraconninfo.ssl_keystore, "null", SYNCHDB_CONNINFO_KEYSTORE_SIZE);
-	else if (VARSIZE(ssl_keystore_text) - VARHDRSZ > SYNCHDB_CONNINFO_KEYSTORE_SIZE)
+	else if (VARSIZE_ANY_EXHDR(ssl_keystore_text) >= SYNCHDB_CONNINFO_KEYSTORE_SIZE)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("ssl_keystore cannot be longer than %d",
-						 SYNCHDB_CONNINFO_KEYSTORE_SIZE)));
+						 SYNCHDB_CONNINFO_KEYSTORE_SIZE - 1)));
 	else
 		strlcpy(extraconninfo.ssl_keystore, text_to_cstring(ssl_keystore_text), SYNCHDB_CONNINFO_KEYSTORE_SIZE);
 
-	if (VARSIZE(ssl_keystore_pass_text) - VARHDRSZ == 0)
+	if (VARSIZE_ANY_EXHDR(ssl_keystore_pass_text) == 0)
 		strlcpy(extraconninfo.ssl_keystore_pass, "null", SYNCHDB_CONNINFO_PASSWORD_SIZE);
-	else if (VARSIZE(ssl_keystore_pass_text) - VARHDRSZ > SYNCHDB_CONNINFO_PASSWORD_SIZE)
+	else if (VARSIZE_ANY_EXHDR(ssl_keystore_pass_text) >= SYNCHDB_CONNINFO_PASSWORD_SIZE)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("ssl_keystore_pass cannot be longer than %d",
-						 SYNCHDB_CONNINFO_PASSWORD_SIZE)));
+						 SYNCHDB_CONNINFO_PASSWORD_SIZE - 1)));
 	else
 		strlcpy(extraconninfo.ssl_keystore_pass, text_to_cstring(ssl_keystore_pass_text), SYNCHDB_CONNINFO_PASSWORD_SIZE);
 
-	if (VARSIZE(ssl_truststore_text) - VARHDRSZ == 0)
+	if (VARSIZE_ANY_EXHDR(ssl_truststore_text) == 0)
 		strlcpy(extraconninfo.ssl_truststore, "null", SYNCHDB_CONNINFO_KEYSTORE_SIZE);
-	else if (VARSIZE(ssl_truststore_text) - VARHDRSZ > SYNCHDB_CONNINFO_KEYSTORE_SIZE)
+	else if (VARSIZE_ANY_EXHDR(ssl_truststore_text) >= SYNCHDB_CONNINFO_KEYSTORE_SIZE)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("ssl_truststore cannot be longer than %d",
-						 SYNCHDB_CONNINFO_KEYSTORE_SIZE)));
+						 SYNCHDB_CONNINFO_KEYSTORE_SIZE - 1)));
 	else
 		strlcpy(extraconninfo.ssl_truststore, text_to_cstring(ssl_truststore_text), SYNCHDB_CONNINFO_KEYSTORE_SIZE);
 
-	if (VARSIZE(ssl_truststore_pass_text) - VARHDRSZ == 0)
+	if (VARSIZE_ANY_EXHDR(ssl_truststore_pass_text) == 0)
 		strlcpy(extraconninfo.ssl_truststore_pass, "null", SYNCHDB_CONNINFO_PASSWORD_SIZE);
-	else if (VARSIZE(ssl_truststore_pass_text) - VARHDRSZ > SYNCHDB_CONNINFO_PASSWORD_SIZE)
+	else if (VARSIZE_ANY_EXHDR(ssl_truststore_pass_text) >= SYNCHDB_CONNINFO_PASSWORD_SIZE)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("ssl_truststore_pass cannot be longer than %d",
-						 SYNCHDB_CONNINFO_PASSWORD_SIZE)));
+						 SYNCHDB_CONNINFO_PASSWORD_SIZE - 1)));
 	else
 		strlcpy(extraconninfo.ssl_truststore_pass, text_to_cstring(ssl_truststore_pass_text), SYNCHDB_CONNINFO_PASSWORD_SIZE);
 
-	appendStringInfo(&strinfo, "UPDATE %s SET data = data || json_build_object("
-			"'ssl_mode', '%s', "
-			"'ssl_keystore',  (CASE WHEN '%s' = 'null' THEN null ELSE '%s' END), "
-			"'ssl_keystore_pass', (CASE WHEN '%s' = 'null' THEN null ELSE pgp_sym_encrypt('%s', '%s') END), "
-			"'ssl_truststore', (CASE WHEN '%s' = 'null' THEN null ELSE '%s' END), "
-			"'ssl_truststore_pass', (CASE WHEN '%s' = 'null' THEN null ELSE pgp_sym_encrypt('%s', '%s') END))::jsonb "
-			"WHERE name = '%s'",
-			SYNCHDB_CONNINFO_TABLE,
-			extraconninfo.ssl_mode,
-			extraconninfo.ssl_keystore,
-			extraconninfo.ssl_keystore,
-			extraconninfo.ssl_keystore_pass,
-			extraconninfo.ssl_keystore_pass,
-			SYNCHDB_SECRET,
-			extraconninfo.ssl_truststore,
-			extraconninfo.ssl_truststore,
-			extraconninfo.ssl_truststore_pass,
-			extraconninfo.ssl_truststore_pass,
-			SYNCHDB_SECRET,
-			NameStr(*name));
-
-	PG_RETURN_INT32(ra_executeCommand(strinfo.data));
+	(void) synchdb_connector_store_set_extra(NameStr(*name), &extraconninfo);
+	PG_RETURN_INT32(0);
 }
 
 /*
@@ -6051,19 +4098,10 @@ Datum
 synchdb_del_extra_conninfo(PG_FUNCTION_ARGS)
 {
 	Name name = PG_GETARG_NAME(0);
-	StringInfoData strinfo;
-	initStringInfo(&strinfo);
 
-	appendStringInfo(&strinfo, "UPDATE %s SET data = data - ARRAY["
-			"'ssl_mode', "
-			"'ssl_keystore', "
-			"'ssl_keystore_pass', "
-			"'ssl_truststore', "
-			"'ssl_truststore_pass'] "
-			"WHERE name = '%s'",
-			SYNCHDB_CONNINFO_TABLE,
-			NameStr(*name));
-	PG_RETURN_INT32(ra_executeCommand(strinfo.data));
+	(void) synchdb_connector_store_clear_options(NameStr(*name),
+			SYNCHDB_CONNECTOR_OPTIONS_EXTRA);
+	PG_RETURN_INT32(0);
 }
 
 /*
@@ -6085,63 +4123,49 @@ synchdb_add_fdw_conninfo(PG_FUNCTION_ARGS)
 	text *ssl_cipher_text       = PG_GETARG_TEXT_PP(4);
 
 	FdwConnectionInfo fdwssl = {0};
-	StringInfoData strinfo;
-	initStringInfo(&strinfo);
 
-	if (VARSIZE(ssl_cert_text) - VARHDRSZ == 0)
+	if (VARSIZE_ANY_EXHDR(ssl_cert_text) == 0)
 		strlcpy(fdwssl.ssl_cert, "null", SYNCHDB_CONNINFO_KEYSTORE_SIZE);
-	else if (VARSIZE(ssl_cert_text) - VARHDRSZ > SYNCHDB_CONNINFO_KEYSTORE_SIZE)
+	else if (VARSIZE_ANY_EXHDR(ssl_cert_text) >= SYNCHDB_CONNINFO_KEYSTORE_SIZE)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("ssl_cert path cannot be longer than %d",
-						SYNCHDB_CONNINFO_KEYSTORE_SIZE)));
+						SYNCHDB_CONNINFO_KEYSTORE_SIZE - 1)));
 	else
 		strlcpy(fdwssl.ssl_cert, text_to_cstring(ssl_cert_text), SYNCHDB_CONNINFO_KEYSTORE_SIZE);
 
-	if (VARSIZE(ssl_key_text) - VARHDRSZ == 0)
+	if (VARSIZE_ANY_EXHDR(ssl_key_text) == 0)
 		strlcpy(fdwssl.ssl_key, "null", SYNCHDB_CONNINFO_KEYSTORE_SIZE);
-	else if (VARSIZE(ssl_key_text) - VARHDRSZ > SYNCHDB_CONNINFO_KEYSTORE_SIZE)
+	else if (VARSIZE_ANY_EXHDR(ssl_key_text) >= SYNCHDB_CONNINFO_KEYSTORE_SIZE)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("ssl_key path cannot be longer than %d",
-						SYNCHDB_CONNINFO_KEYSTORE_SIZE)));
+						SYNCHDB_CONNINFO_KEYSTORE_SIZE - 1)));
 	else
 		strlcpy(fdwssl.ssl_key, text_to_cstring(ssl_key_text), SYNCHDB_CONNINFO_KEYSTORE_SIZE);
 
-	if (VARSIZE(ssl_rootcert_text) - VARHDRSZ == 0)
+	if (VARSIZE_ANY_EXHDR(ssl_rootcert_text) == 0)
 		strlcpy(fdwssl.ssl_rootcert, "null", SYNCHDB_CONNINFO_KEYSTORE_SIZE);
-	else if (VARSIZE(ssl_rootcert_text) - VARHDRSZ > SYNCHDB_CONNINFO_KEYSTORE_SIZE)
+	else if (VARSIZE_ANY_EXHDR(ssl_rootcert_text) >= SYNCHDB_CONNINFO_KEYSTORE_SIZE)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("ssl_rootcert path cannot be longer than %d",
-						SYNCHDB_CONNINFO_KEYSTORE_SIZE)));
+						SYNCHDB_CONNINFO_KEYSTORE_SIZE - 1)));
 	else
 		strlcpy(fdwssl.ssl_rootcert, text_to_cstring(ssl_rootcert_text), SYNCHDB_CONNINFO_KEYSTORE_SIZE);
 
-	if (VARSIZE(ssl_cipher_text) - VARHDRSZ == 0)
+	if (VARSIZE_ANY_EXHDR(ssl_cipher_text) == 0)
 		strlcpy(fdwssl.ssl_cipher, "null", SYNCHDB_CONNINFO_NAME_SIZE);
-	else if (VARSIZE(ssl_cipher_text) - VARHDRSZ > SYNCHDB_CONNINFO_NAME_SIZE)
+	else if (VARSIZE_ANY_EXHDR(ssl_cipher_text) >= SYNCHDB_CONNINFO_NAME_SIZE)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("ssl_cipher cannot be longer than %d",
-						SYNCHDB_CONNINFO_NAME_SIZE)));
+						SYNCHDB_CONNINFO_NAME_SIZE - 1)));
 	else
 		strlcpy(fdwssl.ssl_cipher, text_to_cstring(ssl_cipher_text), SYNCHDB_CONNINFO_NAME_SIZE);
 
-	appendStringInfo(&strinfo, "UPDATE %s SET data = data || json_build_object("
-			"'fdw_ssl_cert',     (CASE WHEN '%s' = 'null' THEN null ELSE '%s' END), "
-			"'fdw_ssl_key',      (CASE WHEN '%s' = 'null' THEN null ELSE '%s' END), "
-			"'fdw_ssl_rootcert', (CASE WHEN '%s' = 'null' THEN null ELSE '%s' END), "
-			"'fdw_ssl_cipher',   (CASE WHEN '%s' = 'null' THEN null ELSE pgp_sym_encrypt('%s', '%s') END))::jsonb "
-			"WHERE name = '%s'",
-			SYNCHDB_CONNINFO_TABLE,
-			fdwssl.ssl_cert, fdwssl.ssl_cert,
-			fdwssl.ssl_key, fdwssl.ssl_key,
-			fdwssl.ssl_rootcert, fdwssl.ssl_rootcert,
-			fdwssl.ssl_cipher, fdwssl.ssl_cipher, SYNCHDB_SECRET,
-			NameStr(*name));
-
-	PG_RETURN_INT32(ra_executeCommand(strinfo.data));
+	(void) synchdb_connector_store_set_fdw(NameStr(*name), &fdwssl);
+	PG_RETURN_INT32(0);
 }
 
 /*
@@ -6153,18 +4177,10 @@ Datum
 synchdb_del_fdw_conninfo(PG_FUNCTION_ARGS)
 {
 	Name name = PG_GETARG_NAME(0);
-	StringInfoData strinfo;
-	initStringInfo(&strinfo);
 
-	appendStringInfo(&strinfo, "UPDATE %s SET data = data - ARRAY["
-			"'fdw_ssl_cert', "
-			"'fdw_ssl_key', "
-			"'fdw_ssl_rootcert', "
-			"'fdw_ssl_cipher'] "
-			"WHERE name = '%s'",
-			SYNCHDB_CONNINFO_TABLE,
-			NameStr(*name));
-	PG_RETURN_INT32(ra_executeCommand(strinfo.data));
+	(void) synchdb_connector_store_clear_options(NameStr(*name),
+			SYNCHDB_CONNECTOR_OPTIONS_FDW);
+	PG_RETURN_INT32(0);
 }
 
 /*
@@ -6196,16 +4212,14 @@ synchdb_add_jmx_conninfo(PG_FUNCTION_ARGS)
 	text * jmx_truststore_pass_text = PG_GETARG_TEXT_PP(12);
 
 	JMXConnectionInfo jmxconninfo = {0};
-	StringInfoData strinfo;
-	initStringInfo(&strinfo);
 
-	if (VARSIZE(jmx_listenaddr_text) - VARHDRSZ == 0 ||
-			VARSIZE(jmx_listenaddr_text) - VARHDRSZ > SYNCHDB_CONNINFO_HOSTNAME_SIZE)
+	if (VARSIZE_ANY_EXHDR(jmx_listenaddr_text) == 0 ||
+			VARSIZE_ANY_EXHDR(jmx_listenaddr_text) >= SYNCHDB_CONNINFO_HOSTNAME_SIZE)
 	{
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("jmx listen address cannot be empty or longer than %d",
-						 SYNCHDB_CONNINFO_HOSTNAME_SIZE)));
+						 SYNCHDB_CONNINFO_HOSTNAME_SIZE - 1)));
 	}
 	strlcpy(jmxconninfo.jmx_listenaddr, text_to_cstring(jmx_listenaddr_text), SYNCHDB_CONNINFO_HOSTNAME_SIZE);
 
@@ -6217,13 +4231,13 @@ synchdb_add_jmx_conninfo(PG_FUNCTION_ARGS)
 				 errmsg("invalid port number")));
 	}
 
-	if (VARSIZE(jmx_rmiserver_text) - VARHDRSZ == 0 ||
-			VARSIZE(jmx_rmiserver_text) - VARHDRSZ > SYNCHDB_CONNINFO_HOSTNAME_SIZE)
+	if (VARSIZE_ANY_EXHDR(jmx_rmiserver_text) == 0 ||
+			VARSIZE_ANY_EXHDR(jmx_rmiserver_text) >= SYNCHDB_CONNINFO_HOSTNAME_SIZE)
 	{
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("jmx rmi server address cannot be empty or longer than %d",
-						 SYNCHDB_CONNINFO_HOSTNAME_SIZE)));
+						 SYNCHDB_CONNINFO_HOSTNAME_SIZE - 1)));
 	}
 	strlcpy(jmxconninfo.jmx_rmiserveraddr, text_to_cstring(jmx_rmiserver_text), SYNCHDB_CONNINFO_HOSTNAME_SIZE);
 
@@ -6238,23 +4252,23 @@ synchdb_add_jmx_conninfo(PG_FUNCTION_ARGS)
 	jmxconninfo.jmx_auth = jmx_authenticate;
 	if (jmxconninfo.jmx_auth)
 	{
-		if (VARSIZE(jmx_passwdfile_text) - VARHDRSZ == 0 ||
-				VARSIZE(jmx_passwdfile_text) - VARHDRSZ > SYNCHDB_METADATA_PATH_SIZE)
+		if (VARSIZE_ANY_EXHDR(jmx_passwdfile_text) == 0 ||
+				VARSIZE_ANY_EXHDR(jmx_passwdfile_text) >= SYNCHDB_METADATA_PATH_SIZE)
 		{
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 					 errmsg("jmx auth password file cannot be empty or longer than %d",
-							 SYNCHDB_METADATA_PATH_SIZE)));
+							 SYNCHDB_METADATA_PATH_SIZE - 1)));
 		}
 		strlcpy(jmxconninfo.jmx_auth_passwdfile, text_to_cstring(jmx_passwdfile_text), SYNCHDB_METADATA_PATH_SIZE);
 
-		if (VARSIZE(jmx_accessfile_text) - VARHDRSZ == 0 ||
-				VARSIZE(jmx_accessfile_text) - VARHDRSZ > SYNCHDB_METADATA_PATH_SIZE)
+		if (VARSIZE_ANY_EXHDR(jmx_accessfile_text) == 0 ||
+				VARSIZE_ANY_EXHDR(jmx_accessfile_text) >= SYNCHDB_METADATA_PATH_SIZE)
 		{
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 					 errmsg("jmx auth password file cannot be empty or longer than %d",
-							 SYNCHDB_METADATA_PATH_SIZE)));
+							 SYNCHDB_METADATA_PATH_SIZE - 1)));
 		}
 		strlcpy(jmxconninfo.jmx_auth_accessfile, text_to_cstring(jmx_accessfile_text), SYNCHDB_METADATA_PATH_SIZE);
 	}
@@ -6267,43 +4281,43 @@ synchdb_add_jmx_conninfo(PG_FUNCTION_ARGS)
 	jmxconninfo.jmx_ssl = jmx_ssl;
 	if (jmxconninfo.jmx_ssl)
 	{
-		if (VARSIZE(jmx_keystore_text) - VARHDRSZ == 0)
+		if (VARSIZE_ANY_EXHDR(jmx_keystore_text) == 0)
 			strlcpy(jmxconninfo.jmx_ssl_keystore, "null", SYNCHDB_CONNINFO_KEYSTORE_SIZE);
-		else if (VARSIZE(jmx_keystore_text) - VARHDRSZ > SYNCHDB_CONNINFO_KEYSTORE_SIZE)
+		else if (VARSIZE_ANY_EXHDR(jmx_keystore_text) >= SYNCHDB_CONNINFO_KEYSTORE_SIZE)
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 					 errmsg("ssl_keystore cannot be longer than %d",
-							 SYNCHDB_CONNINFO_KEYSTORE_SIZE)));
+							 SYNCHDB_CONNINFO_KEYSTORE_SIZE - 1)));
 		else
 			strlcpy(jmxconninfo.jmx_ssl_keystore, text_to_cstring(jmx_keystore_text), SYNCHDB_CONNINFO_KEYSTORE_SIZE);
 
-		if (VARSIZE(jmx_keystore_pass_text) - VARHDRSZ == 0)
+		if (VARSIZE_ANY_EXHDR(jmx_keystore_pass_text) == 0)
 			strlcpy(jmxconninfo.jmx_ssl_keystore_pass, "null", SYNCHDB_CONNINFO_PASSWORD_SIZE);
-		else if (VARSIZE(jmx_keystore_pass_text) - VARHDRSZ > SYNCHDB_CONNINFO_PASSWORD_SIZE)
+		else if (VARSIZE_ANY_EXHDR(jmx_keystore_pass_text) >= SYNCHDB_CONNINFO_PASSWORD_SIZE)
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 					 errmsg("ssl_keystore_pass cannot be longer than %d",
-							 SYNCHDB_CONNINFO_PASSWORD_SIZE)));
+							 SYNCHDB_CONNINFO_PASSWORD_SIZE - 1)));
 		else
 			strlcpy(jmxconninfo.jmx_ssl_keystore_pass, text_to_cstring(jmx_keystore_pass_text), SYNCHDB_CONNINFO_PASSWORD_SIZE);
 
-		if (VARSIZE(jmx_truststore_text) - VARHDRSZ == 0)
+		if (VARSIZE_ANY_EXHDR(jmx_truststore_text) == 0)
 			strlcpy(jmxconninfo.jmx_ssl_truststore, "null", SYNCHDB_CONNINFO_KEYSTORE_SIZE);
-		else if (VARSIZE(jmx_truststore_text) - VARHDRSZ > SYNCHDB_CONNINFO_KEYSTORE_SIZE)
+		else if (VARSIZE_ANY_EXHDR(jmx_truststore_text) >= SYNCHDB_CONNINFO_KEYSTORE_SIZE)
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 					 errmsg("ssl_truststore cannot be longer than %d",
-							 SYNCHDB_CONNINFO_KEYSTORE_SIZE)));
+							 SYNCHDB_CONNINFO_KEYSTORE_SIZE - 1)));
 		else
 			strlcpy(jmxconninfo.jmx_ssl_truststore, text_to_cstring(jmx_truststore_text), SYNCHDB_CONNINFO_KEYSTORE_SIZE);
 
-		if (VARSIZE(jmx_truststore_pass_text) - VARHDRSZ == 0)
+		if (VARSIZE_ANY_EXHDR(jmx_truststore_pass_text) == 0)
 			strlcpy(jmxconninfo.jmx_ssl_truststore_pass, "null", SYNCHDB_CONNINFO_PASSWORD_SIZE);
-		else if (VARSIZE(jmx_truststore_pass_text) - VARHDRSZ > SYNCHDB_CONNINFO_PASSWORD_SIZE)
+		else if (VARSIZE_ANY_EXHDR(jmx_truststore_pass_text) >= SYNCHDB_CONNINFO_PASSWORD_SIZE)
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 					 errmsg("ssl_truststore_pass cannot be longer than %d",
-							 SYNCHDB_CONNINFO_PASSWORD_SIZE)));
+							 SYNCHDB_CONNINFO_PASSWORD_SIZE - 1)));
 		else
 			strlcpy(jmxconninfo.jmx_ssl_truststore_pass, text_to_cstring(jmx_truststore_pass_text), SYNCHDB_CONNINFO_PASSWORD_SIZE);
 	}
@@ -6315,44 +4329,8 @@ synchdb_add_jmx_conninfo(PG_FUNCTION_ARGS)
 		strlcpy(jmxconninfo.jmx_ssl_truststore_pass, "null", SYNCHDB_CONNINFO_PASSWORD_SIZE);
 	}
 
-	appendStringInfo(&strinfo, "UPDATE %s SET data = data || json_build_object("
-			"'jmx_listenaddr', '%s', "
-			"'jmx_port', %u, "
-			"'jmx_rmi_address', '%s', "
-			"'jmx_rmi_port', %u, "
-			"'jmx_auth', %s, "
-			"'jmx_auth_passwdfile', (CASE WHEN '%s' = 'null' THEN null ELSE '%s' END), "
-			"'jmx_auth_accessfile', (CASE WHEN '%s' = 'null' THEN null ELSE '%s' END), "
-			"'jmx_ssl', %s, "
-			"'jmx_ssl_keystore', (CASE WHEN '%s' = 'null' THEN null ELSE '%s' END), "
-			"'jmx_ssl_keystore_pass', (CASE WHEN '%s' = 'null' THEN null ELSE pgp_sym_encrypt('%s', '%s') END), "
-			"'jmx_ssl_truststore', (CASE WHEN '%s' = 'null' THEN null ELSE '%s' END), "
-			"'jmx_ssl_truststore_pass', (CASE WHEN '%s' = 'null' THEN null ELSE pgp_sym_encrypt('%s', '%s') END))::jsonb "
-			"WHERE name = '%s'",
-			SYNCHDB_CONNINFO_TABLE,
-			jmxconninfo.jmx_listenaddr,
-			jmxconninfo.jmx_port,
-			jmxconninfo.jmx_rmiserveraddr,
-			jmxconninfo.jmx_rmiport,
-			jmxconninfo.jmx_auth ? "true" : "false",
-			jmxconninfo.jmx_auth_passwdfile,
-			jmxconninfo.jmx_auth_passwdfile,
-			jmxconninfo.jmx_auth_accessfile,
-			jmxconninfo.jmx_auth_accessfile,
-			jmxconninfo.jmx_ssl ? "true" : "false",
-			jmxconninfo.jmx_ssl_keystore,
-			jmxconninfo.jmx_ssl_keystore,
-			jmxconninfo.jmx_ssl_keystore_pass,
-			jmxconninfo.jmx_ssl_keystore_pass,
-			SYNCHDB_SECRET,
-			jmxconninfo.jmx_ssl_truststore,
-			jmxconninfo.jmx_ssl_truststore,
-			jmxconninfo.jmx_ssl_truststore_pass,
-			jmxconninfo.jmx_ssl_truststore_pass,
-			SYNCHDB_SECRET,
-			NameStr(*name));
-
-	PG_RETURN_INT32(ra_executeCommand(strinfo.data));
+	(void) synchdb_connector_store_set_jmx(NameStr(*name), &jmxconninfo);
+	PG_RETURN_INT32(0);
 }
 
 /*
@@ -6364,29 +4342,10 @@ Datum
 synchdb_del_jmx_conninfo(PG_FUNCTION_ARGS)
 {
 	Name name = PG_GETARG_NAME(0);
-	StringInfoData strinfo;
-	initStringInfo(&strinfo);
 
-	appendStringInfo(&strinfo, "UPDATE %s SET data = data - ARRAY["
-			"'jmx_listenaddr', "
-			"'jmx_port', "
-			"'jmx_rmi_address', "
-			"'jmx_rmi_port', "
-			"'jmx_auth', "
-			"'jmx_auth_passwdfile', "
-			"'jmx_auth_accessfile', "
-			"'jmx_ssl', "
-			"'jmx_ssl_keystore', "
-			"'jmx_ssl_keystore_pass', "
-			"'jmx_ssl_truststore', "
-			"'jmx_ssl_truststore_pass', "
-			"'jmx_exporter', "
-			"'jmx_exporter_port', "
-			"'jmx_exporter_conf'] "
-			"WHERE name = '%s'",
-			SYNCHDB_CONNINFO_TABLE,
-			NameStr(*name));
-	PG_RETURN_INT32(ra_executeCommand(strinfo.data));
+	(void) synchdb_connector_store_clear_options(NameStr(*name),
+			SYNCHDB_CONNECTOR_OPTIONS_JMX);
+	PG_RETURN_INT32(0);
 }
 
 /*
@@ -6405,17 +4364,15 @@ synchdb_add_jmx_exporter_conninfo(PG_FUNCTION_ARGS)
 	text * jmx_exporterconf_text = PG_GETARG_TEXT_PP(3);
 
 	JMXConnectionInfo jmxconninfo = {0};
-	StringInfoData strinfo;
-	initStringInfo(&strinfo);
 
 	/* Sanity check on input arguments */
-	if (VARSIZE(jmx_exporterpath_text) - VARHDRSZ == 0 ||
-			VARSIZE(jmx_exporterpath_text) - VARHDRSZ > SYNCHDB_METADATA_PATH_SIZE)
+	if (VARSIZE_ANY_EXHDR(jmx_exporterpath_text) == 0 ||
+			VARSIZE_ANY_EXHDR(jmx_exporterpath_text) >= SYNCHDB_METADATA_PATH_SIZE)
 	{
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("jmx exporter jar library path cannot be empty or longer than %d",
-						 SYNCHDB_METADATA_PATH_SIZE)));
+						 SYNCHDB_METADATA_PATH_SIZE - 1)));
 	}
 	strlcpy(jmxconninfo.jmx_exporter, text_to_cstring(jmx_exporterpath_text),
 			SYNCHDB_METADATA_PATH_SIZE);
@@ -6428,30 +4385,20 @@ synchdb_add_jmx_exporter_conninfo(PG_FUNCTION_ARGS)
 				 errmsg("invalid jmx exporter port number")));
 	}
 
-	if (VARSIZE(jmx_exporterconf_text) - VARHDRSZ == 0 ||
-			VARSIZE(jmx_exporterconf_text) - VARHDRSZ > SYNCHDB_METADATA_PATH_SIZE)
+	if (VARSIZE_ANY_EXHDR(jmx_exporterconf_text) == 0 ||
+			VARSIZE_ANY_EXHDR(jmx_exporterconf_text) >= SYNCHDB_METADATA_PATH_SIZE)
 	{
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("jmx exporter conf file path cannot be empty or longer than %d",
-						 SYNCHDB_METADATA_PATH_SIZE)));
+						 SYNCHDB_METADATA_PATH_SIZE - 1)));
 	}
 	strlcpy(jmxconninfo.jmx_exporter_conf, text_to_cstring(jmx_exporterconf_text),
 			SYNCHDB_METADATA_PATH_SIZE);
 
 
-	appendStringInfo(&strinfo, "UPDATE %s SET data = data || json_build_object("
-			"'jmx_exporter', '%s', "
-			"'jmx_exporter_port', %u, "
-			"'jmx_exporter_conf', '%s')::jsonb "
-			"WHERE name = '%s'",
-			SYNCHDB_CONNINFO_TABLE,
-			jmxconninfo.jmx_exporter,
-			jmxconninfo.jmx_exporter_port,
-			jmxconninfo.jmx_exporter_conf,
-			NameStr(*name));
-
-	PG_RETURN_INT32(ra_executeCommand(strinfo.data));
+	(void) synchdb_connector_store_set_jmx_exporter(NameStr(*name), &jmxconninfo);
+	PG_RETURN_INT32(0);
 }
 
 /*
@@ -6463,17 +4410,10 @@ Datum
 synchdb_del_jmx_exporter_conninfo(PG_FUNCTION_ARGS)
 {
 	Name name = PG_GETARG_NAME(0);
-	StringInfoData strinfo;
-	initStringInfo(&strinfo);
 
-	appendStringInfo(&strinfo, "UPDATE %s SET data = data - ARRAY["
-			"'jmx_exporter', "
-			"'jmx_exporter_port', "
-			"'jmx_exporter_conf'] "
-			"WHERE name = '%s'",
-			SYNCHDB_CONNINFO_TABLE,
-			NameStr(*name));
-	PG_RETURN_INT32(ra_executeCommand(strinfo.data));
+	(void) synchdb_connector_store_clear_options(NameStr(*name),
+			SYNCHDB_CONNECTOR_OPTIONS_JMX_EXPORTER);
+	PG_RETURN_INT32(0);
 }
 
 /*
@@ -6492,16 +4432,14 @@ synchdb_add_olr_conninfo(PG_FUNCTION_ARGS)
 	text * olr_source_text = PG_GETARG_TEXT_PP(3);
 
 	OLRConnectionInfo olrconninfo = {0};
-	StringInfoData strinfo;
-	initStringInfo(&strinfo);
 
-	if (VARSIZE(olr_host_text) - VARHDRSZ == 0 ||
-			VARSIZE(olr_host_text) - VARHDRSZ > SYNCHDB_CONNINFO_HOSTNAME_SIZE)
+	if (VARSIZE_ANY_EXHDR(olr_host_text) == 0 ||
+			VARSIZE_ANY_EXHDR(olr_host_text) >= SYNCHDB_CONNINFO_HOSTNAME_SIZE)
 	{
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("Openlog Replicator host address cannot be empty or longer than %d",
-						 SYNCHDB_CONNINFO_HOSTNAME_SIZE)));
+						 SYNCHDB_CONNINFO_HOSTNAME_SIZE - 1)));
 	}
 	strlcpy(olrconninfo.olr_host, text_to_cstring(olr_host_text), SYNCHDB_CONNINFO_HOSTNAME_SIZE);
 
@@ -6513,28 +4451,18 @@ synchdb_add_olr_conninfo(PG_FUNCTION_ARGS)
 				 errmsg("invalid port number")));
 	}
 
-	if (VARSIZE(olr_source_text) - VARHDRSZ == 0 ||
-			VARSIZE(olr_source_text) - VARHDRSZ > SYNCHDB_CONNINFO_NAME_SIZE)
+	if (VARSIZE_ANY_EXHDR(olr_source_text) == 0 ||
+			VARSIZE_ANY_EXHDR(olr_source_text) >= SYNCHDB_CONNINFO_NAME_SIZE)
 	{
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("Openlog Replicator data source cannot be empty or longer than %d",
-						 SYNCHDB_CONNINFO_NAME_SIZE)));
+						 SYNCHDB_CONNINFO_NAME_SIZE - 1)));
 	}
 	strlcpy(olrconninfo.olr_source, text_to_cstring(olr_source_text), SYNCHDB_CONNINFO_NAME_SIZE);
 
-	appendStringInfo(&strinfo, "UPDATE %s SET data = data || json_build_object("
-			"'olr_host', '%s', "
-			"'olr_port', %u, "
-			"'olr_source', '%s')::jsonb "
-			"WHERE name = '%s'",
-			SYNCHDB_CONNINFO_TABLE,
-			olrconninfo.olr_host,
-			olrconninfo.olr_port,
-			olrconninfo.olr_source,
-			NameStr(*name));
-
-	PG_RETURN_INT32(ra_executeCommand(strinfo.data));
+	(void) synchdb_connector_store_set_olr(NameStr(*name), &olrconninfo);
+	PG_RETURN_INT32(0);
 }
 
 /*
@@ -6546,17 +4474,10 @@ Datum
 synchdb_del_olr_conninfo(PG_FUNCTION_ARGS)
 {
 	Name name = PG_GETARG_NAME(0);
-	StringInfoData strinfo;
-	initStringInfo(&strinfo);
 
-	appendStringInfo(&strinfo, "UPDATE %s SET data = data - ARRAY["
-			"'olr_host', "
-			"'olr_port', "
-			"'olr_source'] "
-			"WHERE name = '%s'",
-			SYNCHDB_CONNINFO_TABLE,
-			NameStr(*name));
-	PG_RETURN_INT32(ra_executeCommand(strinfo.data));
+	(void) synchdb_connector_store_clear_options(NameStr(*name),
+			SYNCHDB_CONNECTOR_OPTIONS_OLR);
+	PG_RETURN_INT32(0);
 }
 
 /*
@@ -6568,52 +4489,23 @@ Datum
 synchdb_del_conninfo(PG_FUNCTION_ARGS)
 {
 	Name name = PG_GETARG_NAME(0);
-	int connectorId = -1;
-	pid_t pid = InvalidPid;
-	StringInfoData strinfo;
-	initStringInfo(&strinfo);
-	synchdb_init_shmem();
+	SynchdbConnectorKey key;
+	SynchdbCatalogFence fence;
+	int64 revision;
 
-	if (!sdb_state)
-		ereport(ERROR,
-				(errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("failed to init or attach to synchdb shared memory")));
-
-	/* if connector is running, we will attemppt to shut it down */
-	connectorId = get_shm_connector_id_by_name(NameStr(*name), get_database_name(MyDatabaseId));
-	if (connectorId >= 0)
-	{
-		pid = get_shm_connector_pid(connectorId);
-		if (pid != InvalidPid)
-		{
-			elog(WARNING, "terminating dbz connector (%s) with pid %d. Shutdown timeout: %d ms",
-					NameStr(*name), (int)pid, DEBEZIUM_SHUTDOWN_TIMEOUT_MSEC);
-			DirectFunctionCall2(pg_terminate_backend, UInt32GetDatum(pid), Int64GetDatum(DEBEZIUM_SHUTDOWN_TIMEOUT_MSEC));
-		}
-
-		/* clear the shared memory slot so it no longer appears in state/stats views */
-		LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
-		memset(&sdb_state->connectors[connectorId], 0, sizeof(ActiveConnectors));
-		sdb_state->connectors[connectorId].pid   = InvalidPid;
-		sdb_state->connectors[connectorId].state = STATE_UNDEF;
-		sdb_state->connectors[connectorId].type  = TYPE_UNDEF;
-		LWLockRelease(&sdb_state->lock);
-	}
-
-	/* remove the connector info record */
-	appendStringInfo(&strinfo, "DELETE FROM %s WHERE name = '%s';"
-			"DELETE FROM %s WHERE name = '%s';"
-			"DELETE FROM %s WHERE name = '%s';",
-			SYNCHDB_CONNINFO_TABLE,
-			NameStr(*name),
-			SYNCHDB_ATTRIBUTE_TABLE,
-			NameStr(*name),
-			SYNCHDB_OBJECT_MAPPING_TABLE,
-			NameStr(*name));
-
-	ra_executeCommand(strinfo.data);
-	remove_dbz_metadata_files(NameStr(*name));
-
+	/* Without preload this instance cannot own a connector run. */
+	sdb_state = synchdb_registry_try_attach(synchdb_max_connector_workers);
+	if (!synchdb_connector_store_get_identity(NameStr(*name), &key, &revision))
+		PG_RETURN_INT32(0);
+	if (sdb_state != NULL)
+		synchdb_registry_catalog_prepare(sdb_state, &key, NameStr(*name), &fence);
+	synchdb_control_check_delete(&key);
+	if (!synchdb_connector_store_delete_identity(NameStr(*name), &key))
+		PG_RETURN_INT32(0);
+	if (sdb_state != NULL && !synchdb_registry_catalog_finish(sdb_state, &fence, NULL, true))
+		ereport(ERROR, (errcode(ERRCODE_OBJECT_IN_USE),
+						errmsg("connector \"%s\" changed during deletion", NameStr(*name))));
+	/* Recovery artifacts are retained; explicit offline purge owns deletion. */
 	PG_RETURN_INT32(0);
 }
 
@@ -6623,34 +4515,29 @@ synchdb_del_conninfo(PG_FUNCTION_ARGS)
  * This function marks a objmap rule as disabled
  */
 Datum
+synchdb_del_objmap_text(PG_FUNCTION_ARGS)
+{
+	Name name = PG_GETARG_NAME(0);
+	Name objtype = PG_GETARG_NAME(1);
+	char *source = text_to_cstring(PG_GETARG_TEXT_PP(2));
+
+	(void) synchdb_mapping_store_disable(NameStr(*name),
+										  synchdb_mapping_kind(NameStr(*objtype)),
+										  source);
+	PG_RETURN_INT32(0);
+}
+
+Datum
 synchdb_del_objmap(PG_FUNCTION_ARGS)
 {
-	/* Parse input arguments */
 	Name name = PG_GETARG_NAME(0);
 	Name objtype = PG_GETARG_NAME(1);
 	Name srcobj = PG_GETARG_NAME(2);
 
-	StringInfoData strinfo;
-	initStringInfo(&strinfo);
-
-	if (strcasecmp(NameStr(*objtype), "table") && strcasecmp(NameStr(*objtype), "column") &&
-		strcasecmp(NameStr(*objtype), "datatype") && strcasecmp(NameStr(*objtype), "transform"))
-	{
-		ereport(ERROR,
-				(errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("unsupported object type %s", NameStr(*objtype))));
-	}
-
-	appendStringInfo(&strinfo, "UPDATE %s SET "
-			"enabled = false WHERE "
-			"name = '%s' AND objtype = trim(lower('%s')) AND "
-			"srcobj = trim(lower('%s'));",
-			SYNCHDB_OBJECT_MAPPING_TABLE,
-			NameStr(*name),
-			NameStr(*objtype),
-			NameStr(*srcobj));
-
-	PG_RETURN_INT32(ra_executeCommand(strinfo.data));
+	(void) synchdb_mapping_store_disable(NameStr(*name),
+										  synchdb_mapping_kind(NameStr(*objtype)),
+										  NameStr(*srcobj));
+	PG_RETURN_INT32(0);
 }
 
 /*
@@ -6665,11 +4552,9 @@ synchdb_add_infinispan(PG_FUNCTION_ARGS)
 	/* Parse input arguments */
 	Name name = PG_GETARG_NAME(0);
 	Name memoryType = PG_GETARG_NAME(1);	/* heap or off heap*/
-	unsigned int memorySize = PG_GETARG_UINT32(2);
+	int32 memorySize = PG_GETARG_INT32(2);
 
 	IspnInfo ispninfo = {0};
-	StringInfoData strinfo;
-	initStringInfo(&strinfo);
 
 	/* only embedded infinispan is supported as of now */
 	strlcpy(ispninfo.ispn_cache_type, "embedded", INFINISPAN_TYPE_SIZE);
@@ -6682,7 +4567,7 @@ synchdb_add_infinispan(PG_FUNCTION_ARGS)
 	}
 	strlcpy(ispninfo.ispn_memory_type, NameStr(*memoryType), INFINISPAN_TYPE_SIZE);
 
-	if (memorySize == 0)
+	if (memorySize <= 0)
 	{
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
@@ -6690,18 +4575,8 @@ synchdb_add_infinispan(PG_FUNCTION_ARGS)
 	}
 	ispninfo.ispn_memory_size = memorySize;
 
-	appendStringInfo(&strinfo, "UPDATE %s SET data = data || json_build_object("
-			"'ispn_cache_type', '%s', "	/* only embedded infinispan is supported */
-			"'ispn_memory_type', '%s', "
-			"'ispn_memory_size', %u)::jsonb "
-			"WHERE name = '%s'",
-			SYNCHDB_CONNINFO_TABLE,
-			ispninfo.ispn_cache_type,
-			ispninfo.ispn_memory_type,
-			ispninfo.ispn_memory_size,
-			NameStr(*name));
-
-	PG_RETURN_INT32(ra_executeCommand(strinfo.data));
+	(void) synchdb_connector_store_set_ispn(NameStr(*name), &ispninfo);
+	PG_RETURN_INT32(0);
 }
 
 /*
@@ -6713,54 +4588,31 @@ synchdb_add_infinispan(PG_FUNCTION_ARGS)
 Datum
 synchdb_del_infinispan(PG_FUNCTION_ARGS)
 {
-	/* Parse input arguments */
-	int connectorId;
-	pid_t pid;
-	char * ispn_dir = NULL;
 	Name name = PG_GETARG_NAME(0);
+	SynchdbConnectorKey key;
+	SynchdbConnectorKey after_key;
+	SynchdbCatalogFence fence;
+	int64 revision;
 
-	StringInfoData strinfo;
-	initStringInfo(&strinfo);
+	/* Without preload this instance cannot own a connector run. */
+	sdb_state = synchdb_registry_try_attach(synchdb_max_connector_workers);
+	if (!synchdb_connector_store_get_identity(NameStr(*name), &key, &revision))
+		PG_RETURN_INT32(0);
+	if (sdb_state != NULL)
+		synchdb_registry_catalog_prepare(sdb_state, &key, NameStr(*name), &fence);
+	if (!synchdb_connector_store_clear_options(NameStr(*name), SYNCHDB_CONNECTOR_OPTIONS_ISPN))
+		PG_RETURN_INT32(0);
+	if (!synchdb_connector_store_get_identity(NameStr(*name), &after_key, &revision) ||
+		!synchdb_connector_key_equal(&key, &after_key))
+		ereport(ERROR, (errcode(ERRCODE_OBJECT_IN_USE),
+						errmsg("connector identity changed while removing Infinispan")));
+	if (sdb_state != NULL && !synchdb_registry_catalog_finish(sdb_state, &fence,
+										 worker.owner.attempt ? &worker.owner : NULL, false))
+		ereport(ERROR, (errcode(ERRCODE_OBJECT_IN_USE),
+						errmsg("connector run changed while removing Infinispan")));
 
-	/*
-	 * attach or initialize synchdb shared memory area so we know what is
-	 * going on
-	 */
-	synchdb_init_shmem();
-	if (!sdb_state)
-		ereport(ERROR,
-				(errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("failed to init or attach to synchdb shared memory")));
-
-	connectorId = get_shm_connector_id_by_name(NameStr(*name), get_database_name(MyDatabaseId));
-	if (connectorId > 0)
-	{
-		pid = get_shm_connector_pid(connectorId);
-		if (pid != InvalidPid)
-		{
-			/* still running, check the connector state */
-			ereport(ERROR,
-					(errmsg("the connector needs to be in stopped state before infinispan "
-							"settings can be removed"),
-					errhint("use synchdb_stop_engine_bgw() to stop it first")));
-		}
-	}
-
-	/* remove on-disk cache and metadata created by infinispan */
-	ispn_dir = psprintf(SYNCHDB_INFINISPAN_DIR, NameStr(*name), get_database_name(MyDatabaseId));
-
-	if (!rmtree(ispn_dir, true))
-		elog(WARNING, "some infinispan metadata files may be left behind in %s",
-				ispn_dir);
-
-	appendStringInfo(&strinfo, "UPDATE %s SET data = data - ARRAY["
-			"'ispn_cache_type', "
-			"'ispn_memory_type', "
-			"'ispn_memory_size'] "
-			"WHERE name = '%s'",
-			SYNCHDB_CONNINFO_TABLE,
-			NameStr(*name));
-	PG_RETURN_INT32(ra_executeCommand(strinfo.data));
+	/* Removing configuration preserves recovery artifacts. */
+	PG_RETURN_INT32(0);
 }
 
 /* FIXME: to bigints */
@@ -6875,38 +4727,20 @@ Datum
 synchdb_set_snapstats(PG_FUNCTION_ARGS)
 {
 	Name name = PG_GETARG_NAME(0);
-	int64 tables_inc = PG_GETARG_INT64(1);
-	int64 rows_inc = PG_GETARG_INT64(2);
-	int64 begintime = PG_GETARG_INT64(3);
-	int64 endtime = PG_GETARG_INT64(4);
-	SnapshotStatistics mysnapstats;
-	int connectorId = -1;
+	int64 tables = PG_GETARG_INT64(1);
+	int64 rows = PG_GETARG_INT64(2);
+	int64 begin = PG_GETARG_INT64(3);
+	int64 end = PG_GETARG_INT64(4);
+	SynchdbControllerTarget target;
 
-	/*
-	 * attach or initialize synchdb shared memory area so we know what is
-	 * going on
-	 */
-	synchdb_init_shmem();
-	if (!sdb_state)
-		ereport(ERROR,
-				(errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("failed to init or attach to synchdb shared memory")));
-
-	connectorId = get_shm_connector_id_by_name(NameStr(*name), get_database_name(MyDatabaseId));
-	if (connectorId < 0)
-	{
-		ereport(ERROR,
-				(errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("no connector id assigned for connector %s", NameStr(*name))));
-	}
-
-	mysnapstats.snapstats_tables = (unsigned long long) tables_inc;
-	mysnapstats.snapstats_rows = (unsigned long long) rows_inc;
-	mysnapstats.snapstats_begintime_ts = (unsigned long long) begintime;
-	mysnapstats.snapstats_endtime_ts = (unsigned long long) endtime;
-
-	set_shm_connector_snapshot_statistics(connectorId, &mysnapstats);
-
+	/* Preserve parameter errors before catalog/worker lookup errors. */
+	if (tables < 0 || rows < 0 || begin < 0 || end < 0)
+		ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						errmsg("snapshot statistics must not be negative")));
+	target = controller_target(NameStr(*name), NULL, false);
+	synchdb_registry_add_snapstats(sdb_state, &target,
+								   worker.owner.attempt ? &worker.owner : NULL,
+								   tables, rows, begin, end);
 	PG_RETURN_VOID();
 }
 
@@ -6919,9 +4753,7 @@ synchdb_set_snapstats(PG_FUNCTION_ARGS)
 Datum
 synchdb_set_dbz_loglevel(PG_FUNCTION_ARGS)
 {
-	int connectorId = -1;
-	pid_t pid;
-	SynchdbRequest *req;
+	SynchdbRequest request = {0};
 	int level;
 	text *level_text;
 	char *level_str;
@@ -6952,38 +4784,7 @@ synchdb_set_dbz_loglevel(PG_FUNCTION_ARGS)
 				(errmsg("invalid log level \"%s\"", level_str),
 				errhint("Valid levels: all, trace, debug, info, warn, error, fatal, off")));
 
-	synchdb_init_shmem();
-	if (!sdb_state)
-		ereport(ERROR,
-				(errcode(ERRCODE_INTERNAL_ERROR),
-				errmsg("failed to init or attach to synchdb shared memory")));
-
-	connectorId = get_shm_connector_id_by_name(NameStr(*name), get_database_name(MyDatabaseId));
-	if (connectorId < 0)
-		ereport(ERROR,
-				(errmsg("dbz connector (%s) does not have connector ID assigned",
-						NameStr(*name)),
-				errhint("use synchdb_start_engine_bgw() to assign one first")));
-
-	pid = get_shm_connector_pid(connectorId);
-	if (pid == InvalidPid)
-		ereport(ERROR,
-				(errmsg("dbz connector (%s) is not running", NameStr(*name)),
-				errhint("use synchdb_start_engine_bgw() to start a worker first")));
-
-	req = &(sdb_state->connectors[connectorId].req);
-	if (req->reqstate != STATE_UNDEF)
-		ereport(ERROR,
-				(errmsg("an active request is currently active for connector %s",
-						NameStr(*name)),
-				errhint("wait for it to finish and try again later")));
-
-	LWLockAcquire(&sdb_state->lock, LW_EXCLUSIVE);
-	req->reqstate = STATE_DBZ_LOGLEVEL_UPDATE;
-	snprintf(req->reqdata, SYNCHDB_ERRMSG_SIZE, "%d", level);
-	LWLockRelease(&sdb_state->lock);
-
-	elog(WARNING, "sent loglevel update request to dbz connector (%s): %s",
-		NameStr(*name), level_str);
-	PG_RETURN_INT32(0);
+	request.reqstate = STATE_DBZ_LOGLEVEL_UPDATE;
+	snprintf(request.reqdata, sizeof(request.reqdata), "%d", level);
+	PG_RETURN_INT32(synchdb_control_receipt(synchdb_control_enqueue(NameStr(*name),"LOGLEVEL",NULL,request.reqdata)));
 }

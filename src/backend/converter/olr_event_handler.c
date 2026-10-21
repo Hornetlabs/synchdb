@@ -11,6 +11,8 @@
 #include "access/table.h"
 #include "access/xact.h"
 #include "catalog/namespace.h"
+#include "catalog/pg_attribute.h"
+#include "access/sysattr.h"
 #include "utils/rel.h"
 #include "utils/builtins.h"
 #include "utils/memutils.h"
@@ -28,17 +30,7 @@
 #include "converter/olr_event_handler.h"
 #include "converter/format_converter.h"
 #include "olr/olr_client.h"
-
-/* extern globals */
-extern int myConnectorId;
-extern bool synchdb_log_event_on_error;
-extern char * g_eventStr;
-extern HTAB * dataCacheHash;
-extern char * dbz_skipped_operations;
-extern bool synchdb_log_event_on_error;
-extern char * g_eventStr;
-extern int synchdb_letter_casing_strategy;
-extern int synchdb_error_strategy;
+#include "runtime/config.h"
 
 /* Oracle raw parser function prototype */
 typedef List * (*oracle_raw_parser_fn)(const char *str, RawParseMode mode);
@@ -52,7 +44,7 @@ static OlrType getOlrTypeFromString(const char * typestring);
 static void strip_after_column_def(StringInfoData *sql);
 static bool is_whitelist_sql(StringInfoData * sql);
 static bool is_whitelist_table(const char * table);
-static HTAB * build_olr_schema_jsonpos_hash(Jsonb * jb);
+static SourceColumnCache * build_olr_schema_jsonpos_hash(Jsonb * jb);
 static void destroyOLRDDL(OLR_DDL * ddlinfo);
 static void destroyOLRDML(OLR_DML * dmlinfo);
 static OLR_DDL * parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn,
@@ -237,101 +229,63 @@ is_whitelist_sql(StringInfoData * sql)
     return allowed;
 }
 
-static HTAB *
-build_olr_schema_jsonpos_hash(Jsonb * jb)
+static SourceColumnCache *
+build_olr_schema_jsonpos_hash(Jsonb *jb)
 {
-	HTAB * jsonposhash;
-	HASHCTL hash_ctl;
-	Jsonb * schemadata = NULL;
-	int jsonpos = 0;
-	NameJsonposEntry * entry;
-	NameJsonposEntry tmprecord = {0};
-	bool found = false;
-	int i = 0;
-	unsigned int contsize = 0;
-	Datum datum_elems[1] ={CStringGetTextDatum("columns")};
+	SourceColumnCache *cache = fc_create_source_column_cache(TopMemoryContext);
+	Datum path[] = {CStringGetTextDatum("columns")};
+	Jsonb *schema = GET_JSONB_ELEM(jb, path, lengthof(path));
+	unsigned int i;
 
-	memset(&hash_ctl, 0, sizeof(hash_ctl));
-	hash_ctl.keysize = NAMEDATALEN;
-	hash_ctl.entrysize = sizeof(NameJsonposEntry);
-	hash_ctl.hcxt = TopMemoryContext;
-
-	jsonposhash = hash_create("Name to jsonpos Hash Table",
-							512,
-							&hash_ctl,
-							HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
-
-	schemadata = GET_JSONB_ELEM(jb, &datum_elems[0], 1);
-	if (schemadata)
+	PG_TRY();
 	{
-		contsize = JsonContainerSize(&schemadata->root);
-		for (i = 0; i < contsize; i++)
+		if (!schema || !JB_ROOT_IS_ARRAY(schema))
+			elog(ERROR, "source column schema must be an array");
+		for (i = 0; i < JsonContainerSize(&schema->root); i++)
 		{
-			JsonbValue * v = NULL, * v2 = NULL;
-			JsonbValue vbuf;
-			char * tmpstr = NULL;
+			JsonbValue *item = getIthJsonbValueFromContainer(&schema->root, i);
+			JsonbValue buffer;
+			JsonbValue *value;
+			NameJsonposEntry record = {0};
+			char *token;
 
-			memset(&tmprecord, 0, sizeof(NameJsonposEntry));
-			v = getIthJsonbValueFromContainer(&schemadata->root, i);
-			if (v->type == jbvBinary)
+			if (!item || item->type != jbvBinary || !JsonContainerIsObject(item->val.binary.data))
+				elog(ERROR, "source column schema entry must be an object");
+			value = getKeyJsonValueFromContainer(item->val.binary.data, "name", 4, &buffer);
+			if (!value || value->type != jbvString)
+				elog(ERROR, "source column schema requires a string name");
+			record.name = pnstrdup(value->val.string.val, value->val.string.len);
+			value = getKeyJsonValueFromContainer(item->val.binary.data, "type", 4, &buffer);
+			if (!value || value->type != jbvString)
+				elog(ERROR, "source column schema requires a string type");
+			token = pnstrdup(value->val.string.val, value->val.string.len);
+			record.dbztype = getOlrTypeFromString(token);
+			pfree(token);
+
+			value = getKeyJsonValueFromContainer(item->val.binary.data, "scale", 5, &buffer);
+			if (value && value->type != jbvNull)
 			{
-				v2 = getKeyJsonValueFromContainer(v->val.binary.data, "name", strlen("name"), &vbuf);
-				if (v2)
-				{
-					strncpy(tmprecord.name, v2->val.string.val, v2->val.string.len); /* todo check overflow */
-					fc_normalize_name(LCS_NORMALIZE_LOWERCASE, tmprecord.name, strlen(tmprecord.name));
-				}
+				if (value->type == jbvString)
+					record.scale = pg_strtoint32(pnstrdup(value->val.string.val, value->val.string.len));
+				else if (value->type == jbvNumeric)
+					record.scale = DatumGetInt32(DirectFunctionCall1(numeric_int4, NumericGetDatum(value->val.numeric)));
 				else
-				{
-					elog(WARNING, "name is missing from olr column array...");
-					continue;
-				}
-				v2 = getKeyJsonValueFromContainer(v->val.binary.data, "type", strlen("type"), &vbuf);
-				if (v2)
-				{
-					tmpstr = pnstrdup(v2->val.string.val, v2->val.string.len);
-					tmprecord.dbztype = getOlrTypeFromString(tmpstr);
-					pfree(tmpstr);
-				}
-				else
-				{
-					elog(WARNING, "type is missing from olr column array...");
-					continue;
-				}
-				v2 = getKeyJsonValueFromContainer(v->val.binary.data, "scale", strlen("scale"), &vbuf);
-				if (v2)
-				{
-					tmpstr = pnstrdup(v2->val.string.val, v2->val.string.len);
-					tmprecord.scale = atoi(tmpstr);
-					pfree(tmpstr);
-				}
-
-				/* tmprecord.timerep not given from OLR - data processor needs to figure out itself */
-
-				tmprecord.jsonpos = jsonpos;
-				jsonpos++;
-			}
-			else
-			{
-				elog(WARNING, "unexpected container type %d", v->type);
-				continue;
+					elog(ERROR, "source column scale must be a string or number");
 			}
 
-			entry = (NameJsonposEntry *) hash_search(jsonposhash, tmprecord.name, HASH_ENTER, &found);
-			if (!found)
-			{
-				strlcpy(entry->name, tmprecord.name, NAMEDATALEN);
-				entry->jsonpos = tmprecord.jsonpos;
-				entry->dbztype = tmprecord.dbztype;
-				entry->timerep = tmprecord.timerep;
-				entry->scale = tmprecord.scale;
-				elog(DEBUG1, "new jsonpos entry name=%s pos=%d dbztype=%d timerep=%d scale=%d",
-						entry->name, entry->jsonpos, entry->dbztype, entry->timerep, entry->scale);
-			}
+			/* The source's spelling is exact; target casing is applied separately. */
+			fc_source_column_insert(cache, record.name, i, record.dbztype,
+									record.timerep, record.scale);
+			pfree(record.name);
 		}
-
 	}
-	return jsonposhash;
+	PG_CATCH();
+	{
+		fc_destroy_source_column_cache(cache);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	return cache;
 }
 
 /*
@@ -1380,7 +1334,7 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 	StringInfoData strinfo, objid;
 	bool found;
 	HTAB * typeidhash;
-	HTAB * namejsonposhash;
+	SourceColumnCache * namejsonposhash;
 	HASHCTL hash_ctl;
 	NameOidEntry * entry;
 	NameJsonposEntry * entry2;
@@ -1530,11 +1484,26 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 		olrdml->mappedObjectId = pstrdup(strinfo.data);
 	}
 
+	/* Target keys must fit PostgreSQL identifiers; sources require an explicit
+	 * mapping when their names exceed that limit. Never truncate cache keys. */
+	if (strlen(olrdml->schema) >= NAMEDATALEN ||
+		strlen(olrdml->table) >= NAMEDATALEN)
+		ereport(ERROR, (errcode(ERRCODE_NAME_TOO_LONG),
+						errmsg("target schema or table name exceeds PostgreSQL's identifier limit")));
+
 	/* prepare cache key */
 	strlcpy(cachekey.schema, olrdml->schema, sizeof(cachekey.schema));
 	strlcpy(cachekey.table, olrdml->table, sizeof(cachekey.table));
 
 	cacheentry = (DataCacheEntry *) hash_search(dataCacheHash, &cachekey, HASH_ENTER, &found);
+	if (found && (!cacheentry->typeidhash || !cacheentry->namejsonposhash))
+	{
+		/* An earlier missing-target error/skip may have left no usable schema. */
+		if (cacheentry->typeidhash)
+			hash_destroy(cacheentry->typeidhash);
+		fc_destroy_source_column_cache(cacheentry->namejsonposhash);
+		found = false;
+	}
 	if (found)
 	{
 		/* use the cached data type hash for lookup later */
@@ -1545,6 +1514,11 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 	}
 	else
 	{
+		cacheentry->typeidhash = NULL;
+		cacheentry->namejsonposhash = NULL;
+		cacheentry->tableoid = InvalidOid;
+		cacheentry->natts = 0;
+
 		schemaoid = get_namespace_oid(olrdml->schema, true);
 		if (!OidIsValid(schemaoid))
 		{
@@ -1617,14 +1591,16 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 		/* get primary key bitmapset */
 		pkattrs = RelationGetIndexAttrBitmap(rel, INDEX_ATTR_BITMAP_PRIMARY_KEY);
 
-		/* cache tupdesc and save natts for later use */
-		cacheentry->tupdesc = CreateTupleDescCopy(tupdesc);
+		/* Only natts is retained; the relation owns its tuple descriptor. */
 		olrdml->natts = tupdesc->natts;
 		cacheentry->natts = olrdml->natts;
 
 		for (attnum = 1; attnum <= tupdesc->natts; attnum++)
 		{
 			Form_pg_attribute attr = TupleDescAttr(tupdesc, attnum - 1);
+
+			if (attr->attisdropped)
+				continue;
 			entry = (NameOidEntry *) hash_search(typeidhash, NameStr(attr->attname), HASH_ENTER, &found);
 			if (!found)
 			{
@@ -1634,6 +1610,8 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 				entry->typemod = attr->atttypmod;
 				if (pkattrs && bms_is_member(attnum - FirstLowInvalidHeapAttributeNumber, pkattrs))
 					entry->ispk =true;
+				else
+					entry->ispk = false;
 				get_type_category_preferred(entry->oid, &entry->typcategory, &entry->typispreferred);
 				strlcpy(entry->typname, format_type_be(attr->atttypid), NAMEDATALEN);
 			}
@@ -1645,7 +1623,18 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 		 * build another hash to store json value's locations of schema data for correct additional param lookups
 		 * todo: combine this hash with typeidhash above to save one hash
 		 */
-		cacheentry->namejsonposhash = build_olr_schema_jsonpos_hash(jbschema);
+		PG_TRY();
+		{
+			cacheentry->namejsonposhash = build_olr_schema_jsonpos_hash(jbschema);
+		}
+		PG_CATCH();
+		{
+			/* Never reuse a half-built, session-lived schema cache after ERROR. */
+			hash_destroy(typeidhash);
+			(void) hash_search(dataCacheHash, &cachekey, HASH_REMOVE, NULL);
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
 		namejsonposhash = cacheentry->namejsonposhash;
 		if (!namejsonposhash)
 		{
@@ -1667,6 +1656,7 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 			JsonbIteratorToken r;
 			char * key = NULL;
 			char * value = NULL;
+			bool value_is_null = false;
 			DBZ_DML_COLUMN_VALUE * colval = NULL;
 			Datum datum_elems[1] = {CStringGetTextDatum("after")};
 
@@ -1715,11 +1705,13 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 								break;
 
 							key = pnstrdup(v.val.string.val, v.val.string.len);
+							value_is_null = false;
 							break;
 						case WJB_VALUE:
 						case WJB_ELEM:
 							if (pause)
 								break;
+							value_is_null = v.type == jbvNull;
 							switch (v.type)
 							{
 								case jbvNull:
@@ -1753,7 +1745,7 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 					if (key != NULL && value != NULL)
 					{
 						char * mappedColumnName = NULL;
-						char * colname_lower = NULL;
+
 						StringInfoData colNameObjId;
 
 						colval = (DBZ_DML_COLUMN_VALUE *) palloc0(sizeof(DBZ_DML_COLUMN_VALUE));
@@ -1763,7 +1755,8 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 						colval->remoteColumnName = pstrdup(colval->name);
 
 						fc_normalize_name(synchdb_letter_casing_strategy, colval->name, strlen(colval->name));
-						colval->value = pstrdup(value);
+						colval->is_null = value_is_null;
+						colval->value = value_is_null ? NULL : pstrdup(value);
 
 						/* transform the column name if needed */
 						initStringInfo(&colNameObjId);
@@ -1779,6 +1772,9 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 							pfree(colNameObjId.data);
 
 						/* look up its data type */
+						if (strlen(colval->name) >= NAMEDATALEN)
+							ereport(ERROR, (errcode(ERRCODE_NAME_TOO_LONG),
+										errmsg("target column name exceeds PostgreSQL's identifier limit")));
 						entry = (NameOidEntry *) hash_search(typeidhash, colval->name, HASH_FIND, &found);
 						if (found)
 						{
@@ -1793,19 +1789,21 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 						else
 							elog(ERROR, "cannot find data type for column %s. Non-existent column?", colval->name);
 
-						colname_lower = pstrdup(colval->remoteColumnName);
-						fc_normalize_name(LCS_NORMALIZE_LOWERCASE, colname_lower, strlen(colname_lower));
-						entry2 = (NameJsonposEntry *) hash_search(namejsonposhash, colname_lower, HASH_FIND, &found);
-						if (found)
+						entry2 = fc_source_column_lookup(namejsonposhash, colval->remoteColumnName);
+
+						if (entry2)
 						{
 							colval->dbztype = entry2->dbztype;
 							colval->timerep = entry2->timerep;
 							colval->scale = entry2->scale;
 						}
 						else
+						{
+							fc_invalidate_data_cache(&cachekey);
 							elog(ERROR, "cannot find olr json column schema data for column %s(%s). invalid json event?",
-									colval->name, colname_lower);
-						pfree(colname_lower);
+									colval->name, colval->remoteColumnName);
+						}
+
 
 						olrdml->columnValuesAfter = lappend(olrdml->columnValuesAfter, colval);
 						pfree(key);
@@ -1826,6 +1824,7 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 			JsonbIteratorToken r;
 			char * key = NULL;
 			char * value = NULL;
+			bool value_is_null = false;
 			DBZ_DML_COLUMN_VALUE * colval = NULL;
 			Datum datum_elems_before[1] = {CStringGetTextDatum("before")};
 			Datum datum_elems_after[1] = {CStringGetTextDatum("after")};
@@ -1885,12 +1884,14 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 									break;
 
 								key = pnstrdup(v.val.string.val, v.val.string.len);
+							value_is_null = false;
 								break;
 							case WJB_VALUE:
 							case WJB_ELEM:
 								if (pause)
 									break;
-								switch (v.type)
+								value_is_null = v.type == jbvNull;
+							switch (v.type)
 								{
 									case jbvNull:
 										value = pstrdup("NULL");
@@ -1923,7 +1924,7 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 						if (key != NULL && value != NULL)
 						{
 							char * mappedColumnName = NULL;
-							char * colname_lower = NULL;
+
 							StringInfoData colNameObjId;
 
 							colval = (DBZ_DML_COLUMN_VALUE *) palloc0(sizeof(DBZ_DML_COLUMN_VALUE));
@@ -1933,7 +1934,8 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 							colval->remoteColumnName = pstrdup(colval->name);
 
 							fc_normalize_name(synchdb_letter_casing_strategy, colval->name, strlen(colval->name));
-							colval->value = pstrdup(value);
+							colval->is_null = value_is_null;
+							colval->value = value_is_null ? NULL : pstrdup(value);
 
 							/* transform the column name if needed */
 							initStringInfo(&colNameObjId);
@@ -1949,7 +1951,10 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 								pfree(colNameObjId.data);
 
 							/* look up its data type */
-							entry = (NameOidEntry *) hash_search(typeidhash, colval->name, HASH_FIND, &found);
+							if (strlen(colval->name) >= NAMEDATALEN)
+							ereport(ERROR, (errcode(ERRCODE_NAME_TOO_LONG),
+										errmsg("target column name exceeds PostgreSQL's identifier limit")));
+						entry = (NameOidEntry *) hash_search(typeidhash, colval->name, HASH_FIND, &found);
 							if (found)
 							{
 								colval->datatype = entry->oid;
@@ -1963,19 +1968,21 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 							else
 								elog(ERROR, "cannot find data type for column %s. Non-existent column?", colval->name);
 
-							colname_lower = pstrdup(colval->remoteColumnName);
-							fc_normalize_name(LCS_NORMALIZE_LOWERCASE, colname_lower, strlen(colname_lower));
-							entry2 = (NameJsonposEntry *) hash_search(namejsonposhash, colname_lower, HASH_FIND, &found);
-							if (found)
+							entry2 = fc_source_column_lookup(namejsonposhash, colval->remoteColumnName);
+
+							if (entry2)
 							{
 								colval->dbztype = entry2->dbztype;
 								colval->timerep = entry2->timerep;
 								colval->scale = entry2->scale;
 							}
 							else
+							{
+								fc_invalidate_data_cache(&cachekey);
 								elog(ERROR, "cannot find olr json column schema data for column %s(%s). invalid json event?",
-										colval->name, colname_lower);
-							pfree(colname_lower);
+										colval->name, colval->remoteColumnName);
+							}
+
 
 							if (i == 0)
 								olrdml->columnValuesBefore = lappend(olrdml->columnValuesBefore, colval);
@@ -2001,6 +2008,7 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 			JsonbIteratorToken r;
 			char * key = NULL;
 			char * value = NULL;
+			bool value_is_null = false;
 			DBZ_DML_COLUMN_VALUE * colval = NULL;
 			Datum datum_elems[1] = {CStringGetTextDatum("before")};
 
@@ -2049,11 +2057,13 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 								break;
 
 							key = pnstrdup(v.val.string.val, v.val.string.len);
+							value_is_null = false;
 							break;
 						case WJB_VALUE:
 						case WJB_ELEM:
 							if (pause)
 								break;
+							value_is_null = v.type == jbvNull;
 							switch (v.type)
 							{
 								case jbvNull:
@@ -2087,7 +2097,7 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 					if (key != NULL && value != NULL)
 					{
 						char * mappedColumnName = NULL;
-						char * colname_lower = NULL;
+
 						StringInfoData colNameObjId;
 
 						colval = (DBZ_DML_COLUMN_VALUE *) palloc0(sizeof(DBZ_DML_COLUMN_VALUE));
@@ -2097,7 +2107,8 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 						colval->remoteColumnName = pstrdup(colval->name);
 
 						fc_normalize_name(synchdb_letter_casing_strategy, colval->name, strlen(colval->name));
-						colval->value = pstrdup(value);
+						colval->is_null = value_is_null;
+						colval->value = value_is_null ? NULL : pstrdup(value);
 
 						/* transform the column name if needed */
 						initStringInfo(&colNameObjId);
@@ -2113,6 +2124,9 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 							pfree(colNameObjId.data);
 
 						/* look up its data type */
+						if (strlen(colval->name) >= NAMEDATALEN)
+							ereport(ERROR, (errcode(ERRCODE_NAME_TOO_LONG),
+										errmsg("target column name exceeds PostgreSQL's identifier limit")));
 						entry = (NameOidEntry *) hash_search(typeidhash, colval->name, HASH_FIND, &found);
 						if (found)
 						{
@@ -2127,19 +2141,21 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 						else
 							elog(ERROR, "cannot find data type for column %s. Non-existent column?", colval->name);
 
-						colname_lower = pstrdup(colval->remoteColumnName);
-						fc_normalize_name(LCS_NORMALIZE_LOWERCASE, colname_lower, strlen(colname_lower));
-						entry2 = (NameJsonposEntry *) hash_search(namejsonposhash, colname_lower, HASH_FIND, &found);
-						if (found)
+						entry2 = fc_source_column_lookup(namejsonposhash, colval->remoteColumnName);
+
+						if (entry2)
 						{
 							colval->dbztype = entry2->dbztype;
 							colval->timerep = entry2->timerep;
 							colval->scale = entry2->scale;
 						}
 						else
+						{
+							fc_invalidate_data_cache(&cachekey);
 							elog(ERROR, "cannot find olr json column schema data for column %s(%s). invalid json event?",
 									colval->name, colval->remoteColumnName);
-						pfree(colname_lower);
+						}
+
 
 						olrdml->columnValuesBefore = lappend(olrdml->columnValuesBefore, colval);
 						pfree(key);
@@ -2194,6 +2210,10 @@ fc_processOLRChangeEvent(void * event, SynchdbStatistics * myBatchStats,
 	struct timeval tv;
 
 	Datum datum_path_payload[2] = {CStringGetTextDatum("payload"), CStringGetTextDatum("0")};
+
+	/* Invalidation callbacks only mark an epoch. Rebuild borrowed metadata in
+	 * this normal entry point, including after transaction/subtransaction abort. */
+	fc_ensureDataCache();
 
 	tempContext = AllocSetContextCreate(TopMemoryContext,
 										"FORMAT_CONVERTER",

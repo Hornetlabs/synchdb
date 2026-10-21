@@ -16,15 +16,7 @@
 #include "access/xact.h"
 #include "utils/snapmgr.h"
 #include "utils/builtins.h"
-
-/* extern globals */
-extern int myConnectorId;
-extern int dbz_offset_flush_interval_ms;
-extern bool synchdb_log_event_on_error;
-extern char * g_eventStr;
-extern int olr_read_buffer_size;
-extern int olr_connect_timeout_ms;
-extern int olr_read_timeout_ms;
+#include "runtime/config.h"
 
 /* static globals */
 static NetioContext g_netioCtx = {0};
