@@ -17,8 +17,8 @@ synchdb_add_conninfo takes these arguments:
 | password              | password to authenticate the username |
 | source database       | this is the name of source database that we want to replicate changes from.|
 | source schema  | this is the name of source schema under source database that we want to replicate changes from  |
-| table                 | (optional) - expressed in the form of `[database].[table]` or `[schema].[table]` that must exists in source database / schema so the engine will only replicate the specified tables. If left empty, all tables are replicated. Alternatively, a table list file can be specified with `file:` prefix  |
-| snapshot table        | (optional) - expressed in the form of `[database].[table]` or `[schema].[table]` that must exists in the `table` setting above, so the engine will only rebuild the snapshot of these tables if snapshot mode is set to `always`. If left empty or null, all tables specified in `table` setting above will be rebuilt when snapshot mode is set to `always`. Alternatively, a snapshot table list file can be specified with `file:` prefix|
+| table                 | (optional) - expressed in the form of `[database].[table]` (MySQL) or `[schema].[table]` (SQL Server, Oracle, PostgreSQL) that must exists in source database / schema so the engine will only replicate the specified tables. If left empty, all tables are replicated. Alternatively, a table list file can be specified with `file:` prefix  |
+| snapshot table        | (optional) - expressed in the form of `[database].[table]` (MySQL), `[database].[schema].[table]` (SQL Server, Oracle) or `[schema].[table]` (PostgreSQL), see the *Snapshot Table Format* section below. It must exists in the `table` setting above, so the engine will only rebuild the snapshot of these tables if snapshot mode is set to `always`. If left empty or null, all tables specified in `table` setting above will be rebuilt when snapshot mode is set to `always`. Alternatively, a snapshot table list file can be specified with `file:` prefix|
 | connector             | the connector type (See below) |
 
 <<**NOTE**>> `source database`, `source schema`, `username`, `password`, `table` and `snapshot table` are case sensitive, and you must specify the names exactly as appeared in your source database, so keep in mind the letter casing of these names.  
@@ -90,6 +90,42 @@ the file path can be relative to where PostgreSQL data directory or an absolute 
 
 We can normally leave `snapshot table list` parameter to either empty or as `null`, which would default to the same value as the `table` parameter. This means that SynchDB will perform an initial snapshot (replicate the schema and copy initial data) on all the tables specified in `table` parameter when needed. In some cases, we may only want a subset of `table` to perform the initial snapshot, if that is the case, we would set a different `snapshot table list` to indicate to SynchDB to only rebuild the table snapshot specified.
 
+## **Snapshot Table Format**
+
+The `snapshot table` (`snapshottable`) value is passed to the Debezium engine as-is (as `snapshot.include.collection.list`), and Debezium matches each entry against the **fully qualified table identifier** of the source database:
+
+| connector type | format | example |
+|----------------|--------|---------|
+| mysql | `[database].[table]` | `inventory.customers` |
+| sqlserver | `[database].[schema].[table]` | `testDB.dbo.customers` |
+| oracle | `[database].[schema].[table]` | `FREE.DBZUSER.CUSTOMERS` |
+| postgres | `[schema].[table]` | `public.customers` |
+
+<<**IMPORTANT**>> This is **not** the same form as the `table` option because the two values are handed to different Debezium filters. `table` maps to `table.include.list`, which matches the schema and table name (such as `dbo.customers` for SQL Server, `DBZUSER.CUSTOMERS` for Oracle, `public.customers` for PostgreSQL and `inventory.customers` for MySQL), while `snapshot table` maps to `snapshot.include.collection.list`, which matches the complete table identifier used by the connector. For SQL Server and Oracle that identifier starts with the database name (`testDB.dbo.customers`, `FREE.DBZUSER.CUSTOMERS`), while the MySQL and the PostgreSQL connectors use `[database].[table]` and `[schema].[table]` respectively, so the database name must not be part of the value. The `ext_tbname` column of `synchdb_att_view` shows the full identifier of a captured table, which can be used directly for SQL Server and Oracle; for PostgreSQL, drop the database name prefix.
+
+Additional notes:
+
+* Multiple tables are separated by comma.
+* Each entry is interpreted as a **regular expression** (case insensitive) which must match the whole identifier. So `testDB.dbo.customers` works (`.` matches any character) and so does `.*\.customers`.
+* The `snapshot_table_list` array inside a table list file follows exactly the same rule.
+* Tables not listed in `snapshot table` are skipped by an `always` mode snapshot. Their data in PostgreSQL is not copied again and stays untouched, which makes `snapshot table` the recommended way to add new tables without re-snapshotting (and hence re-loading) the tables that are already replicating. Just make sure the destination tables of the newly added tables do not already hold conflicting data (such as duplicate primary keys), otherwise remove or truncate them before starting the connector.
+* The `table` and `snapshot table` values are each stored in a fixed size shared memory field of **256 bytes** (`SYNCHDB_CONNINFO_TABLELIST_SIZE` in the source). One byte is reserved for the terminating null character, so at most **255 characters** fit into it. `synchdb_add_conninfo` raises an error when the value is longer than the field.
+* Both values are kept in fixed size shared memory fields, so updating `synchdb_conninfo` directly with `UPDATE` bypasses that length check and the tail of an over-long value is **silently truncated**. The symptom is that the tables at the end of the list are neither created nor snapshotted: the `table=...` printed in the startup log is the truncated value even though the `data` column still looks complete. Use a table list file (`file:`) or split the tables across several connectors when the list is long.
+
+If `snapshot table` matches no captured table, the requested snapshot is not applied, so fix the value and restart the connector. To check which tables the engine actually selected for the snapshot, look for this log line right after the connector starts:
+
+```
+Snapshot step 3 - Locking captured tables []
+```
+
+For SQL Server, MySQL and Oracle, this line is logged as well:
+
+```
+Only captured tables schema should be captured, capturing: []
+```
+
+An empty set means the `snapshot table` value did not match any table, so double check the format for your connector type.
+
 
 ## **Example: Create a Connector for each Supported Source Database to Replicate All Tables**
 
@@ -121,7 +157,7 @@ SELECT
 
 ## **Example: Create a Connector to Replicate Specified Tables**
 
-Note that the tables must be specified in fully-qualified names such as `[database].[table]` or `[schema].[table]` and exist in the source database.
+Note that the tables must be specified in fully-qualified names such as `[database].[table]` (MySQL) or `[schema].[table]` (SQL Server, PostgreSQL) and exist in the source database. The `snapshot table` parameter, however, uses the full identifier form as described in *Snapshot Table Format* above.
 
 Create a MySQL connector called `mysqlconn` to replicate `orders` and `customers` tables under `inventory` in MySQL to destination database `postgres` in PostgreSQL:
 ```sql
