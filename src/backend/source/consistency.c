@@ -108,10 +108,10 @@ synchdb_source_consistency_validate_run(const SynchdbRunSpec *spec)
 						errhint("Use initial_only for a snapshot without CDC, or no_data for CDC without establishing a baseline. Exclusive snapshot locks alone do not synchronize the asynchronous CDC capture job.")));
 	if (spec->capture_backend == SYNCHDB_CAPTURE_OLR &&
 		strcmp(mode, "initial_only") != 0 &&
-		(strcmp(mode, "no_data") != 0 ||
-		 !(spec->connection.flag & CONNFLAG_SCHEMA_SYNC_MODE)))
+		((strcmp(spec->connection.table, "null") != 0 && spec->connection.table[0] != '\0') ||
+		 (strcmp(spec->connection.snapshottable, "null") != 0 && spec->connection.snapshottable[0] != '\0')))
 		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						errmsg("OpenLogReplicator requires a separately verified snapshot handoff")));
+						errmsg("verified native OLR handoff currently requires the complete configured schema")));
 }
 
 Jsonb *
@@ -142,13 +142,15 @@ synchdb_source_consistency_describe(const SynchdbRunSpec *spec, MemoryContext co
 	appendStringInfoString(&json, ",\"protocol\":");
 	escape_json(&json, !native ? "FDW_BOOTSTRAP_ONLY_V1" :
 		(spec->capture_backend == SYNCHDB_CAPTURE_OLR ?
-		 "ORACLE_SNAPSHOT_ONLY_OLR_HANDOFF_UNIMPLEMENTED_V1" : protocol->native_protocol));
+		 "ORACLE_OLR_SOURCE_FENCE_SNAPSHOT_V1" : protocol->native_protocol));
 	appendStringInfoString(&json, ",\"read_view\":");
 	escape_json(&json, schema_only ? "METADATA_ONLY" :
 		(native ? "ENGINE_OWNED_READ_SESSION" : protocol->fdw_read_view));
 	appendStringInfo(&json, ",\"required_native_settings\":%s",
 		spec->capture_backend == SYNCHDB_CAPTURE_OLR ?
-		"{\"snapshot.locking.mode\":\"shared\"}" : protocol->native_settings);
+		"{\"snapshot.locking.mode\":\"shared\",\"internal.log.mining.transaction.snapshot.boundary.mode\":\"all\"}" : protocol->native_settings);
+	if (spec->capture_backend == SYNCHDB_CAPTURE_OLR)
+		appendStringInfoString(&json, ",\"required_olr_settings\":{\"format.message\":2,\"format.schema\":7,\"format.scn-type\":3,\"flags.include\":4096},\"position_commit\":\"TARGET_TRANSACTION\"");
 	if (spec->source_dialect == SYNCHDB_SOURCE_SQLSERVER)
 		appendStringInfoString(&json, ",\"automatic_capture_drain_fence\":false,\"unsupported_native_modes\":[\"initial\",\"always\"]");
 	appendStringInfo(&json,
@@ -156,7 +158,7 @@ synchdb_source_consistency_describe(const SynchdbRunSpec *spec, MemoryContext co
 		"\"cdc_eligible\":false,\"handoff_verified\":false,\"prerequisites_verified\":false,"
 		"\"evidence_owner\":\"%s\",\"snapshot_threads\":%d,"
 		"\"external_retry_after_read_session_end\":\"RESTART_BOOTSTRAP\",\"prerequisites\":%s}",
-		native && spec->capture_backend != SYNCHDB_CAPTURE_OLR &&
+		native &&
 		spec->source_dialect != SYNCHDB_SOURCE_SQLSERVER &&
 		(strcmp(spec->snapshot_mode, "initial") == 0 || strcmp(spec->snapshot_mode, "always") == 0) ? "true" : "false",
 		native ? "NATIVE_ENGINE" : "NONE", native ? 1 : 0, protocol->prerequisites);

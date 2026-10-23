@@ -818,50 +818,58 @@ handle_string_to_numeric(const char * in, bool addquote)
 static char *
 handle_base64_to_bit(const char * in, bool addquote, int typemod, bool padzero)
 {
-	int tmpoutlen = pg_b64_dec_len(strlen(in));
-	unsigned char * tmpout = (unsigned char *) palloc0(tmpoutlen);
-	char * out = NULL;
-	int extrazeros = 0;
+	Size input_length = strlen(in);
+	int capacity;
+	int tmpoutlen;
+	unsigned char *tmpout;
+	char *out;
+	Size bits;
 
-#if SYNCHDB_PG_MAJOR_VERSION >= 1800
-	tmpoutlen = pg_b64_decode(in, strlen(in), tmpout, tmpoutlen);
-#else
-	tmpoutlen = pg_b64_decode(in, strlen(in), (char*)tmpout, tmpoutlen);
-#endif
+	if (input_length == 0 || input_length > MaxAllocSize / 8)
+		ereport(ERROR, (errcode(ERRCODE_INVALID_BINARY_REPRESENTATION),
+						errmsg("invalid base64 bit string length")));
+	capacity = pg_b64_dec_len((int) input_length);
+	tmpout = palloc(capacity);
+	tmpoutlen = synchdb_pg_base64_decode(in, (int) input_length, tmpout, capacity);
+	if (tmpoutlen <= 0)
+		ereport(ERROR, (errcode(ERRCODE_INVALID_BINARY_REPRESENTATION),
+						errmsg("invalid base64 bit string")));
+	/* Allocate for the entire decoded value before considering target width.
+	 * A narrower target must never turn padding into a negative write offset. */
+	out = palloc((Size) tmpoutlen * 8 + 1);
+	reverse_byte_array(tmpout, tmpoutlen);
+	bytes_to_binary_string(tmpout, tmpoutlen, out, !padzero);
+	pfree(tmpout);
+	bits = strlen(out);
+	if (padzero && typemod > 0 && bits > (Size) typemod)
+	{
+		Size excess = bits - typemod;
+		Size index;
 
-	if (padzero)
-		extrazeros = (typemod - (tmpoutlen * 8));
+		/* Non-byte-aligned MySQL BIT widths have zero high padding bits. */
+		for (index = 0; index < excess; index++)
+			if (out[index] != '0')
+				ereport(ERROR, (errcode(ERRCODE_STRING_DATA_RIGHT_TRUNCATION),
+								errmsg("bit string value exceeds target width %d", typemod)));
+		memmove(out, out + excess, (Size) typemod + 1);
+	}
+	else if (padzero && typemod > 0 && bits < (Size) typemod)
+	{
+		Size zeros = (Size) typemod - bits;
+		char *padded = palloc((Size) typemod + 1);
 
+		memset(padded, '0', zeros);
+		memcpy(padded + zeros, out, bits + 1);
+		pfree(out);
+		out = padded;
+	}
 	if (addquote)
 	{
-		/* 8 bits per byte + 2 single quotes + b + extra zeros + terminating null */
-		out = (char *) palloc0((tmpoutlen * 8) + 2 + 1 + extrazeros + 1);
+		char *quoted = quote_literal_cstr(out);
 
-		strcat(out, "'b");
-		out += 2;
-
-		/* zeros */
-		memset(out, '0', extrazeros);
-
-		/* bit value */
-		reverse_byte_array(tmpout, tmpoutlen);
-		bytes_to_binary_string(tmpout, tmpoutlen, out + extrazeros, !padzero);
-
-		strcat(out, "'");
+		pfree(out);
+		out = quoted;
 	}
-	else
-	{
-		/* 8 bits per byte + extra zeros + terminating null */
-		out = (char *) palloc0((tmpoutlen * 8) + extrazeros + 1);
-
-		/* zeros */
-		memset(out, '0', extrazeros);
-
-		/* bit value */
-		reverse_byte_array(tmpout, tmpoutlen);
-		bytes_to_binary_string(tmpout, tmpoutlen, out + extrazeros, !padzero);
-	}
-	pfree(tmpout);
 	return out;
 }
 
@@ -1587,7 +1595,9 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, const char * rem
 		(colval->timerep == DATA_GEOMETRY || colval->timerep == DATA_POINT))
 		spatial = DatumGetJsonbP(DirectFunctionCall1(jsonb_in, CStringGetDatum(in)));
 
-	switch(colval->datatype)
+	if (colval->dbztype == DBZTYPE_ARRAY_TEXT)
+		out = addquote ? escapeSingleQuote(in, true) : pstrdup(in);
+	else switch(colval->datatype)
 	{
 		case BOOLOID:
 		case INT8OID:
@@ -2007,6 +2017,12 @@ list_sort_cmp(const ListCell *a, const ListCell *b)
  * this function converts  DBZ_DML to PG_DML strucutre
  */
 /* Perform final target input once, after any repair expression, for both Writers. */
+char *
+fc_convert_value_text(DBZ_DML_COLUMN_VALUE *source, ConnectorType type)
+{
+	return processDataByType(source, false, NULL, type);
+}
+
 SynchdbTargetColumn *
 fc_convert_target_column(DBZ_DML_COLUMN_VALUE *source, const char *remote_object_id,
                          Relation relation, ConnectorType type)
@@ -2029,7 +2045,8 @@ fc_convert_target_column(DBZ_DML_COLUMN_VALUE *source, const char *remote_object
 	if (attribute->attgenerated || attribute->attidentity == ATTRIBUTE_IDENTITY_ALWAYS)
 		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 						errmsg("explicit values for generated target columns are not supported")));
-	if (!source->is_null && source->typcategory == TYPCATEGORY_ARRAY)
+	if (!source->is_null && source->typcategory == TYPCATEGORY_ARRAY &&
+		source->dbztype != DBZTYPE_ARRAY_TEXT)
 		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 						errmsg("source values require an explicit PostgreSQL array codec")));
 	target = palloc0(sizeof(*target));

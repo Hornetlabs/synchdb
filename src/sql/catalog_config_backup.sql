@@ -119,7 +119,7 @@ DECLARE
     v_schema pg_catalog.name;
     v_tables pg_catalog.text[] := ARRAY[
         'synchdb_conninfo','synchdb_objmap','synchdb_attribute',
-        'synchdb_control_state','synchdb_control_commands','synchdb_artifacts',
+        'synchdb_control_state','synchdb_control_commands','synchdb_artifacts','synchdb_olr_positions',
         'synchdb_bootstrap_targets','synchdb_bootstrap_runs'];
     v_relations pg_catalog.oid[] := ARRAY[]::pg_catalog.oid[];
     v_relation pg_catalog.oid;

@@ -15,5 +15,7 @@ extern int synchdb_java_create_offset(SynchdbJavaRuntime *java, int connector_ty
 									 const char *database, const char *offset, const char *file);
 extern int synchdb_java_memory_dump(SynchdbJavaRuntime *java);
 extern int synchdb_java_set_loglevel(SynchdbJavaRuntime *java, int level);
+extern char *synchdb_java_string_operation(SynchdbJavaRuntime *java,
+		const char *method_name, const char *request);
 
 #endif /* SYNCHDB_JAVA_OPERATIONS_H */

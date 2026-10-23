@@ -4,13 +4,17 @@ dbz-engine/target/
 testenv/olr/oradata/
 testenv/olr/checkpoint/
 testenv/olr/olrswap/
+src/test/pytests/__pycache__/
 src/test/pytests/synchdbtests/__pycache__/
 src/test/pytests/synchdbtests/t/__pycache__/
+src/test/pytests/truncate/__pycache__/
 src/backend/debezium/target/
 synchdb_testdir/
 
 # When PG is configured with --enable-llvm, .bc files will be generated.
 *.bc
+/.synchdb-build-options
+/.synchdb-build-options.tmp
 
 # Generated extension installation script (sources live in src/sql/).
 /synchdb--1.0.sql
@@ -22,3 +26,7 @@ synchdb_testdir/
 
 # Generated local release review bundles and validation evidence.
 /.release-review/
+
+# IDEs
+.vscode/
+

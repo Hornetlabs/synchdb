@@ -46,6 +46,23 @@ END;
 $synchdb_artifact_catalog$;
 REVOKE ALL ON synchdb_artifacts FROM PUBLIC;
 
+-- The replay coordinate commits in the same WAL transaction as source data.
+-- Zero snapshot_scn is PREPARED; positive snapshot_scn is CDC eligible.
+CREATE TABLE synchdb_olr_positions (
+    database_oid pg_catalog.oid NOT NULL,
+    connector_id pg_catalog.uuid NOT NULL,
+    generation pg_catalog.uuid NOT NULL,
+    source_proof pg_catalog.jsonb NOT NULL,
+    snapshot_scn pg_catalog.int8 NOT NULL CHECK (snapshot_scn >= 0),
+    scn pg_catalog.int8 NOT NULL CHECK (scn >= 0),
+    c_scn pg_catalog.int8 NOT NULL CHECK (c_scn >= 0),
+    c_idx pg_catalog.int8 NOT NULL CHECK (c_idx >= 0),
+    PRIMARY KEY (database_oid,connector_id,generation),
+    FOREIGN KEY (database_oid,connector_id,generation)
+        REFERENCES synchdb_artifacts(database_oid,connector_id,generation)
+);
+REVOKE ALL ON synchdb_olr_positions FROM PUBLIC;
+
 CREATE OR REPLACE FUNCTION synchdb_artifact_manifest(pg_catalog.uuid) RETURNS pg_catalog.jsonb
 AS 'MODULE_PATHNAME','synchdb_artifact_manifest' LANGUAGE C VOLATILE STRICT;
 CREATE OR REPLACE FUNCTION synchdb_artifact_reset(pg_catalog.uuid) RETURNS pg_catalog.int4

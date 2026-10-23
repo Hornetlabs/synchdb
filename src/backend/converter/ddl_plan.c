@@ -19,6 +19,7 @@
 #include "executor/target_validate.h"
 #include "lib/stringinfo.h"
 #include "miscadmin.h"
+#include "nodes/nodeFuncs.h"
 #include "runtime/config.h"
 #include "storage/lmgr.h"
 #include "utils/builtins.h"
@@ -202,7 +203,10 @@ ddl_validate_source(const SynchdbDbzTableChange *source)
 		const SynchdbDbzSchemaColumn *column = lfirst(cell);
 		ListCell *key;
 
-		if (column->generated)
+		/* Debezium also marks AUTO_INCREMENT/identity columns as generated.
+		 * Those use the existing auto_incremented type mapping; only computed
+		 * columns require a generation expression absent from this image. */
+		if (column->generated && !column->auto_incremented)
 			ddl_unsupported(source->id.key, "source generated-column expressions cannot be reconstructed from this schema image");
 		if (column->optional)
 			foreach(key, source->primary_key)
@@ -298,7 +302,17 @@ ddl_column(const SynchdbDbzTableChange *table, const SynchdbDbzSchemaColumn *sou
 	}
 	else
 	{
-		(void) parseTypeString(name, &column->type, &column->typmod, NULL);
+		TypeName *parsed = typeStringToTypeName(name, NULL);
+
+		typenameTypeIdAndMod(NULL, parsed, &column->type, &column->typmod);
+		/* SQL grammar supplies an implicit (1) for bare BIT and CHAR. It
+		 * must not hide an inherited source width; explicit modifiers have
+		 * a source location and retain their authored meaning. */
+		if ((use_source_modifiers || (mapping && mapping->length > 0)) &&
+			(column->type == BITOID || column->type == BPCHAROID) &&
+			list_length(parsed->typmods) == 1 &&
+			exprLocation(linitial(parsed->typmods)) < 0)
+			column->typmod = -1;
 		if (get_typtype(column->type) == TYPTYPE_PSEUDO)
 			ddl_unsupported(table->id.key, "pseudo types are not supported target columns");
 		if (column->typmod == -1 && (use_source_modifiers || length > 0 ||
@@ -317,6 +331,20 @@ ddl_column(const SynchdbDbzTableChange *table, const SynchdbDbzSchemaColumn *sou
 				int precision = type == TYPE_SQLSERVER ?
 					(source->has_scale ? scale : -1) : length;
 
+				/* Oracle JDBC reports the byte width of zoned timestamps in
+				 * length and their fractional precision in scale. Streamed DDL
+				 * can instead carry that precision in length without a scale. */
+				if ((type == TYPE_ORACLE || type == TYPE_OLR) &&
+					use_source_modifiers && source->has_scale &&
+					(pg_strncasecmp(source_type, "timestamp", 9) == 0 ||
+					 pg_strcasecmp(source_type, "date") == 0))
+					precision = scale;
+
+				/* SQL Server defaults TIME/DATETIME2/DATETIMEOFFSET to
+				 * seven digits. Keep the established microsecond mapping;
+				 * the value codec and target input round to that resolution. */
+				if (type == TYPE_SQLSERVER && precision == 7)
+					precision = 6;
 				if (precision >= 0 && precision <= 6)
 					/* Builtin datetime typmods are exactly fractional precision.
 					 * Formatting below puts it before WITH/WITHOUT TIME ZONE. */

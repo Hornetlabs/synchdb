@@ -108,8 +108,6 @@ final class SourceConsistency
             throw new IllegalArgumentException("This native connector does not support snapshot mode never");
         if (connectorType == 3 && ("initial".equals(mode) || "always".equals(mode)))
             throw new IllegalArgumentException("SQL Server native snapshot-to-CDC requires an unimplemented capture-drain fence; use initial_only or explicit no_data");
-        if (connectorType == 4 && !"initial_only".equals(mode) && !"no_data".equals(mode))
-            throw new IllegalArgumentException("OpenLogReplicator requires a separately verified snapshot handoff");
         properties.setProperty("snapshot.mode", mode);
 
         for (String key : properties.stringPropertyNames())
@@ -127,7 +125,8 @@ final class SourceConsistency
         require(properties, "schema.history.internal.skip.unparseable.ddl", "false");
         require(properties, "incremental.snapshot.allow.schema.changes", "false");
 
-        if ("initial".equals(mode) || "initial_only".equals(mode) || "always".equals(mode))
+        if (("initial".equals(mode) || "initial_only".equals(mode) || "always".equals(mode)) &&
+            !(connectorType == 4 && "initial_only".equals(mode)))
         {
             String snapshot = properties.getProperty("snapshot.include.collection.list");
             String capture = properties.getProperty("table.include.list");
@@ -194,6 +193,24 @@ final class SourceConsistency
                 break;
             default:
                 throw new IllegalArgumentException("Unsupported source consistency provider");
+        }
+        if (connectorType == 4)
+        {
+            // The C worker proves the OLR fence before starting this producer.
+            // Java supplies a finite snapshot, never a competing CDC reader.
+            require(properties, "database.connection.adapter", "logminer");
+            require(properties, "internal.log.mining.transaction.snapshot.boundary.mode", "all");
+            // A selected snapshot-only run has no CDC handoff and may limit
+            // its tables. Debezium forbids setting both include and exclude.
+            if (properties.getProperty("table.include.list") == null)
+                properties.setProperty("table.exclude.list", ".*\\.SYNCHDB_OLR_FENCE");
+            if ("no_data".equals(mode))
+            {
+                properties.setProperty("snapshot.mode", "custom");
+                properties.setProperty("snapshot.mode.custom.name", "synchdb_olr_schema");
+            }
+            else
+                properties.setProperty("snapshot.mode", "initial_only");
         }
     }
 }

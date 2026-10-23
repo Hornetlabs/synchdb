@@ -50,6 +50,8 @@ typedef struct SynchdbJavaRuntime
 	bool stop_requested;
 	bool stop_confirmed;
 	bool stop_failed;
+	/* OLR claims its generation before proving the external capture fence. */
+	struct SynchdbArtifactPaths *prepared_artifacts;
 } SynchdbJavaRuntime;
 
 /* Bind persistent GlobalRefs. A partial binding remains owned for cleanup. */

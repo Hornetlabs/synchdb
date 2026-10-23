@@ -1,11 +1,12 @@
 import os
+import secrets
 import subprocess
 import time
 import shutil
 import psycopg2
 import pytest
 
-from common import TEST_DATA_DIR
+from common import TEST_DATA_DIR, update_guc_conf
 
 PG_PORT = "14141"
 PG_HOST = "127.0.0.1"
@@ -124,6 +125,15 @@ class TargetInstance:
             for line in gucs:
                 f.write(f"\n{line}\n")
 
+    def configure_credentials(self):
+        # Each disposable cluster owns a fresh keyring, kept with the cluster
+        # on failure so its encrypted connector configuration remains readable.
+        key_file = os.path.abspath(os.path.join(self.temp_dir, "credentials.keyring"))
+        fd = os.open(key_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(f"synchdb-keyring-v1\nactive regression\nkey regression {secrets.token_hex(32)}\n")
+        self.write_conf(["synchdb.credential_keyfile = '" + key_file.replace("'", "''") + "'"])
+
     def start(self):
         subprocess.run(
             [self._bin("pg_ctl"), "-D", self.data_dir,
@@ -235,6 +245,7 @@ def target(pytestconfig) -> Target:
 def target_instance(request, target: Target):
     inst = TargetInstance(target)
     inst.initdb()
+    inst.configure_credentials()
     inst.write_conf(_BASE_GUCS + target.extra_conf)
     inst.start()
     try:
@@ -281,6 +292,29 @@ def pg_cursor(target_instance):
     conn.close()
 
 
+@pytest.fixture
+def fdw_config(pg_cursor):
+    """Restore the snapshot provider even when a bootstrap assertion fails."""
+    pg_cursor.execute("SHOW synchdb.snapshot_engine")
+    previous = pg_cursor.fetchone()[0]
+    update_guc_conf(pg_cursor, "synchdb.snapshot_engine", "'fdw'", True)
+    try:
+        yield
+    finally:
+        update_guc_conf(pg_cursor, "synchdb.snapshot_engine", f"'{previous}'", True)
+
+
+@pytest.fixture
+def fdw_engine(pg_cursor, dbvendor, fdw_config):
+    extension = {
+        "mysql": "mysql_fdw", "sqlserver": "tds_fdw", "postgres": "postgres_fdw",
+    }.get(dbvendor, "oracle_fdw")
+    pg_cursor.execute("SELECT EXISTS (SELECT 1 FROM pg_available_extensions WHERE name = %s)",
+                      (extension,))
+    if not pg_cursor.fetchone()[0]:
+        pytest.skip(f"{extension} is not available for install")
+
+
 @pytest.fixture(scope="session", autouse=True)
 def setup_remote_instance(source: Source, request):
     # Provisioning stays on the proven ci/setup-remotedbs.sh, keyed by setup_key.
@@ -293,6 +327,9 @@ def setup_remote_instance(source: Source, request):
     subprocess.run(["bash", "./ci/setup-remotedbs.sh"],
                    check=True, env=env, stdout=subprocess.DEVNULL)
     yield
+    if request.session.testsfailed and os.environ.get("SYNCHDB_KEEP_FAILED_SOURCE") == "1":
+        print(f"test failed: source container kept at {source.container}")
+        return
     _teardown_remote_instance(source.setup_key)
 
 

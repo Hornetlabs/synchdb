@@ -51,7 +51,8 @@ final class SnapshotCompletion
 
     static SnapshotCompletion configure(Properties properties, String artifactBase, BatchBridge bridge)
     {
-        if (!"initial_only".equals(properties.getProperty("snapshot.mode")))
+        if (!"initial_only".equals(properties.getProperty("snapshot.mode"))
+            && !"synchdb_olr_schema".equals(properties.getProperty("snapshot.mode.custom.name")))
             return null;
         String generation = artifactBase == null ? "" : artifactBase.substring(artifactBase.lastIndexOf('_') + 1);
         if (!generation.matches("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"))

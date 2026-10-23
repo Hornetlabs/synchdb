@@ -9,6 +9,44 @@
 
 #define PARAMETERS_RESULT "Lcom/example/DebeziumRunner$MyParameters;"
 
+char *
+synchdb_java_string_operation(SynchdbJavaRuntime *java, const char *name,
+							 const char *request)
+{
+	JNIEnv *env = java->env;
+	jmethodID method;
+	jstring argument;
+	jstring volatile returned = NULL;
+	const char *volatile utf = NULL;
+	char *volatile result = NULL;
+
+	if (!env || !java->runner_bound || !synchdb_java_local_begin(env, 4))
+		elog(ERROR, "OLR preflight requires a bound Java runtime");
+	PG_TRY();
+	{
+		method = (*env)->GetMethodID(env, java->cls, name,
+			"(Ljava/lang/String;)Ljava/lang/String;");
+		if (synchdb_java_exception(env) || !method)
+			elog(ERROR, "OLR Java method %s is unavailable", name);
+		argument = synchdb_java_string(env, request);
+		returned = (jstring) (*env)->CallObjectMethod(env, java->obj, method, argument);
+		if (synchdb_java_exception(env) || !returned)
+			elog(ERROR, "OLR Java operation %s failed; inspect the source preflight error", name);
+		utf = (*env)->GetStringUTFChars(env, returned, NULL);
+		if (synchdb_java_exception(env) || !utf)
+			elog(ERROR, "could not read OLR Java operation result");
+		result = pstrdup(utf);
+	}
+	PG_FINALLY();
+	{
+		if (utf)
+			(*env)->ReleaseStringUTFChars(env, returned, utf);
+		(*env)->PopLocalFrame(env, NULL);
+	}
+	PG_END_TRY();
+	return result;
+}
+
 static bool
 java_operation_live(const SynchdbJavaRuntime *java)
 {
@@ -230,7 +268,10 @@ synchdb_java_start(SynchdbJavaRuntime *java, const ConnectionInfo *connection,
 	}
 	/* Persist ownership before a throwing Java call can create engine threads.
 	 * This transaction never publishes an FDW seed or rewrites a live offset. */
-	java_prepare_artifacts(connection, connector_type, &artifacts);
+	if (java->prepared_artifacts)
+		artifacts = *java->prepared_artifacts;
+	else
+		java_prepare_artifacts(connection, connector_type, &artifacts);
 	env = java->env;
 	if (!synchdb_java_local_begin(env, 32))
 		return -1;

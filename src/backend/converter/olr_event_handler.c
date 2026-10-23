@@ -20,6 +20,7 @@
 #include "utils/snapmgr.h"
 #include "utils/jsonfuncs.h"
 #include "parser/parser.h"
+#include "parser/scanner.h"
 #include "mb/pg_wchar.h"
 #include "nodes/parsenodes.h"
 #include "synchdb/synchdb.h"
@@ -31,6 +32,7 @@
 #include "converter/format_converter.h"
 #include "olr/olr_client.h"
 #include "runtime/config.h"
+#include "olr/olr_handoff.h"
 
 /* Oracle raw parser function prototype */
 typedef List * (*oracle_raw_parser_fn)(const char *str, RawParseMode mode);
@@ -39,16 +41,14 @@ static void * handle = NULL;
 
 static bool isalllower(const char *s);
 static bool isallupper(const char *s);
-static char * strtoupper(const char *input);
 static OlrType getOlrTypeFromString(const char * typestring);
-static void strip_after_column_def(StringInfoData *sql);
 static bool is_whitelist_sql(StringInfoData * sql);
 static bool is_whitelist_table(const char * table);
 static SourceColumnCache * build_olr_schema_jsonpos_hash(Jsonb * jb);
 static void destroyOLRDDL(OLR_DDL * ddlinfo);
 static void destroyOLRDML(OLR_DML * dmlinfo);
 static OLR_DDL * parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn,
-		orascn * c_scn, orascn * c_idx, bool isfirst, bool islast);
+		orascn * c_scn, orascn * c_idx, bool isfirst, bool islast, bool *ignored);
 static OLR_DML * parseOLRDML(Jsonb * jb, char op, Jsonb * payload,
 		orascn * scn, orascn * c_scn, orascn * c_idx,
 		bool isfirst, bool islast);
@@ -75,15 +75,6 @@ isalllower(const char *s)
             return false;
     }
     return true;
-}
-
-static char *
-strtoupper(const char *input)
-{
-    char *upper = pstrdup(input);
-    for (char *p = upper; *p; ++p)
-    	*p = (char) pg_toupper((unsigned char) *p);
-    return upper;
 }
 
 static OlrType
@@ -136,97 +127,103 @@ is_whitelist_table(const char * table)
 	return true;
 }
 
-void
-strip_after_column_def(StringInfoData *sql)
+/* Classify SQL tokens, not substrings inside object names. In particular,
+ * CREATE INDEX on CREATE_TABLE_TEST is not a CREATE TABLE statement.
+ * The core scanner also keeps quoted parentheses and AS inside identifiers
+ * from corrupting Oracle storage-clause/recycle-bin normalization. */
+static bool
+is_whitelist_sql(StringInfoData *sql)
 {
-	int paren_level = 0;
-	int i;
+	core_yy_extra_type extra = {0};
+	core_yyscan_t scanner;
+	core_YYSTYPE value;
+	YYLTYPE location;
+	char *command;
+	const char *token;
+	bool create;
+	bool drop;
+	bool alter;
+	bool allowed;
+	int level = 0;
+	int length = sql->len;
 
-	if (!sql || !sql->data)
-		return;
-
-	for (i = 0; i < sql->len; ++i)
+	scanner = scanner_init(sql->data, &extra, &ScanKeywords, ScanKeywordTokens);
+	if (!core_yylex(&value, &location, scanner))
 	{
-		if (sql->data[i] == '(')
+		scanner_finish(scanner);
+		return false;
+	}
+	command = pstrdup(extra.scanbuf + location);
+	create = pg_strcasecmp(command, "CREATE") == 0;
+	drop = pg_strcasecmp(command, "DROP") == 0;
+	alter = pg_strcasecmp(command, "ALTER") == 0;
+	allowed = create || drop || alter ||
+		pg_strcasecmp(command, "TRUNCATE") == 0;
+	if (!core_yylex(&value, &location, scanner))
+		allowed = false;
+	else
+	{
+		token = extra.scanbuf + location;
+		while (create && (pg_strcasecmp(token, "GLOBAL") == 0 ||
+			pg_strcasecmp(token, "PRIVATE") == 0 ||
+			pg_strcasecmp(token, "TEMPORARY") == 0))
 		{
-			paren_level++;
+			if (!core_yylex(&value, &location, scanner))
+				break;
+			token = extra.scanbuf + location;
 		}
-		else if (sql->data[i] == ')')
+		allowed = allowed && pg_strcasecmp(token, "TABLE") == 0;
+	}
+	if (allowed && alter)
+	{
+		/* Read the qualified table name before inspecting its action.
+		 * Supplemental logging changes capture metadata, not target columns. */
+		if (core_yylex(&value, &location, scanner))
 		{
-			paren_level--;
-			if (paren_level == 0)
+			while (core_yylex(&value, &location, scanner))
 			{
-				i++;
+				token = extra.scanbuf + location;
+				if (strcmp(token, ".") != 0)
+					break;
+				if (!core_yylex(&value, &location, scanner))
+					break;
+			}
+			token = extra.scanbuf + location;
+			if ((pg_strcasecmp(token, "ADD") == 0 || pg_strcasecmp(token, "DROP") == 0) &&
+				core_yylex(&value, &location, scanner) &&
+				pg_strcasecmp(extra.scanbuf + location, "SUPPLEMENTAL") == 0 &&
+				core_yylex(&value, &location, scanner) &&
+				pg_strcasecmp(extra.scanbuf + location, "LOG") == 0 &&
+				core_yylex(&value, &location, scanner) &&
+				(pg_strcasecmp(extra.scanbuf + location, "DATA") == 0 ||
+				 pg_strcasecmp(extra.scanbuf + location, "GROUP") == 0))
+				allowed = false;
+		}
+	}
+	if (allowed && (create || drop))
+	{
+		while (core_yylex(&value, &location, scanner))
+		{
+			token = extra.scanbuf + location;
+			if (drop && pg_strcasecmp(token, "AS") == 0)
+			{
+				length = location;
+				break;
+			}
+			if (create && strcmp(token, "(") == 0)
+				level++;
+			else if (create && strcmp(token, ")") == 0 && --level == 0)
+			{
+				length = location + 1;
 				break;
 			}
 		}
 	}
-	/* Truncate after position i */
-	sql->data[i] = '\0';
-	sql->len = i;
-}
-
-/*
- * is_whitelist_sql
- *
- * this function does a simple filtering and normalization on the input DDL
- * statement and returns true if SQL is good to proceed, or false if otherwise.
- * This is kind of rough and may need to add more filtering as more tests are
- * conducted. This filter is needed because the oracle parser does not support
- * every single oracle syntax.
- */
-static bool
-is_whitelist_sql(StringInfoData * sql)
-{
-	char * sqlupper = strtoupper(sql->data);
-    bool allowed = false;
-
-    /* special case for DROP TABLE xxx AS yyy (internal oracle sql) */
-    if (strstr(sqlupper, "DROP") && strstr(sqlupper, "TABLE") &&
-		strstr(sqlupper, "AS"))
-    {
-    	/*
-    	 * Oracle's recycling mode (if enabled) will send query like:
-    	 * "DROP TABLE x AS y", which is internal Oracle mechanism and so we
-    	 * need to truncate everything after 'AS' if this keyword exists.
-    	 */
-        const char *as_pos = strcasestr(sql->data, "AS");
-		if (as_pos != NULL)
-		{
-			int new_len = as_pos - sql->data;
-			sql->data[new_len] = '\0';
-			sql->len = new_len;
-		}
-		allowed = true;
-    }
-
-    /* special case for CREATE TABLE xxx (...) INITRANS 4 PCTFREE 10 ... */
-    if (strstr(sqlupper, "CREATE") && strstr(sqlupper, "TABLE"))
-    {
-    	/* we want to strip all of the post-column options */
-    	strip_after_column_def(sql);
-    	elog(DEBUG1, "sql after stripping = %s", sql->data);
-    }
-    /*
-     * we are only interested in the following DDL statements though Some of
-     * these may not be parsed successfully by oracle parser. This is okay as
-     * we will just ignore them and ensure the ones we are interested can be
-     * parsed
-     */
-    if (strstr(sqlupper, "CREATE") && strstr(sqlupper, "TABLE"))
-    	allowed = true;
-
-    if (strstr(sqlupper, "DROP") && strstr(sqlupper, "TABLE"))
-    	allowed = true;
-
-    if (strstr(sqlupper, "ALTER") && strstr(sqlupper, "TABLE"))
-    	allowed = true;
-
-    if (strstr(sqlupper, "TRUNCATE") && strstr(sqlupper, "TABLE"))
-    	allowed = true;
-
-    pfree(sqlupper);
-    return allowed;
+	scanner_finish(scanner);
+	pfree(command);
+	sql->data[length] = '\0';
+	sql->len = length;
+	return allowed;
 }
 
 static SourceColumnCache *
@@ -346,7 +343,7 @@ destroyOLRDML(OLR_DML * dmlinfo)
  * parseOLRDDL
  */
 static OLR_DDL *
-parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * c_idx, bool isfirst, bool islast)
+parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * c_idx, bool isfirst, bool islast, bool *ignored)
 {
 	JsonbValue * v = NULL;
 	JsonbValue vbuf;
@@ -409,12 +406,8 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 	{
 		schema = pnstrdup(v->val.string.val, v->val.string.len);
 
-		/* we want to make sure the owner matches our conninfo record */
-		if (strcasecmp(schema, get_shm_connector_user_by_id(myConnectorId)))
-		{
-			elog(DEBUG1, "skip ddl with non matching owner...");
-			goto end;
-		}
+		/* The handoff filter has verified the configured source schema.
+		 * A privileged mining account need not own that schema. */
 	}
 	else
 	{
@@ -455,7 +448,8 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 
 	if (!is_whitelist_sql(&sql))
 	{
-		elog(DEBUG1, "unsupported DDL -----> %s", sql.data);
+		elog(DEBUG1, "auxiliary DDL is excluded from replication: %s", sql.data);
+		*ignored = true;
 		goto end;
 	}
 
@@ -1196,6 +1190,20 @@ parseOLRDDL(Jsonb * jb, Jsonb * payload, orascn * scn, orascn * c_scn, orascn * 
 				pfree(table);
 				table = pstrdup(alterStmt->relation->relname);
 			}
+		}
+		else if (IsA(stmt, RenameStmt) &&
+				 (((RenameStmt *) stmt)->renameType == OBJECT_TABCONSTRAINT ||
+				  (((RenameStmt *) stmt)->renameType == OBJECT_TABLE &&
+				   ((RenameStmt *) stmt)->newname &&
+				   pg_strncasecmp(((RenameStmt *) stmt)->newname, "BIN$", 4) == 0)))
+		{
+			/* Recycle-bin renames precede the actual DROP TABLE event.
+			 * Keep its original target name until that final event, and
+			 * leave independently generated target constraint names alone. */
+			*ignored = true;
+			destroyOLRDDL(olrddl);
+			olrddl = NULL;
+			goto end;
 		}
 		else if (IsA(stmt, DropStmt))
 		{
@@ -2245,6 +2253,12 @@ fc_processOLRChangeEvent(void * event, SynchdbStatistics * myBatchStats,
 		return -1;
 	}
 	PG_END_TRY();
+	if (!olr_handoff_apply_record(jb))
+	{
+		MemoryContextSwitchTo(oldContext);
+		MemoryContextDelete(tempContext);
+		return 0;
+	}
 
 #if SYNCHDB_PG_MAJOR_VERSION >= 1700
 	elog(DEBUG1, "%s", text_to_cstring(event));
@@ -2447,6 +2461,7 @@ fc_processOLRChangeEvent(void * event, SynchdbStatistics * myBatchStats,
 		/* DDLs */
 		OLR_DDL * olrddl = NULL;
 		PG_DDL * pgddl = NULL;
+		bool ignored = false;
 		orascn scn = 0, c_scn = 0, c_idx = 0;
 
 		/* increment batch statistics */
@@ -2492,24 +2507,18 @@ fc_processOLRChangeEvent(void * event, SynchdbStatistics * myBatchStats,
 
 		/* (2) parse */
 		set_shm_connector_state(myConnectorId, STATE_PARSING);
-		olrddl = parseOLRDDL(jb, payload, &scn, &c_scn, &c_idx, isfirst, islast);
-    	if (!olrddl)
+		olrddl = parseOLRDDL(jb, payload, &scn, &c_scn, &c_idx, isfirst, islast, &ignored);
+		if (!olrddl)
 		{
 			set_shm_connector_state(myConnectorId, STATE_SYNCING);
-			increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
+			if (!ignored)
+				increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
 
-			/*
-			 * openlog replicator delivers a lot of DDLs issued internally in oracle that
-			 * we still receive and try to process. Most of them do not parse but we still
-			 * have to move forward with scn and c_scn so we do not receive these again
-			 * in case of connector restart.
-			 */
-	    	olr_client_set_scns(scn, c_scn, c_idx);
-	    	* sendconfirm = true;
-
+			/* Only explicitly excluded non-table DDL may advance without
+			 * applying a target change. A table parser failure is fatal. */
 			MemoryContextSwitchTo(oldContext);
 			MemoryContextDelete(tempContext);
-			return -1;
+			return ignored ? 0 : -1;
 		}
 
     	/* (3) convert */

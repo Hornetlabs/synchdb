@@ -31,6 +31,8 @@ typedef enum _DbzType
 	DBZTYPE_INT64,
 	DBZTYPE_STRUCT,
 	DBZTYPE_STRING,
+	/* Validated PostgreSQL array input, prepared by the typed row binder. */
+	DBZTYPE_ARRAY_TEXT,
 } DbzType;
 
 SynchdbEventOutcome fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,

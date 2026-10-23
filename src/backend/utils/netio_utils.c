@@ -22,6 +22,10 @@
 #include "postgres.h"
 #include "utils/netio_utils.h"
 
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
+
 static int g_connect_timeout_ms = 5000;
 static struct timeval g_read_timeout = {5, 0};
 
@@ -52,12 +56,11 @@ netio_connect(NetioContext *ctx, const char *host, int port)
 		elog(WARNING, "getaddrinfo(%s:%s): %s", host, portstr, gai_strerror(ret));
 		return -1;
 	}
+	ret = -1;
 
 	ctx->sockfd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
 	if (ctx->sockfd < 0)
-	{
-		return ret;
-	}
+		goto error;
 
 	if (setsockopt(ctx->sockfd, SOL_SOCKET, SO_REUSEADDR,
 			&optval, sizeof(optval)) < 0)
@@ -126,17 +129,47 @@ netio_connect(NetioContext *ctx, const char *host, int port)
 error:
 	/* close the socket on error */
 	if (ret)
-		close(ctx->sockfd);
+	{
+		if (ctx->sockfd >= 0)
+			close(ctx->sockfd);
+		ctx->sockfd = -1;
+		ctx->is_connected = false;
+	}
+	freeaddrinfo(res);
 	return ret;
 }
 
 ssize_t
 netio_write(NetioContext *ctx, const void *buf, size_t len)
 {
+	size_t written = 0;
+
 	if (!ctx->is_connected)
 		return -1;
 
-	return send(ctx->sockfd, buf, len, 0);
+	while (written < len)
+	{
+		ssize_t count = send(ctx->sockfd, (const char *) buf + written,
+			len - written, MSG_NOSIGNAL);
+		if (count > 0)
+			written += count;
+		else if (count < 0 && errno == EINTR)
+			continue;
+		else if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+		{
+			struct pollfd descriptor = {.fd = ctx->sockfd, .events = POLLOUT};
+			if (poll(&descriptor, 1, g_connect_timeout_ms) > 0)
+				continue;
+			netio_disconnect(ctx);
+			return -1;
+		}
+		else
+		{
+			netio_disconnect(ctx);
+			return -1;
+		}
+	}
+	return written;
 }
 
 ssize_t
@@ -146,6 +179,7 @@ netio_read(NetioContext *ctx, StringInfoData * buf, int size)
 	char tmp[8192];
 	ssize_t total_read = 0;
 	int sel = -1;
+	struct timeval timeout = g_read_timeout;
 
 	if (!ctx || !ctx->is_connected || !buf)
 		return -1;
@@ -154,7 +188,7 @@ netio_read(NetioContext *ctx, StringInfoData * buf, int size)
 	FD_SET(ctx->sockfd, &readfds);
 
 	sel = select(ctx->sockfd + 1, &readfds, NULL, NULL,
-			&g_read_timeout);
+			&timeout);
 	if (sel <= 0)
 	{
 		/* No data to read or error */
@@ -237,9 +271,10 @@ netio_read(NetioContext *ctx, StringInfoData * buf, int size)
 void
 netio_disconnect(NetioContext *ctx)
 {
-    if (ctx->is_connected)
+    if (ctx->sockfd >= 0)
     {
         close(ctx->sockfd);
+		ctx->sockfd = -1;
         ctx->is_connected = false;
     }
 }

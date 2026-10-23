@@ -218,6 +218,8 @@ PG_DML * convert2PGDML(DBZ_DML * dbzdml, ConnectorType type);
 SynchdbTargetColumn *fc_convert_target_column(DBZ_DML_COLUMN_VALUE *source,
 												const char *remote_object_id,
 												Relation relation, ConnectorType type);
+/* Scalar source representation only; no mapping/transform evaluation. */
+char *fc_convert_value_text(DBZ_DML_COLUMN_VALUE *source, ConnectorType type);
 bool fc_translate_datatype(ConnectorType connectorType,
 		const char * ext_datatype, int * ext_length, int * ext_scale,
 		char ** pg_datatype, int * pg_datatype_len);

@@ -5,6 +5,7 @@
 #include "source/debezium_logical.h"
 #include "source/debezium_unavailable.h"
 #include "common/hashfn.h"
+#include "miscadmin.h"
 #include "utils/builtins.h"
 #include "utils/fmgrprotos.h"
 #include "utils/hsearch.h"
@@ -97,13 +98,14 @@ row_check_wire_type(const char *wire_type)
 }
 
 static SynchdbDbzField *
-row_decode_field(JsonbContainer *schema)
+row_decode_field(JsonbContainer *schema, const char *element_name)
 {
 	SynchdbDbzField *field = palloc0(sizeof(*field));
 	JsonbValue buffer;
 	JsonbValue *member;
 
-	field->name = row_string(row_member(schema, "field", &buffer),
+	check_stack_depth();
+	field->name = element_name ? pstrdup(element_name) : row_string(row_member(schema, "field", &buffer),
 							 "column schema.field", true);
 	field->wire_type = row_string(row_member(schema, "type", &buffer),
 								  "column schema.type", true);
@@ -130,10 +132,21 @@ row_decode_field(JsonbContainer *schema)
 		{
 			(void) row_object(member, "column schema.items");
 			field->item_schema = JsonbValueToJsonb(member);
+			/* Validate nested schemas even for absent/null row images. */
+			(void) row_decode_field(&field->item_schema->root, field->name);
 		}
 	}
 	synchdb_dbz_validate_logical_schema(field, schema);
 	return field;
+}
+
+SynchdbDbzField *
+synchdb_dbz_array_element_field(const SynchdbDbzField *array)
+{
+	if (strcmp(array->wire_type, "array") != 0 || array->item_schema == NULL)
+		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						errmsg("source array column \"%s\" requires an element schema", array->name)));
+	return row_decode_field(&array->item_schema->root, array->name);
 }
 
 static void
@@ -198,6 +211,7 @@ row_decode_value(SynchdbDbzField *field, const JsonbValue *raw,
 	const char *type = field->wire_type;
 	bool compatible = false;
 
+	check_stack_depth();
 	value->raw = *raw;
 	switch (raw->type)
 	{
@@ -261,7 +275,32 @@ row_decode_value(SynchdbDbzField *field, const JsonbValue *raw,
 	if (synchdb_dbz_value_unavailable(field, connector, operation))
 		value->kind = SYNCHDB_DBZ_VALUE_UNAVAILABLE;
 	else
+	{
 		synchdb_dbz_validate_logical_value(field);
+		if (value->kind == SYNCHDB_DBZ_VALUE_ARRAY &&
+			strcmp(type, "array") == 0 && field->item_schema != NULL)
+		{
+			SynchdbDbzField *item = synchdb_dbz_array_element_field(field);
+			JsonbIterator *iterator = JsonbIteratorInit(raw->val.binary.data);
+			JsonbValue element;
+			JsonbIteratorToken token;
+
+			while ((token = JsonbIteratorNext(&iterator, &element, true)) != WJB_DONE)
+				if (token == WJB_ELEM)
+				{
+					CHECK_FOR_INTERRUPTS();
+					/* Top-level placeholder detection must not reinterpret
+					 * ordinary strings inside an available source array. */
+					row_decode_value(item, &element, "", '\0');
+				}
+		}
+	}
+}
+
+void
+synchdb_dbz_decode_element_value(SynchdbDbzField *field, const JsonbValue *raw)
+{
+	row_decode_value(field, raw, "", '\0');
 }
 
 static void
@@ -302,7 +341,7 @@ row_decode_image(Jsonb *payload, const char *name, JsonbContainer *schema,
 	for (position = 0; position < JsonContainerSize(columns); position++)
 	{
 		JsonbValue *column = getIthJsonbValueFromContainer(columns, position);
-		SynchdbDbzField *field = row_decode_field(row_object(column, "column schema"));
+		SynchdbDbzField *field = row_decode_field(row_object(column, "column schema"), NULL);
 		DbzRowFieldEntry *entry;
 		bool found;
 
@@ -395,7 +434,7 @@ synchdb_dbz_decode_row(const SynchdbDbzEvent *event, SynchdbDbzRow *row)
 					 errmsg("duplicate Debezium envelope schema field \"%s\"", name)));
 		if (strcmp(name, "before") == 0 || strcmp(name, "after") == 0)
 		{
-			SynchdbDbzField *definition = row_decode_field(field);
+			SynchdbDbzField *definition = row_decode_field(field, NULL);
 
 			if (strcmp(definition->wire_type, "struct") != 0)
 				row_malformed("row schema.type", "struct");

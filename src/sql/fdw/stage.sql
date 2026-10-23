@@ -264,6 +264,7 @@ BEGIN
        FROM %1$I.columns
       WHERE upper("schema") = upper(%2$L)
             AND lower(table_name) <> ''log_mining_flush''
+            AND lower(table_name) <> ''synchdb_olr_fence''
             AND lower(table_name) <> ''synchdb_wal_lsn''
       GROUP BY "schema", table_name',
     p_source_schema,

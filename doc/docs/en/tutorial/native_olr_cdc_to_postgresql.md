@@ -1,5 +1,13 @@
 # Native Openlog Replicator Connector
 
+## Snapshot-to-CDC handoff requirements
+
+The native handoff is tested with OLR 1.8.5 and requires the Debezium snapshot provider, one redo thread, and the complete configured schema. Configure JSON output with `format.message=2`, `format.schema=7`, and `format.scn-type=3`. Enable checkpoint output with flag `4096`; use `flags=4128` to retain DDL output as well.
+
+The connector maintains `SYNCHDB_OLR_FENCE` in the source schema and requires table-creation privileges plus access to database identity, active transactions, and redo metadata. This internal table is excluded from replication. Its committed token must arrive on the actual OLR connection. CDC starts only after the finite snapshot producer has successfully completed and all target batches have committed. The native read-view SCN and its pending transaction IDs distinguish snapshotted rows from transactions that commit later. Target changes and the OLR cursor commit in one PostgreSQL transaction before source acknowledgement.
+
+`synchdb_olr_positions` binds handoff state to the connector UUID and artifact generation. Retain continuous redo from the selected replay sequence, and avoid captured-table DDL throughout the snapshot. Partial snapshots, missing logs, changed database incarnation, or an OLR start beyond the verified boundary require explicit recovery. Legacy alias-based SCN files and completion markers cannot authorize CDC. Rebaselining with `always` requires a clean target and an explicitly reset artifact generation. FDW snapshots and schema previews do not establish a CDC handoff.
+
 ## **Prepare Oracle Database for SynchDB**
 
 Before SynchDB can be used to replicate from Native Openlog Replicator (OLR) Connector, Both OLR and Oracle database itself need to be configured according to the procedure outlined [here](../../getting-started/remote_database_setups/)
@@ -32,7 +40,7 @@ SELECT synchdb_add_olr_conninfo(
 ## **Initial Snapshot**
 "Initial snapshot" (or table snapshot) in SynchDB means to copy table schema plus initial data for all designated tables. This is similar to the term "table sync" in PostgreSQL logical replication. When a connector is started using the default `initial` mode, it will automatically perform the initial snapshot before going to Change Data Capture (CDC) stage. This can be partially omitted with mode `no_data`. See [here](../../user-guide/start_stop_connector/) for all snapshot options.
 
-Once the initial snapshot is completed, the connector will not do it again upon subsequent restarts and will just resume with CDC since the last incomplete offset. This behavior is controlled by the metadata files managed by Debezium engine. See [here](../../architecture/metadata_files/) for more about metadata files.
+Once the initial snapshot is completed, the connector will not do it again upon subsequent restarts and will just resume with CDC since the last incomplete offset. Recovery uses the committed `synchdb_olr_positions` row together with the engine-owned artifact generation; Debezium metadata alone cannot authorize CDC. See [here](../../architecture/metadata_files/) for more about metadata files.
 
 ## **Different Connector Launch Modes**
 
@@ -104,14 +112,14 @@ Restarting the connector in `no_data` mode will not rebuild the schema again, an
 
 ### **Always do Initial Snapshot + CDC**
 
-Start the connector using `always` mode will always capture the schemas of capture tables, always redo the initial snapshot and then go to CDC. This is similar to a reset button because everything will be rebuilt using this mode. Use it with caution especially when you have large number of tables being captured, which could take a long time to finish. After the rebuild, CDC resumes as normal.
+`always` performs a full snapshot for a new artifact generation. Before deliberately rebuilding an existing baseline, stop the connector, prepare a clean target, and call `synchdb_artifact_reset(connector_uuid)`. An existing generation rejects `always` until explicitly reset; use `initial` to resume its durable CDC cursor.
 
 ```sql
 SELECT synchdb_start_engine_bgw('olrconn', 'always');
 
 ```
 
-After the initial snapshot, CDC will begin. Restarting a connector in `always` mode will repeat the same process described above.
+After the initial snapshot and verified handoff, CDC begins. A further rebuild requires the same explicit target cleanup and generation reset.
 
 ## **Possible Snapshot Modes for Openlog Replicator Connector**
 
@@ -125,7 +133,7 @@ After the initial snapshot, CDC will begin. Restarting a connector in `always` m
 
 Before attempting to do an initial snapshot of current table and data, which may be huge, it is possible to "preview" all the tables and data type mappings between source and destination tables before the actual data migration. This gives you an opportunity to modify a data type mapping, or an object name before actual migration happens. This can be done with the special "schemasync" initial snapshot mode.
 
-Please note that you must set `synchdb.olr_snapshot_engine` to 'fdw' in order to use `schemasync` mode to preview the tables.
+`schemasync` can use the native snapshot provider, or the FDW provider for an offline schema preview. The FDW provider does not establish a CDC boundary.
 
 ### **Create a Connector and Start it in `schemasync` Mode**
 
@@ -133,7 +141,7 @@ Please note that you must set `synchdb.olr_snapshot_engine` to 'fdw' in order to
 
 ```sql
 SELECT synchdb_add_conninfo(
-    'oracleconn', 
+    'olrconn',
     '127.0.0.1', 
     1521, 
     'DBZUSER', 
@@ -142,7 +150,7 @@ SELECT synchdb_add_conninfo(
     'DBZUSER', 
     'null', 
     'null', 
-    'oracle'
+    'olr'
 );
 
 SELECT synchdb_add_olr_conninfo(
@@ -237,149 +245,16 @@ SELECT * from synchdb_att_view WHERE name = 'olrconn';
 
 ### **Resume the Connector or Redo the Entire Snapshot**
 
-Once the object mappings have been confirmed correct, we can resume the connector. Please note that, resume will proceed to streaming only the new table changes. The existing data of the tables will not be copied.
+A native `schemasync` run can resume CDC after its verified handoff; it does not copy existing table rows. An FDW schema preview cannot resume into OLR CDC. To populate existing rows, stop the preview, select the Debezium snapshot provider, prepare a clean target, reset the connector's artifact generation, and start a fresh `initial` run with the chosen mapping rules.
 
-```sql
-SELECT synchdb_resume_engine('olrconn');
-```
+## Capture scope
 
-To capture the table's existing data, we can also redo the entire snapshot with the new object mapping rules.
+The verified native OLR handoff currently requires the complete configured schema. Leave connector table and snapshot-table filters unset, and configure OLR to capture that schema, including the internal `SYNCHDB_OLR_FENCE` table. The worker consumes the fence as source evidence and excludes it from target replication. Native `initial_only`, FDW `initial_only`, and FDW `schemasync` runs can select tables; these snapshot-only runs do not establish a CDC handoff.
 
-```sql
-SELECT synchdb_stop_engine_bgw('olrconn');
-SELECT synchdb_start_engine_bgw('olrconn', 'always');
-```
+Source verification buffers unacknowledged changes on the actual OLR connection. Set `synchdb.olr_read_buffer_size` large enough for that replay backlog and the largest source transaction; exceeding the limit stops the connector without acknowledging the uncommitted batch.
 
-## **Selective Table Sync**
+## Durable replay position
 
-### **Select Desired Tables and Start it for the First Time**
+Inspect `snapshot_scn`, `scn`, `c_scn`, and `c_idx` in `synchdb_olr_positions`. The `(c_scn, c_idx)` pair is the actual OLR replay coordinate, not an interchangeable Oracle snapshot SCN. The cursor and target changes commit atomically, so stopping and starting the same connector resumes the committed position.
 
-Table selection is done during connector creation phase via `synchdb_add_conninfo()` where we specify a list of tables (expressed in FQN, separated by a comma) to replicate from.
-
-For example, the following command creates a connector that only replicates change from `FREE.ORDERS` tables from Oracle.
-
-```sql
-SELECT synchdb_add_conninfo(
-    'olrconn', 
-    '127.0.0.1', 
-    1521, 
-    'DBZUSER', 
-    'dbz', 
-    'FREE', 
-    'DBZUSER', 
-    'DBZUSER.ORDERS', 
-    'null', 
-    'oracle'
-);
-
-SELECT synchdb_add_olr_conninfo(
-	'olrconn',
-	'127.0.0.1',
-	7070,
-	'ORACLE');
-```
-
-Starting this connector for the very first time will trigger an initial snapshot being performed and selected tables' schema and data will be replicated.
-
-```sql
-SELECT synchdb_start_engine_bgw('olrconn');
-```
-
-### **Verify the Connector State and Tables**
-
-Examine the connector state and the new tables:
-
-```sql
-postgres=# Select name, state, err from synchdb_state_view;
-   name  |  state  |   err
----------+---------+----------
- olrconn | polling | no error
-
-postgres=# \dt free.*
-          List of tables
- Schema |  Name  | Type  | Owner
---------+--------+-------+--------
- free   | orders | table | ubuntu
-
-```
-
-By default, source database name is mapped to a schema in destination with letter casing strategy = lowercase, so `FREE.ORDERS` becomes `free.orders` in postgreSQL. Once the tables have done the initial snapshot, the connector will start CDC to stream subsequent changes for these tables.
-
-### **Add More Tables to Replicate During Run Time.**
-
-The `olrconn` from previous section has already completed the initial snapshot and obtained the table schemas of the selected table. If we would like to add more tables to replicate from, we will need to notify the Debezium engine about the updated table section and perform the initial snapshot again. Here's how it is done:
-
-1. Update the `synchdb_conninfo` table to include additional tables.
-2. In this example, we add the `DBZUSER.CUSTOMERS` table to the sync list:
-
-```sql
-UPDATE synchdb_conninfo 
-SET data = jsonb_set(data, '{table}', '"DBZUSER.ORDERS,DBZUSER.CUSTOMERS"') 
-WHERE name = 'olrconn';
-```
-
-3. Restart the connector with the snapshot mode set to `always` to perform another initial snapshot:
-
-```sql
-DROP table free.orders;
-SELECT synchdb_restart_connector('olrconn', 'always');
-```
-
-This forces Debezium to re-snapshot all the tables again, including the existing tables `free.orders` and the new `free.customers` before going to CDC streaming. This means, to add a new table, the existing tables have to be dropped (to prevent duplicate table and primary key errors) and do the entire initial snapshot again. This is quite redundant and Debezium suggests using incremental snasphot to add the addition tables without re-snapshotting. We will update this procedure once we add the incremental snapshot support to SynchDB.
-
-### **Filter Openlog Replicator Tables (IMPORTANT)**
-
-For initial snapshot (via Debezium or FDW), we are able to select desired tables to replicate, but once the connector enters CDC stage via Openlog Replicator, the selected table filter does not automatically apply to Openlog Replicator. The user is required to configure Openlog Replicator service to output change events only for selected tables. If there is a discrepancy between SynchDB and Openlog Replicator's table filter, it is possible for SynchDB to receive a change event that it has not created a table for, causing an error. Therefore, it is a good practice to configure both SynchDB and Openlog Replicator to the same table filters.
-
-## Custom Start Offset Values
-
-A start offset value represents a point to start replication from in the similar way as PostgreSQL's resume LSN. When Debezium runner engine starts, it will start the replication from this offset value. Setting this offset value to a earlier value will cause Debezium runner engine to start replication from earlier records, possibly replicating duplicate data records. We should be extra cautious when setting start offset values on Debezium.
-
-### **Record Settable Offset Values**
-
-During operation, new offsets will be generated and flushed to disk by Debezium runner engine. The last flushed offset can be retrieved from `synchdb_state_view()` utility command:
-
-```sql
-postgres=# select name, last_dbz_offset from synchdb_state_view;
-  name   |               last_dbz_offset
----------+---------------------------------------------
- olrconn | {"scn":5044305, "c_scn":5044300, "c_idx":3}
-
-```
-
-We should save this values regularly, so in case we run into a problem, we know the offset location in the past that can be set to resume the replication operation.
-
-### **Pause the Connector**
-
-A connector must be in a `paused` state before a new offset value can be set.
-
-Use `synchdb_pause_engine()` SQL function to pause a runnng connector. This will halt the Debezium runner engine from replicating from the heterogeneous database. When paused, it is possible to alter the Debezium connector's offset value to replicate from a specific point in the past using `synchdb_set_offset()` SQL routine. It takes `conninfo_name` as its argument which can be found from the output of `synchdb_get_state()` view.
-
-For example:
-
-```sql
-SELECT synchdb_pause_engine('olrconn');
-```
-
-### **Set the new Offset**
-
-Use `synchdb_set_offset()` SQL function to change a connector worker's starting offset. This can only be done when the connector is put into `paused` state. The function takes 2 parameters, `conninfo_name` and `a valid offset string`, both of which can be found from the output of `synchdb_get_state()` view.
-
-For example:
-
-```sql
-SELECT 
-  synchdb_set_offset(
-    'olrconn', '{"scn":5044305, "c_scn":5044300, "c_idx":3}'
-  );
-```
-
-### **Resume the Connector**
-
-Use `synchdb_resume_engine()` SQL function to resume Debezium operation from a paused state. This function takes `connector name` as its only parameter, which can be found from the output of `synchdb_get_state()` view. The resumed Debezium runner engine will start the replication from the newly set offset value.
-
-For example:
-
-```sql
-SELECT synchdb_resume_engine('olrconn');
-```
+Manual OLR offset changes through `synchdb_set_offset()` are rejected. Restore the matching target and handoff state together, or prepare a clean target and explicitly reset the artifact generation for a new baseline. Do not edit the cursor table or copy legacy SCN files to bypass source verification.

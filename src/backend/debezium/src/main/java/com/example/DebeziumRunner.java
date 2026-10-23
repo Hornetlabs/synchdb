@@ -27,6 +27,19 @@ public class DebeziumRunner {
 	private volatile EngineSession session;
 	private final AtomicLong nextBatchId = new AtomicLong();
 	private volatile String activeArtifactBase;
+	private volatile OlrSnapshotBoundary olrSnapshotBoundary;
+
+	public String getOlrSnapshotBoundary(String ignored)
+	{
+		if (olrSnapshotBoundary == null)
+			throw new IllegalStateException("No OLR snapshot boundary is owned by this runner");
+		return olrSnapshotBoundary.completed();
+	}
+
+	public String prepareOlrHandoff(String request) throws Exception
+	{
+		return OlrHandoff.prepare(request);
+	}
 
 	private int allocateBatchId()
 	{
@@ -753,11 +766,16 @@ public class DebeziumRunner {
 			if (myParameters.connectorType == TYPE_POSTGRES)
 				NativeSourcePreflight.validatePostgres(props, myParameters.artifactResume);
 			SnapshotCompletion snapshotCompletion = SnapshotCompletion.configure(props,activeArtifactBase,batches);
+			final OlrSnapshotBoundary olrBoundary = myParameters.connectorType == TYPE_OPENLOG_REPLICATOR
+				? new OlrSnapshotBoundary() : null;
+			olrSnapshotBoundary = olrBoundary;
 			DebeziumEngine<ChangeEvent<String, String>> engine = DebeziumEngine.create(Json.class)
 					.using(props)
 					.using((success, message, error) -> next.completed(success, message, error))
 					.using(next.connectorCallback())
 					.notifying((records, committer) -> {
+						if (olrBoundary != null)
+							olrBoundary.observe(records);
 						if (snapshotCompletion == null)
 							batches.handleBatch(records,committer);
 						else

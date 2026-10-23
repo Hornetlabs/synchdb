@@ -37,6 +37,7 @@ SQL_SOURCES = src/sql/core.sql \
               src/sql/permissions.sql
 
 EXTRA_CLEAN += synchdb--1.1.sql.tmp
+EXTRA_CLEAN += .synchdb-build-options .synchdb-build-options.tmp
 PGFILEDESC = "synchdb - allows logical replication with heterogeneous databases"
 
 REGRESS = synchdb
@@ -129,6 +130,8 @@ OBJS += src/backend/converter/olr_event_handler.o \
 		src/backend/utils/netio_utils.o \
 		src/backend/olr/olr_client.o
 
+OBJS += src/backend/olr/olr_handoff.o
+
 PG_LDFLAGS += -lprotobuf-c -L$(PROTOBUF_C_LIB_DIR)
 PG_CFLAGS += -DWITH_OLR
 PG_CPPFLAGS += -DWITH_OLR
@@ -146,6 +149,19 @@ include $(top_builddir)/src/Makefile.global
 include $(top_srcdir)/contrib/contrib-global.mk
 PG_MAJOR := $(MAJORVERSION)
 endif
+
+# Make does not track command-line compiler flag changes. Rebuild both native
+# and LLVM objects when switching OLR support, including an existing default
+# build followed by `make WITH_OLR=1 install`.
+.PHONY: synchdb-build-options-force
+.synchdb-build-options: synchdb-build-options-force
+	@printf '%s\n' 'WITH_OLR=$(WITH_OLR)' > $@.tmp
+	@if cmp -s $@.tmp $@; then rm -f $@.tmp; else mv $@.tmp $@; fi
+
+# Private runtime structs are shared by many translation units. PGXS does not
+# generate dependency files for these headers; mixing old/new struct layouts
+# after an incremental install corrupts worker state.
+$(OBJS) $(patsubst %.o,%.bc,$(OBJS)): .synchdb-build-options $(wildcard $(srcdir)/src/include/*.h $(srcdir)/src/include/*/*.h)
 
 synchdb--1.1.sql: $(addprefix $(srcdir)/, $(SQL_SOURCES)) $(srcdir)/Makefile
 	cat $(addprefix $(srcdir)/, $(SQL_SOURCES)) > $@.tmp

@@ -164,34 +164,7 @@ record_dbz_snapshot(const SynchdbDbzEvent *event, SynchdbStatistics *statistics,
 		set_shm_connector_stage(myConnectorId, STAGE_CHANGE_DATA_CAPTURE);
 	isInSnapshot = snapshot && !last;
 
-#ifdef WITH_OLR
-	/* Preserve the existing OLR snapshot handoff; its protocol remains in M6/M8. */
-	if (last && get_shm_connector_type_enum(myConnectorId) == TYPE_OLR)
-	{
-		JsonbValue buffer;
-		JsonbValue *value;
-		orascn scn = 0;
-		orascn commit_scn = 0;
 
-		value = getKeyJsonValueFromContainer(&event->source->root, "scn", 3, &buffer);
-		if (value && value->type == jbvString)
-		{
-			char *text = pnstrdup(value->val.string.val, value->val.string.len);
-
-			scn = strtoull(text, NULL, 10);
-			pfree(text);
-		}
-		value = getKeyJsonValueFromContainer(&event->source->root, "commit_scn", 10, &buffer);
-		if (value && value->type == jbvString)
-		{
-			char *text = pnstrdup(value->val.string.val, value->val.string.len);
-
-			commit_scn = strtoull(text, NULL, 10);
-			pfree(text);
-		}
-		olr_client_set_scns(scn, commit_scn > 0 ? commit_scn : scn, 0);
-	}
-#endif
 	set_shm_connector_state(myConnectorId,
 			last && (flags & (CONNFLAG_SCHEMA_SYNC_MODE | CONNFLAG_INITIAL_SNAPSHOT_MODE)) ?
 			STATE_SCHEMA_SYNC_DONE : STATE_SYNCING);

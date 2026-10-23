@@ -71,4 +71,10 @@ typedef struct SynchdbDbzRow
 extern void synchdb_dbz_decode_row(const SynchdbDbzEvent *event,
 								 SynchdbDbzRow *row);
 
+/* Array elements use the same wire/logical validation as scalar fields.
+ * Nested ordinary strings are data, not top-level unavailable placeholders. */
+extern SynchdbDbzField *synchdb_dbz_array_element_field(const SynchdbDbzField *array);
+extern void synchdb_dbz_decode_element_value(SynchdbDbzField *field,
+										   const JsonbValue *raw);
+
 #endif /* SYNCHDB_DEBEZIUM_ROW_H */

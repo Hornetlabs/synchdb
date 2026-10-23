@@ -16,6 +16,7 @@
 #include "converter/rule_snapshot.h"
 #include "executor/row_identity.h"
 #include "executor/target_validate.h"
+#include "lib/stringinfo.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "runtime/config.h"
@@ -39,6 +40,12 @@ typedef struct BindAttributeLookup
 	HTAB *index;
 	int linear_lookups;
 } BindAttributeLookup;
+
+typedef struct BindColumn
+{
+	DBZ_DML_COLUMN_VALUE value; /* first: shared with the scalar codec */
+	const SynchdbDbzField *array;
+} BindColumn;
 
 static DbzType
 bind_wire_type(const char *name)
@@ -155,6 +162,84 @@ bind_value(const SynchdbDbzField *field)
 	return NULL;
 }
 
+/* Array input has its own quoting and NULL rules. Convert each item using
+ * its declared source schema, then let the final target input enforce shape,
+ * element typmods and domains. User expressions run once on the whole column. */
+static char *
+bind_array_text(const SynchdbDbzField *field, Oid element_type, int32 typmod,
+				ConnectorType type)
+{
+	JsonbContainer *array = field->value.raw.val.binary.data;
+	JsonbIterator *iterator = JsonbIteratorInit(array);
+	SynchdbDbzField *item = synchdb_dbz_array_element_field(field);
+	JsonbValue raw;
+	JsonbIteratorToken token;
+	StringInfoData output;
+	char delimiter;
+	char alignment;
+	int16 length;
+	bool by_value;
+	Oid input_parameter;
+	Oid input_function;
+	bool first = true;
+
+	check_stack_depth();
+	get_type_io_data(element_type, IOFunc_input, &length, &by_value,
+					 &alignment, &delimiter, &input_parameter, &input_function);
+	initStringInfo(&output);
+	appendStringInfoChar(&output, '{');
+	while ((token = JsonbIteratorNext(&iterator, &raw, true)) != WJB_DONE)
+	{
+		DBZ_DML_COLUMN_VALUE scalar = {0};
+		char *converted;
+		char *at;
+
+		if (token != WJB_ELEM)
+			continue;
+		CHECK_FOR_INTERRUPTS();
+		if (!first)
+			appendStringInfoChar(&output, delimiter);
+		first = false;
+		synchdb_dbz_decode_element_value(item, &raw);
+		if (item->value.kind == SYNCHDB_DBZ_VALUE_NULL)
+		{
+			appendStringInfoString(&output, "NULL");
+			continue;
+		}
+		if (item->value.kind == SYNCHDB_DBZ_VALUE_ARRAY)
+		{
+			converted = bind_array_text(item, element_type, typmod, type);
+			appendStringInfoString(&output, converted);
+			pfree(converted);
+			continue;
+		}
+		scalar.name = item->name;
+		scalar.datatype = element_type;
+		scalar.typemod = typmod;
+		scalar.typname = format_type_be(element_type);
+		get_type_category_preferred(element_type, &scalar.typcategory,
+								   &scalar.typispreferred);
+		scalar.dbztype = bind_wire_type(item->wire_type);
+		scalar.timerep = bind_logical_type(item->logical_name);
+		scalar.scale = bind_scale(item);
+		scalar.value = bind_value(item);
+		converted = fc_convert_value_text(&scalar, type);
+		appendStringInfoChar(&output, '"');
+		for (at = converted; *at; at++)
+		{
+			if (*at == '"' || *at == '\\')
+				appendStringInfoChar(&output, '\\');
+			appendStringInfoChar(&output, *at);
+		}
+		appendStringInfoChar(&output, '"');
+		pfree(converted);
+		pfree(scalar.value);
+		pfree(scalar.typname);
+	}
+	appendStringInfoChar(&output, '}');
+	return output.data;
+}
+
 /* Dense wide rows otherwise rescan the descriptor for each image field. This
  * index lives only for one binding: DDL, permissions and values remain fresh. */
 static HTAB *
@@ -238,6 +323,7 @@ bind_image(const SynchdbDbzImage *image, const char *remote_object_id,
 	{
 		const SynchdbDbzField *field = lfirst(cell);
 		DBZ_DML_COLUMN_VALUE *value;
+		BindColumn *column;
 		char *qualified;
 		char *mapped;
 		Form_pg_attribute attribute;
@@ -249,7 +335,8 @@ bind_image(const SynchdbDbzImage *image, const char *remote_object_id,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("unavailable source value for column \"%s\" is not supported",
 							field->name)));
-		value = palloc0(sizeof(*value));
+		column = palloc0(sizeof(*column));
+		value = &column->value;
 		value->remoteColumnName = pstrdup(field->name);
 		value->name = pstrdup(field->name);
 		fc_normalize_name(synchdb_letter_casing_strategy, value->name,
@@ -286,10 +373,16 @@ bind_image(const SynchdbDbzImage *image, const char *remote_object_id,
 		value->timerep = bind_logical_type(field->logical_name);
 		value->scale = bind_scale(field);
 		value->is_null = field->value.kind == SYNCHDB_DBZ_VALUE_NULL;
-		if (!value->is_null &&
-			(get_element_type(value->datatype) != InvalidOid ||
-			 (field->value.kind == SYNCHDB_DBZ_VALUE_ARRAY &&
-			  value->datatype != JSONOID && value->datatype != JSONBOID)))
+		if (!value->is_null && OidIsValid(get_element_type(getBaseType(value->datatype))))
+		{
+			if (field->value.kind != SYNCHDB_DBZ_VALUE_ARRAY ||
+				strcmp(field->wire_type, "array") != 0)
+				ereport(ERROR, (errcode(ERRCODE_DATATYPE_MISMATCH),
+								errmsg("target array column \"%s\" requires a source array", value->name)));
+			column->array = field;
+		}
+		else if (!value->is_null && field->value.kind == SYNCHDB_DBZ_VALUE_ARRAY &&
+			value->datatype != JSONOID && value->datatype != JSONBOID)
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("source array conversion for target column \"%s\" is not supported",
@@ -391,6 +484,17 @@ bind_convert_image(List *columns, const char *remote_object_id,
 		 * format a type name which neither path will consume. */
 		if (!column->is_null)
 			column->typname = format_type_be(column->datatype);
+		if (((BindColumn *) column)->array != NULL)
+		{
+			int32 typmod = column->typemod;
+			Oid base = getBaseTypeAndTypmod(column->datatype, &typmod);
+			char *input = bind_array_text(((BindColumn *) column)->array,
+										 get_element_type(base), typmod, type);
+
+			pfree(column->value);
+			column->value = input;
+			column->dbztype = DBZTYPE_ARRAY_TEXT;
+		}
 		target = fc_convert_target_column(column, remote_object_id, relation, type);
 		if (identity_attributes != NULL && target->is_null)
 			ereport(ERROR,
