@@ -691,6 +691,16 @@ public class DebeziumRunner {
 					props.setProperty("database.ssl.truststore.password", myParameters.sslTruststorePass);
                 
 				props.setProperty("schema.include.list", myParameters.srcschema);
+
+				String agentStatusQuery = "SELECT CASE WHEN "
+						+ "EXISTS (SELECT 1 FROM #db.sys.dm_server_services dss "
+						+ "WHERE (dss.[servicename] LIKE N'%Agent%' OR dss.[servicename] LIKE N'%\u4ee3\u7406%') "
+						+ "AND dss.[status] = 4) "
+						+ "OR EXISTS (SELECT 1 FROM #db.sys.dm_exec_sessions s "
+						+ "WHERE s.program_name LIKE N'SQLAgent%') "
+						+ "THEN 1 ELSE 0 END AS isRunning;";
+				props.setProperty("database.sqlserver.agent.status.query", agentStatusQuery);
+				props.setProperty("sqlserver.agent.status.query", agentStatusQuery);
 				break;
 			}
 			case TYPE_POSTGRES:
