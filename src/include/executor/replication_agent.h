@@ -18,7 +18,7 @@
 #ifndef SYNCHDB_REPLICATION_AGENT_H_
 #define SYNCHDB_REPLICATION_AGENT_H_
 
-#include "executor/tuptable.h"
+#include "executor/target_change.h"
 #include "synchdb/synchdb.h"
 
 /* Data structures representing PostgreSQL data formats */
@@ -44,26 +44,9 @@ typedef struct pg_ddl_column
 	int position;
 } PG_DDL_COLUMN;
 
-typedef struct pg_dml_column_value
-{
-	char * value;	/* string representation of column values that
-					 * is processed and ready to be used to built
-					 * into TupleTableSlot.
-					 */
-	Oid datatype;
-	int position;	/* position of this value's attribute in tupdesc */
-} PG_DML_COLUMN_VALUE;
-
-typedef struct pg_dml
-{
-	char * dmlquery;	/* to be fed into SPI */
-
-	char op;
-	Oid tableoid;
-	int natts;					/* number of columns of this pg table */
-	List * columnValuesBefore;	/* list of PG_DML_COLUMN_VALUE */
-	List * columnValuesAfter;	/* list of PG_DML_COLUMN_VALUE */
-} PG_DML;
+/* Legacy source adapters retain the old names without owning the model. */
+typedef SynchdbTargetColumn PG_DML_COLUMN_VALUE;
+typedef SynchdbTargetChange PG_DML;
 
 /* Function prototypes */
 int ra_executePGDDL(PG_DDL * pgddl, ConnectorType type);
@@ -71,16 +54,14 @@ int ra_executePGDML(PG_DML * pgdml, ConnectorType type, SynchdbStatistics * myBa
 		bool isInSnapshot);
 int ra_getConninfoByName(const char * name, ConnectionInfo * conninfo, char ** connector);
 int ra_executeCommand(const char * query);
-int ra_listConnInfoNames(char ** out, int * numout);
-char * ra_transformDataExpression(char * data, char * wkb, char * srid, char * expression);
+/* Returned names and their array belong to the caller's memory context. */
+int ra_listConnInfoNames(char *** out, int * numout);
+/* Caller-context array; success includes an empty list. */
 int ra_listObjmaps(const char * name, ObjectMap ** out, int * numout);
 
 void destroyPGDDL(PG_DDL * ddlinfo);
 void destroyPGDML(PG_DML * dmlinfo);
-char * ra_run_orafdw_initial_snapshot_spi(ConnectorType connType, ConnectionInfo * conninfo,
-		int flag, const char * snapshot_tables, const char * offset, bool fdw_use_subtx,
-		bool write_schema_hist, const char * snapshotMode, int letter_casing_strategy);
-int ra_get_fdw_snapshot_err_table_list(const char *name, char **out, int *numout, char **offset_out);
+/* Replacing the file is not rolled back if the caller owns the transaction. */
 int dump_schema_history_to_file(const char * connector_name, const char *out_path);
 
 #endif /* SYNCHDB_REPLICATION_AGENT_H_ */

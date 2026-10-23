@@ -21,2050 +21,223 @@
 #include "synchdb/synchdb.h"
 #include "converter/debezium_event_handler.h"
 #include "converter/format_converter.h"
-#include "common/base64.h"
+#include "source/debezium_event.h"
+#include "source/debezium_row.h"
+#include "source/debezium_schema.h"
+#include "converter/ddl_plan.h"
+#include "converter/rule_snapshot.h"
+#include "converter/debezium_bind.h"
+#include "runtime/config.h"
 #include "port/pg_bswap.h"
 #ifdef WITH_OLR
 #include "olr/olr_client.h"
 #endif
 
-/* extern globals */
-extern int myConnectorId;
-extern bool synchdb_log_event_on_error;
-extern char * g_eventStr;
-extern HTAB * dataCacheHash;
-extern int synchdb_letter_casing_strategy;
-extern int synchdb_error_strategy;
-
-static DdlType name_to_ddltype(const char * name);
-static DbzType getDbzTypeFromString(const char * typestring);
-static TimeRep getTimerepFromString(const char * typestring);
-static HTAB * build_schema_jsonpos_hash(Jsonb * jb);
-static void destroyDBZDDL(DBZ_DDL * ddlinfo);
-static void destroyDBZDML(DBZ_DML * dmlinfo);
-static DBZ_DDL * parseDBZDDL(Jsonb * jb, bool isfirst, bool islast, bool deriveMsg);
-static DBZ_DML * parseDBZDML(Jsonb * jb, char op, ConnectorType type,
-		Jsonb * source, bool isfirst, bool islast);
-static int deriveLogicalMessage(Jsonb ** jb);
-
 static bool isInSnapshot = false;
 
-static DdlType
-name_to_ddltype(const char * name)
+/* Legacy bind/convert/write adapters. Decoding does not access target metadata. */
+static SynchdbEventOutcome
+apply_dbz_schema(const SynchdbDbzEvent *event, SynchdbStatistics *statistics,
+                 ConnectorType type, const char *name, bool snapshot,
+                 bool first, bool last)
 {
-	if (!strcasecmp(name, "CREATE") || !strcasecmp(name, "CREATE TABLE"))
-		return DDL_CREATE_TABLE;
-	else if (!strcasecmp(name, "ALTER") || !strcasecmp(name, "ALTER TABLE"))
-		return DDL_ALTER_TABLE;
-	else if (!strcasecmp(name, "DROP") || !strcasecmp(name, "DROP TABLE"))
-		return DDL_DROP_TABLE;
-	else
-		return DDL_UNDEF;
+ SynchdbDbzSchemaChange source;
+ SynchdbDdlPlan *plan;
+ SynchdbDdlApplyResult result;
+ const SynchdbRuleSnapshot *rules = synchdb_rule_snapshot_current();
+ ConnectorType planning_type = type;
+ ListCell *cell;
+ List *tables = NIL;
+
+ if (event->schema_empty)
+  return SYNCHDB_EVENT_NOOP;
+ set_shm_connector_state(myConnectorId, STATE_PARSING);
+ synchdb_dbz_decode_schema(event, &source);
+ /* Snapshot schema events describe a baseline, not source-side deletions.
+  * MySQL emits synthetic DROP/CREATE pairs while rebuilding its schema
+  * history. Applying that DROP would destroy an existing target before the
+  * CREATE image can validate it. Keep targets and bindings intact; streamed
+  * DROP events still pass through the ordinary DDL planner. */
+ foreach(cell, source.tables)
+ {
+  const SynchdbDbzTableChange *table = lfirst(cell);
+
+  if (!snapshot || table->operation != SYNCHDB_DBZ_SCHEMA_DROP)
+   tables = lappend(tables, (void *) table);
+ }
+ if (tables == NIL)
+  return SYNCHDB_EVENT_NOOP;
+ source.tables = tables;
+ set_shm_connector_state(myConnectorId, STATE_CONVERTING);
+ /* An OLR run receives its initial relational image from Debezium Oracle. */
+ if (rules && synchdb_rule_snapshot_type(rules) == TYPE_OLR && type == TYPE_ORACLE)
+  planning_type = TYPE_OLR;
+ plan = synchdb_ddl_plan_build(name, planning_type, rules,
+                              &source, CurrentMemoryContext);
+ set_shm_connector_state(myConnectorId, STATE_EXECUTING);
+ result = synchdb_ddl_plan_apply(plan);
+ synchdb_ddl_plan_destroy(plan);
+ if (result.tables_changed > INT_MAX || result.tables_created > INT_MAX)
+  elog(ERROR, "schema change statistics exceed the supported event count");
+ if (!snapshot)
+  increment_connector_statistics(statistics, STATS_DDL, (int) result.tables_changed);
+ else
+  increment_connector_statistics(statistics, STATS_TABLES, (int) result.tables_created);
+ return result.tables_changed ? SYNCHDB_EVENT_APPLIED : SYNCHDB_EVENT_NOOP;
 }
 
-static DbzType
-getDbzTypeFromString(const char * typestring)
+static SynchdbEventOutcome
+apply_dbz_row(const SynchdbDbzEvent *event, SynchdbStatistics *statistics,
+              ConnectorType type, bool snapshot)
 {
-	if (!typestring)
-		return DBZTYPE_UNDEF;
+	SynchdbDbzRow row;
+	SynchdbTargetChange *target;
+	SynchdbEventOutcome outcome = SYNCHDB_EVENT_FAILED;
 
-	/* todo: perhaps a hash lookup table is more efficient */
-	/* DBZ types */
-	if (!strcmp(typestring, "float32"))
-		return DBZTYPE_FLOAT32;
-	if (!strcmp(typestring, "float64"))
-		return DBZTYPE_FLOAT64;
-	if (!strcmp(typestring, "float"))
-		return DBZTYPE_FLOAT;
-	if (!strcmp(typestring, "double"))
-		return DBZTYPE_DOUBLE;
-	if (!strcmp(typestring, "bytes"))
-		return DBZTYPE_BYTES;
-	if (!strcmp(typestring, "int8"))
-		return DBZTYPE_INT8;
-	if (!strcmp(typestring, "int16"))
-		return DBZTYPE_INT16;
-	if (!strcmp(typestring, "int32"))
-		return DBZTYPE_INT32;
-	if (!strcmp(typestring, "int64"))
-		return DBZTYPE_INT64;
-	if (!strcmp(typestring, "struct"))
-		return DBZTYPE_STRUCT;
-	if (!strcmp(typestring, "string"))
-		return DBZTYPE_STRING;
-
-	return DBZTYPE_UNDEF;
-}
-
-static TimeRep
-getTimerepFromString(const char * typestring)
-{
-	if (!typestring)
-		return TIME_UNDEF;
-
-	if (find_exact_string_match(typestring, "io.debezium.time.Date"))
-		return TIME_DATE;
-	else if (find_exact_string_match(typestring, "io.debezium.time.Time"))
-		return TIME_TIME;
-	else if (find_exact_string_match(typestring, "io.debezium.time.ZonedTime"))
-		return TIME_ZONEDTIME;
-	else if (find_exact_string_match(typestring, "io.debezium.time.MicroTime"))
-		return TIME_MICROTIME;
-	else if (find_exact_string_match(typestring, "io.debezium.time.NanoTime"))
-		return TIME_NANOTIME;
-	else if (find_exact_string_match(typestring, "io.debezium.time.Timestamp"))
-		return TIME_TIMESTAMP;
-	else if (find_exact_string_match(typestring, "io.debezium.time.MicroTimestamp"))
-		return TIME_MICROTIMESTAMP;
-	else if (find_exact_string_match(typestring, "io.debezium.time.NanoTimestamp"))
-		return TIME_NANOTIMESTAMP;
-	else if (find_exact_string_match(typestring, "io.debezium.time.ZonedTimestamp"))
-		return TIME_ZONEDTIMESTAMP;
-	else if (find_exact_string_match(typestring, "io.debezium.time.MicroDuration"))
-		return TIME_MICRODURATION;
-	else if (find_exact_string_match(typestring, "io.debezium.data.VariableScaleDecimal"))
-		return DATA_VARIABLE_SCALE;
-	else if (find_exact_string_match(typestring, "org.apache.kafka.connect.data.Decimal"))
-		return DATA_VARIABLE_SCALE;
-	else if (find_exact_string_match(typestring, "io.debezium.data.geometry.Geometry"))
-		return DATA_VARIABLE_SCALE;
-	else if (find_exact_string_match(typestring, "io.debezium.data.Enum"))
-		return DATA_ENUM;
-	else if (find_exact_string_match(typestring, "io.debezium.data.Uuid"))
-		return DATA_UUID;
-	else if (find_exact_string_match(typestring, "io.debezium.data.Json"))
-		return DATA_JSON;
-	else if (find_exact_string_match(typestring, "io.debezium.data.Xml"))
-		return DATA_XML;
-	else if (find_exact_string_match(typestring, "io.debezium.data.Bits"))
-		return DATA_BITS;
-	else if (find_exact_string_match(typestring, "io.debezium.data.geometry.Point"))
-		return DATA_POINT;
-
-	elog(DEBUG1, "unhandled dbz type %s", typestring);
-	return TIME_UNDEF;
-}
-
-static HTAB *
-build_schema_jsonpos_hash(Jsonb * jb)
-{
-	HTAB * jsonposhash;
-	HASHCTL hash_ctl;
-	Jsonb * schemadata = NULL;
-	int jsonpos = 0;
-	NameJsonposEntry * entry;
-	NameJsonposEntry tmprecord = {0};
-	bool found = false;
-	int i = 0;
-	unsigned int contsize = 0;
-	Datum datum_elems[4] ={CStringGetTextDatum("schema"), CStringGetTextDatum("fields"),
-			CStringGetTextDatum("0"), CStringGetTextDatum("fields")};
-
-	memset(&hash_ctl, 0, sizeof(hash_ctl));
-	hash_ctl.keysize = NAMEDATALEN;
-	hash_ctl.entrysize = sizeof(NameJsonposEntry);
-	hash_ctl.hcxt = TopMemoryContext;
-
-	jsonposhash = hash_create("Name to jsonpos Hash Table",
-							512,
-							&hash_ctl,
-							HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
-
-	schemadata = GET_JSONB_ELEM(jb, &datum_elems[0], 4);
-	if (schemadata)
+	set_shm_connector_state(myConnectorId, STATE_PARSING);
+	synchdb_dbz_decode_row(event, &row);
+	set_shm_connector_state(myConnectorId, STATE_CONVERTING);
+	target = synchdb_bind_dbz_row(&row, type);
+	if (target != NULL)
 	{
-		contsize = JsonContainerSize(&schemadata->root);
-		for (i = 0; i < contsize; i++)
+		set_shm_connector_state(myConnectorId, STATE_EXECUTING);
+		if (ra_executePGDML(target, type, statistics, snapshot) == 0)
 		{
-			JsonbValue * v = NULL, * v2 = NULL, *v3 = NULL;
-			JsonbValue vbuf;
-			char * tmpstr = NULL;
-
-			memset(&tmprecord, 0, sizeof(NameJsonposEntry));
-			v = getIthJsonbValueFromContainer(&schemadata->root, i);
-			if (v->type == jbvBinary)
-			{
-				v2 = getKeyJsonValueFromContainer(v->val.binary.data, "field", strlen("field"), &vbuf);
-				if (v2)
-				{
-					strncpy(tmprecord.name, v2->val.string.val, v2->val.string.len); /* todo check overflow */
-					fc_normalize_name(LCS_NORMALIZE_LOWERCASE, tmprecord.name, strlen(tmprecord.name));
-				}
-				else
-				{
-					elog(WARNING, "field is missing from dbz schema...");
-					continue;
-				}
-				v2 = getKeyJsonValueFromContainer(v->val.binary.data, "type", strlen("type"), &vbuf);
-				if (v2)
-				{
-					tmpstr = pnstrdup(v2->val.string.val, v2->val.string.len);
-					tmprecord.dbztype = getDbzTypeFromString(tmpstr);
-					pfree(tmpstr);
-				}
-				else
-				{
-					elog(WARNING, "type is missing from dbz schema...");
-					continue;
-				}
-				v2 = getKeyJsonValueFromContainer(v->val.binary.data, "name", strlen("name"), &vbuf);
-				if (v2)
-				{
-					tmpstr = pnstrdup(v2->val.string.val, v2->val.string.len);
-					tmprecord.timerep = getTimerepFromString(tmpstr);
-					pfree(tmpstr);
-				}
-
-				/* check if parameters group exists */
-				v2 = getKeyJsonValueFromContainer(v->val.binary.data, "parameters", strlen("parameters"), &vbuf);
-				if (v2)
-				{
-					if (v->type == jbvBinary)
-					{
-						v3 = getKeyJsonValueFromContainer(v2->val.binary.data, "scale", strlen("scale"), &vbuf);
-						if (v3)
-						{
-							tmpstr = pnstrdup(v3->val.string.val, v3->val.string.len);
-							tmprecord.scale = atoi(tmpstr);
-							pfree(tmpstr);
-						}
-					}
-				}
-				tmprecord.jsonpos = jsonpos;
-				jsonpos++;
-			}
-			else
-			{
-				elog(WARNING, "unexpected container type %d", v->type);
-				continue;
-			}
-
-			entry = (NameJsonposEntry *) hash_search(jsonposhash, tmprecord.name, HASH_ENTER, &found);
-			if (!found)
-			{
-				strlcpy(entry->name, tmprecord.name, NAMEDATALEN);
-				entry->jsonpos = tmprecord.jsonpos;
-				entry->dbztype = tmprecord.dbztype;
-				entry->timerep = tmprecord.timerep;
-				entry->scale = tmprecord.scale;
-				elog(DEBUG1, "new jsonpos entry name=%s pos=%d dbztype=%d timerep=%d scale=%d",
-						entry->name, entry->jsonpos, entry->dbztype, entry->timerep, entry->scale);
-			}
+			if (!snapshot)
+				increment_connector_statistics(statistics, STATS_DML, 1);
+			outcome = SYNCHDB_EVENT_APPLIED;
 		}
-
+		destroyPGDML(target);
 	}
-	return jsonposhash;
+	return outcome;
 }
 
-/*
- * destroyDBZDDL
- *
- * Function to destroy DBZ_DDL structure
- */
 static void
-destroyDBZDDL(DBZ_DDL * ddlinfo)
+record_dbz_event_time(const SynchdbDbzEvent *event, SynchdbStatistics *statistics,
+                      bool first, bool last)
 {
-	if (ddlinfo)
+	struct timeval time;
+	uint64 now;
+
+	if (!first && !last)
+		return;
+	gettimeofday(&time, NULL);
+	now = (uint64) time.tv_sec * 1000 + time.tv_usec / 1000;
+	if (first)
 	{
-		if (ddlinfo->id)
-			pfree(ddlinfo->id);
-
-		if (ddlinfo->primaryKeyColumnNames)
-			pfree(ddlinfo->primaryKeyColumnNames);
-
-		list_free_deep(ddlinfo->columns);
-
-		pfree(ddlinfo);
+		statistics->genstats.stats_first_src_ts = event->src_ts_ms;
+		statistics->genstats.stats_first_pg_ts = now;
+	}
+	if (last)
+	{
+		statistics->genstats.stats_last_src_ts = event->src_ts_ms;
+		statistics->genstats.stats_last_pg_ts = now;
 	}
 }
 
-/*
- * destroyDBZDML
- *
- * Function to destroy DBZ_DML structure
- */
+/* A heartbeat/transaction does not terminate a snapshot between source rows. */
 static void
-destroyDBZDML(DBZ_DML * dmlinfo)
+record_dbz_snapshot(const SynchdbDbzEvent *event, SynchdbStatistics *statistics,
+                    int flags, bool snapshot)
 {
-	if (dmlinfo)
+	bool last = event->snapshot == SYNCHDB_DBZ_SNAPSHOT_LAST;
+	struct timeval time;
+	uint64 now;
+
+	gettimeofday(&time, NULL);
+	now = (uint64) time.tv_sec * 1000 + time.tv_usec / 1000;
+	if (snapshot)
 	{
-		if (dmlinfo->table)
-			pfree(dmlinfo->table);
-
-		if (dmlinfo->schema)
-			pfree(dmlinfo->schema);
-
-		if (dmlinfo->remoteObjectId)
-			pfree(dmlinfo->remoteObjectId);
-
-		if (dmlinfo->mappedObjectId)
-			pfree(dmlinfo->mappedObjectId);
-
-		if (dmlinfo->columnValuesBefore)
-			list_free_deep(dmlinfo->columnValuesBefore);
-
-		if (dmlinfo->columnValuesAfter)
-			list_free_deep(dmlinfo->columnValuesAfter);
-
-		pfree(dmlinfo);
+		if (flags & CONNFLAG_SCHEMA_SYNC_MODE)
+			set_shm_connector_stage(myConnectorId, STAGE_SCHEMA_SYNC);
+		else if (flags & CONNFLAG_INITIAL_SNAPSHOT_MODE)
+			set_shm_connector_stage(myConnectorId, STAGE_INITIAL_SNAPSHOT);
+		if (!isInSnapshot)
+		{
+			statistics->snapstats.snapstats_begintime_ts = now;
+			statistics->snapstats.snapstats_endtime_ts = 0;
+		}
+		if (last)
+			statistics->snapstats.snapstats_endtime_ts = now;
 	}
+	else
+		set_shm_connector_stage(myConnectorId, STAGE_CHANGE_DATA_CAPTURE);
+	isInSnapshot = snapshot && !last;
+
+
+	set_shm_connector_state(myConnectorId,
+			last && (flags & (CONNFLAG_SCHEMA_SYNC_MODE | CONNFLAG_INITIAL_SNAPSHOT_MODE)) ?
+			STATE_SCHEMA_SYNC_DONE : STATE_SYNCING);
 }
 
-static int
-deriveLogicalMessage(Jsonb ** jb)
+/* The caller owns the batch transaction and retains the original record for ACK. */
+SynchdbEventOutcome
+fc_processDBZChangeEvent(const char *json, SynchdbStatistics *statistics,
+                        int flags, const char *name, bool first, bool last)
 {
-	int tmpoutlen = 0;
-	unsigned char * tmpout = NULL;
-	StringInfoData strinfo;
-	Jsonb * tableChanges = NULL;
-	Jsonb * ddl_jb = NULL;
-    JsonbParseState *state = NULL;
-    JsonbValue * out;
-    JsonbValue v;
-    ArrayType * path = NULL;
-    Datum elems[2] = { CStringGetTextDatum("payload"), CStringGetTextDatum("tableChanges") };
-    Datum newjb_d;
+	MemoryContext caller = CurrentMemoryContext;
+	MemoryContext context;
+	volatile SynchdbEventOutcome outcome = SYNCHDB_EVENT_FAILED;
 
-	initStringInfo(&strinfo);
-
-	elog(WARNING, "deriving ddl message");
-    if (!getPathElementString(*jb, "payload.message.prefix", &strinfo, true))
-    {
-    	elog(WARNING, "message prefix %s", strinfo.data);
-    }
-    if (!getPathElementString(*jb, "payload.message.content", &strinfo, true))
-    {
-    	elog(WARNING, "message content %s", strinfo.data);
-    }
-    tmpoutlen = pg_b64_dec_len(strlen(strinfo.data));
-	tmpout = (unsigned char *) palloc0(tmpoutlen + 1);
-
-#if SYNCHDB_PG_MAJOR_VERSION >= 1800
-	tmpoutlen = pg_b64_decode(strinfo.data, strinfo.len, tmpout, tmpoutlen);
-#else
-	tmpoutlen = pg_b64_decode(strinfo.data, strinfo.len, (char *)tmpout, tmpoutlen);
-#endif
-	elog(WARNING, "decoded message %s", tmpout);
+	context = AllocSetContextCreate(caller, "Debezium event", ALLOCSET_DEFAULT_SIZES);
+	MemoryContextSwitchTo(context);
 	PG_TRY();
 	{
-		ddl_jb = DatumGetJsonbP(DirectFunctionCall1(jsonb_in, CStringGetDatum((char *) tmpout)));
+		SynchdbDbzEvent event;
+
+		synchdb_dbz_decode_event(json, &event);
+		switch (event.kind)
+		{
+			case SYNCHDB_DBZ_EVENT_UNSUPPORTED:
+				elog(WARNING, "unsupported Debezium event: %s", event.unsupported_reason);
+				outcome = SYNCHDB_EVENT_UNSUPPORTED;
+				break;
+			case SYNCHDB_DBZ_EVENT_TRANSACTION:
+				increment_connector_statistics(statistics, STATS_TX, 1);
+				outcome = SYNCHDB_EVENT_CONTROL;
+				break;
+			case SYNCHDB_DBZ_EVENT_HEARTBEAT:
+				outcome = SYNCHDB_EVENT_CONTROL;
+				break;
+			case SYNCHDB_DBZ_EVENT_ROW:
+			case SYNCHDB_DBZ_EVENT_SCHEMA:
+			case SYNCHDB_DBZ_EVENT_LOGICAL_MESSAGE:
+			{
+				ConnectorType type = fc_get_connector_type(event.connector);
+				const SynchdbRuleSnapshot *rules = synchdb_rule_snapshot_current();
+				bool snapshot = event.snapshot != SYNCHDB_DBZ_SNAPSHOT_FALSE &&
+					event.snapshot != SYNCHDB_DBZ_SNAPSHOT_INCREMENTAL;
+
+				if (rules &&
+					(strcmp(synchdb_rule_snapshot_connector(rules), name) != 0 ||
+					 (synchdb_rule_snapshot_type(rules) != type &&
+					  !(synchdb_rule_snapshot_type(rules) == TYPE_OLR && type == TYPE_ORACLE))))
+					ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+									errmsg("source event does not match the active connector rules")));
+
+				if (event.kind == SYNCHDB_DBZ_EVENT_ROW)
+					outcome = apply_dbz_row(&event, statistics, type, snapshot);
+				else
+					outcome = apply_dbz_schema(&event, statistics, type, name, snapshot, first, last);
+				if (outcome == SYNCHDB_EVENT_APPLIED || outcome == SYNCHDB_EVENT_NOOP)
+					record_dbz_snapshot(&event, statistics, flags, snapshot);
+				else
+					set_shm_connector_state(myConnectorId, STATE_SYNCING);
+				break;
+			}
+			default:
+				elog(ERROR, "unexpected Debezium event kind: %d", (int) event.kind);
+		}
+		if (outcome == SYNCHDB_EVENT_FAILED || outcome == SYNCHDB_EVENT_UNSUPPORTED)
+			increment_connector_statistics(statistics, STATS_BAD_CHANGE_EVENT, 1);
+		else
+			record_dbz_event_time(&event, statistics, first, last);
 	}
-	PG_CATCH();
+	PG_FINALLY();
 	{
-		MemoryContext oldctx = MemoryContextSwitchTo(TopMemoryContext);
-		ErrorData *edata;
-		edata = CopyErrorData();
-		FlushErrorState();
-		elog(WARNING, "decoded DDL message is not valid JSON: %s", edata->message);
-		FreeErrorData(edata);
-		MemoryContextSwitchTo(oldctx);
-		if (tmpout)
-		    pfree(tmpout);
-		return -1;
+		MemoryContextSwitchTo(caller);
+		MemoryContextDelete(context);
 	}
 	PG_END_TRY();
-
-	/* tmpout not needed anymore */
-	if (tmpout)
-	    pfree(tmpout);
-
-	/* turn this ddl_jb to tableChanges array with just one value */
-	out = pushJsonbValue(&state, WJB_BEGIN_ARRAY, NULL);
-	v.type = jbvBinary;
-	v.val.binary.data = &ddl_jb->root;
-	v.val.binary.len  = VARSIZE_ANY_EXHDR(ddl_jb);  /* payload size, excluding varlena header */
-	out = pushJsonbValue(&state, WJB_ELEM, &v);
-	out = pushJsonbValue(&state, WJB_END_ARRAY, NULL);
-	tableChanges = JsonbValueToJsonb(out);
-
-	/* put tableChange array to original jb */
-	path = construct_array(elems, 2, TEXTOID, -1, false, TYPALIGN_INT);
-	newjb_d = DirectFunctionCall4
-	(
-		jsonb_set,
-		JsonbPGetDatum(*jb),            /* original Jsonb */
-		PointerGetDatum(path),         /* text[] path */
-		JsonbPGetDatum(tableChanges),  /* new value */
-		BoolGetDatum(true)             /* create_missing */
-	);
-	*jb = DatumGetJsonbP(newjb_d);
-	if (path)
-	    pfree(path);
-	return 0;
-}
-
-/*
- * parseDBZDDL
- *
- * Function to parse Debezium DDL expressed in Jsonb
- *
- * @return DBZ_DDL structure
- */
-static DBZ_DDL *
-parseDBZDDL(Jsonb * jb, bool isfirst, bool islast, bool deriveMsg)
-{
-	Jsonb * ddlpayload = NULL;
-	JsonbIterator *it;
-	JsonbValue v;
-	JsonbIteratorToken r;
-	char * key = NULL;
-	char * value = NULL;
-
-	DBZ_DDL * ddlinfo = (DBZ_DDL*) palloc0(sizeof(DBZ_DDL));
-	DBZ_DDL_COLUMN * ddlcol = NULL;
-
-	/* get table name and action type */
-	StringInfoData strinfo;
-	initStringInfo(&strinfo);
-
-	/*
-	 * payload.ts_ms and payload.source.ts_ms- read only on the first or last
-	 * change event of a batch for statistic display purpose
-	 */
-	if (isfirst || islast)
-	{
-		if (getPathElementString(jb, "payload.ts_ms", &strinfo, true))
-			ddlinfo->dbz_ts_ms = 0;
-		else
-			ddlinfo->dbz_ts_ms = strtoull(strinfo.data, NULL, 10);
-
-		if (getPathElementString(jb, "payload.source.ts_ms", &strinfo, true))
-			ddlinfo->src_ts_ms = 0;
-		else
-			ddlinfo->src_ts_ms = strtoull(strinfo.data, NULL, 10);
-	}
-
-	if (deriveMsg)
-	{
-		if (deriveLogicalMessage(&jb))
-		{
-			elog(WARNING, "failed to derive logical message. Skipping this event...");
-			destroyDBZDDL(ddlinfo);
-			return NULL;
-		}
-		elog(WARNING, "logical message derived");
-	}
-
-    if (getPathElementString(jb, "payload.tableChanges.0.id", &strinfo, true))
-    {
-    	elog(DEBUG1, "no id parameter in table change data. Stop parsing...");
-		destroyDBZDDL(ddlinfo);
-		return NULL;
-    }
-    else
-    	ddlinfo->id = pstrdup(strinfo.data);
-
-    if (getPathElementString(jb, "payload.tableChanges.0.table.primaryKeyColumnNames", &strinfo, false))
-    	ddlinfo->primaryKeyColumnNames = NULL;
-    else
-    	ddlinfo->primaryKeyColumnNames = pstrdup(strinfo.data);
-
-    if (getPathElementString(jb, "payload.tableChanges.0.type", &strinfo, true))
-    {
-    	elog(DEBUG1, "unknown DDL type. Stop parsing...");
-		destroyDBZDDL(ddlinfo);
-		return NULL;
-    }
-    else
-    	ddlinfo->type = name_to_ddltype(strinfo.data);
-
-    /* free the data inside strinfo as we no longer needs it */
-    pfree(strinfo.data);
-
-    if (ddlinfo->type == DDL_CREATE_TABLE || ddlinfo->type == DDL_ALTER_TABLE)
-    {
-		/* fetch payload.tableChanges.0.table.columns as jsonb */
-    	Datum datum_elems[5] ={CStringGetTextDatum("payload"), CStringGetTextDatum("tableChanges"),
-    			CStringGetTextDatum("0"), CStringGetTextDatum("table"), CStringGetTextDatum("columns")};
-    	ddlpayload = GET_JSONB_ELEM(jb, &datum_elems[0], 5);
-		/*
-		 * following parser expects this json array named 'columns' from DBZ embedded:
-		 * "columns": [
-		 *   {
-		 *     "name": "a",
-		 *     "scale": null,
-		 *     "length": null,
-		 *     "comment": null,
-		 *     "jdbcType": 4,
-		 *     "optional": true,
-		 *     "position": 1,
-		 *     "typeName": "INT",
-		 *     "generated": false,
-		 *     "enumValues": null,
-		 *     "nativeType": null,
-		 *     "charsetName": null,
-		 *     "typeExpression": "INT",
-		 *     "autoIncremented": false,
-		 *     "defaultValueExpression": null
-		 *   },
-		 *   ...... rest of array elements
-		 *
-		 * columns array may contains another array of enumValues, this is ignored
-		 * for now as enums are to be mapped to text as of now
-		 *
-		 *	   "enumValues":
-		 *     [
-         *         "'fish'",
-         *         "'mammal'",
-         *         "'bird'"
-         *     ]
-		 */
-		if (ddlpayload)
-		{
-			int pause = 0;
-			/* iterate this payload jsonb */
-			it = JsonbIteratorInit(&ddlpayload->root);
-			while ((r = JsonbIteratorNext(&it, &v, false)) != WJB_DONE)
-			{
-				switch (r)
-				{
-					case WJB_BEGIN_OBJECT:
-						elog(DEBUG1, "parsing column --------------------");
-						ddlcol = (DBZ_DDL_COLUMN *) palloc0(sizeof(DBZ_DDL_COLUMN));
-
-						if (key)
-						{
-							pfree(key);
-							key = NULL;
-						}
-						break;
-					case WJB_END_OBJECT:
-						/* append ddlcol to ddlinfo->columns list for further processing */
-						ddlinfo->columns = lappend(ddlinfo->columns, ddlcol);
-
-						break;
-					case WJB_BEGIN_ARRAY:
-						elog(DEBUG1, "Begin array under %s", key ? key : "NULL");
-						if (key)
-						{
-							elog(DEBUG1, "sub array detected, skip it");
-							pause = 1;
-							pfree(key);
-							key = NULL;
-						}
-						break;
-					case WJB_END_ARRAY:
-						elog(DEBUG1, "End array");
-						if (pause)
-						{
-							elog(DEBUG1, "sub array ended, resume parsing operation");
-							pause = 0;
-						}
-						break;
-					case WJB_KEY:
-						if (pause)
-							break;
-						key = pnstrdup(v.val.string.val, v.val.string.len);
-						elog(DEBUG2, "Key: %s", key);
-
-						break;
-					case WJB_VALUE:
-					case WJB_ELEM:
-						if (pause)
-							break;
-						switch (v.type)
-						{
-							case jbvNull:
-								elog(DEBUG2, "Value: NULL");
-								value = pnstrdup("NULL", strlen("NULL"));
-								break;
-							case jbvString:
-								value = pnstrdup(v.val.string.val, v.val.string.len);
-								elog(DEBUG2, "String Value: %s", value);
-								break;
-							case jbvNumeric:
-							{
-								value = DatumGetCString(DirectFunctionCall1(numeric_out, PointerGetDatum(v.val.numeric)));
-								elog(DEBUG2, "Numeric Value: %s", value);
-								break;
-							}
-							case jbvBool:
-								elog(DEBUG2, "Boolean Value: %s", v.val.boolean ? "true" : "false");
-								if (v.val.boolean)
-									value = pnstrdup("true", strlen("true"));
-								else
-									value = pnstrdup("false", strlen("false"));
-								break;
-							case jbvBinary:
-								elog(DEBUG2, "Binary Value: [binary data]");
-								break;
-							default:
-								elog(DEBUG2, "Unknown value type: %d", v.type);
-								break;
-						}
-					break;
-					default:
-						elog(DEBUG1, "Unknown token: %d", r);
-						break;
-				}
-
-				/* check if we have a key - value pair */
-				if (key != NULL && value != NULL)
-				{
-					if (!strcmp(key, "name"))
-					{
-						elog(DEBUG1, "consuming %s = %s", key, value);
-						ddlcol->name = pstrdup(value);
-					}
-					if (!strcmp(key, "length"))
-					{
-						elog(DEBUG1, "consuming %s = %s", key, value);
-						ddlcol->length = strcmp(value, "NULL") == 0 ? 0 : atoi(value);
-					}
-					if (!strcmp(key, "optional"))
-					{
-						elog(DEBUG1, "consuming %s = %s", key, value);
-						ddlcol->optional = strcmp(value, "true") == 0 ? true : false;
-					}
-					if (!strcmp(key, "position"))
-					{
-						elog(DEBUG1, "consuming %s = %s", key, value);
-						ddlcol->position = atoi(value);
-					}
-					if (!strcmp(key, "typeName"))
-					{
-						elog(DEBUG1, "consuming %s = %s", key, value);
-						ddlcol->typeName = pstrdup(value);
-
-						/* data type names always normalized to lower case */
-						fc_normalize_name(LCS_NORMALIZE_LOWERCASE, ddlcol->typeName,
-								strlen(ddlcol->typeName));
-					}
-					if (!strcmp(key, "enumValues"))
-					{
-						elog(DEBUG1, "consuming %s = %s", key, value);
-						ddlcol->enumValues = pstrdup(value);
-					}
-					if (!strcmp(key, "charsetName"))
-					{
-						elog(DEBUG1, "consuming %s = %s", key, value);
-						ddlcol->charsetName = pstrdup(value);
-					}
-					if (!strcmp(key, "autoIncremented"))
-					{
-						elog(DEBUG1, "consuming %s = %s", key, value);
-						ddlcol->autoIncremented = strcmp(value, "true") == 0 ? true : false;
-					}
-					if (!strcmp(key, "defaultValueExpression"))
-					{
-						elog(DEBUG1, "consuming %s = %s", key, value);
-						ddlcol->defaultValueExpression = strcmp(value, "NULL") == 0 ? NULL : pstrdup(value);
-					}
-					if (!strcmp(key, "scale"))
-					{
-						elog(DEBUG1, "consuming %s = %s", key, value);
-						ddlcol->scale = strcmp(value, "NULL") == 0 ? 0 : atoi(value);
-					}
-
-					/* note: other key - value pairs ignored for now */
-					pfree(key);
-					pfree(value);
-					key = NULL;
-					value = NULL;
-				}
-			}
-		}
-		else
-		{
-			elog(WARNING, "failed to get payload.tableChanges.0.table.columns as jsonb");
-			destroyDBZDDL(ddlinfo);
-			return NULL;
-		}
-    }
-    else if (ddlinfo->type == DDL_DROP_TABLE)
-    {
-    	/* no further parsing needed for DROP, just return ddlinfo */
-    	return ddlinfo;
-    }
-    else
-    {
-		elog(WARNING, "unsupported ddl type %d", ddlinfo->type);
-		destroyDBZDDL(ddlinfo);
-		return NULL;
-    }
-	return ddlinfo;
-}
-
-/*
- * parseDBZDML
- *
- * this function parses a Jsonb that represents DML operation and produce a DBZ_DML structure
- */
-static DBZ_DML *
-parseDBZDML(Jsonb * jb, char op, ConnectorType type, Jsonb * source, bool isfirst, bool islast)
-{
-	StringInfoData strinfo, objid;
-	Jsonb * dmlpayload = NULL;
-	JsonbIterator *it;
-	JsonbValue v;
-	JsonbIteratorToken r;
-	char * key = NULL;
-	char * value = NULL;
-	DBZ_DML * dbzdml = NULL;
-	DBZ_DML_COLUMN_VALUE * colval = NULL;
-	Oid schemaoid;
-	Relation rel;
-	TupleDesc tupdesc;
-	int attnum = 0;
-	HTAB * typeidhash;
-	HTAB * namejsonposhash;
-	HASHCTL hash_ctl;
-	NameOidEntry * entry;
-	NameJsonposEntry * entry2;
-	bool found;
-	DataCacheKey cachekey = {0};
-	DataCacheEntry * cacheentry;
-	Bitmapset * pkattrs;
-
-	/* these are the components that compose of an object ID before transformation */
-	char * db = NULL, * schema = NULL, * table = NULL;
-
-	initStringInfo(&strinfo);
-	initStringInfo(&objid);
-	dbzdml = (DBZ_DML *) palloc0(sizeof(DBZ_DML));
-
-	if (source)
-	{
-		JsonbValue * v = NULL;
-		JsonbValue vbuf;
-
-		/* payload.source.db - required */
-		v = getKeyJsonValueFromContainer(&source->root, "db", strlen("db"), &vbuf);
-		if (!v)
-		{
-			elog(WARNING, "malformed DML change request - no database attribute specified");
-			destroyDBZDML(dbzdml);
-			dbzdml = NULL;
-			goto end;
-		}
-		db = pnstrdup(v->val.string.val, v->val.string.len);
-		appendStringInfo(&objid, "%s.", db);
-		memset(&vbuf, 0, sizeof(JsonbValue));
-
-		/*
-		 * payload.source.ts_ms - read only on the first or last change event of a batch
-		 * for statistic display purpose
-		 */
-		if (isfirst || islast)
-		{
-			v = getKeyJsonValueFromContainer(&source->root, "ts_ms", strlen("ts_ms"), &vbuf);
-			if (!v)
-				dbzdml->src_ts_ms = 0;
-			else
-				dbzdml->src_ts_ms = DatumGetUInt64(DirectFunctionCall1(numeric_int8, PointerGetDatum(v->val.numeric)));
-		}
-
-		/* payload.source.schema - optional */
-		v = getKeyJsonValueFromContainer(&source->root, "schema", strlen("schema"), &vbuf);
-		if (v)
-		{
-			schema = pnstrdup(v->val.string.val, v->val.string.len);
-			appendStringInfo(&objid, "%s.", schema);
-		}
-
-		/* payload.source.table - required */
-		v = getKeyJsonValueFromContainer(&source->root, "table", strlen("table"), &vbuf);
-		if (!v)
-		{
-			elog(WARNING, "malformed DML change request - no table attribute specified");
-			destroyDBZDML(dbzdml);
-			dbzdml = NULL;
-			goto end;
-		}
-		table = pnstrdup(v->val.string.val, v->val.string.len);
-		appendStringInfo(&objid, "%s", table);
-	}
-	else
-	{
-		elog(WARNING, "malformed DML change request - no source element");
-		destroyDBZDML(dbzdml);
-		dbzdml = NULL;
-		goto end;
-	}
-
-	/*
-	 * payload.ts_ms - read only on the first or last change event of a batch
-	 * for statistic display purpose
-	 */
-	if (isfirst || islast)
-	{
-		if (getPathElementString(jb, "payload.ts_ms", &strinfo, true))
-			dbzdml->dbz_ts_ms = 0;
-		else
-			dbzdml->dbz_ts_ms = strtoull(strinfo.data, NULL, 10);
-	}
-
-	dbzdml->remoteObjectId = pstrdup(objid.data);
-	dbzdml->mappedObjectId = transform_object_name(dbzdml->remoteObjectId, "table");
-	if (dbzdml->mappedObjectId)
-	{
-		char * objectIdCopy = pstrdup(dbzdml->mappedObjectId);
-		char * db2 = NULL, * table2 = NULL, * schema2 = NULL;
-
-		splitIdString(objectIdCopy, &db2, &schema2, &table2, false);
-		if (!table2)
-		{
-			/* save the error */
-			char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
-			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "transformed object ID is invalid: %s",
-					dbzdml->mappedObjectId);
-			set_shm_connector_errmsg(myConnectorId, msg);
-
-			/* trigger pg's error shutdown routine */
-			elog(ERROR, "%s", msg);
-		}
-		else
-			dbzdml->table = pstrdup(table2);
-
-		if (schema2)
-			dbzdml->schema = pstrdup(schema2);
-		else
-			dbzdml->schema = pstrdup("public");
-	}
-	else
-	{
-		/* by default, remote's db is mapped to schema in pg */
-		dbzdml->schema = pstrdup(db);
-		dbzdml->table = pstrdup(table);
-
-		fc_normalize_name(synchdb_letter_casing_strategy, dbzdml->schema, strlen(dbzdml->schema));
-		fc_normalize_name(synchdb_letter_casing_strategy, dbzdml->table, strlen(dbzdml->table));
-
-		resetStringInfo(&strinfo);
-		appendStringInfo(&strinfo, "%s.%s", dbzdml->schema, dbzdml->table);
-		dbzdml->mappedObjectId = pstrdup(strinfo.data);
-	}
-	/* free the temporary pointers */
-	if (db)
-	{
-		pfree(db);
-		db = NULL;
-	}
-	if (schema)
-	{
-		pfree(schema);
-		schema = NULL;
-	}
-	if (table)
-	{
-		pfree(table);
-		table = NULL;
-	}
-
-	dbzdml->op = op;
-
-	/*
-	 * before parsing, we need to make sure the target namespace and table
-	 * do exist in PostgreSQL, and also fetch their attribute type IDs. PG
-	 * automatically converts upper case letters to lower when they are
-	 * created. However, catalog lookups are case sensitive so here we must
-	 * convert db and table to all lower case letters.
-	 */
-
-	/* prepare cache key */
-	strlcpy(cachekey.schema, dbzdml->schema, sizeof(cachekey.schema));
-	strlcpy(cachekey.table, dbzdml->table, sizeof(cachekey.table));
-
-	cacheentry = (DataCacheEntry *) hash_search(dataCacheHash, &cachekey, HASH_ENTER, &found);
-	if (found)
-	{
-		/* use the cached data type hash for lookup later */
-		typeidhash = cacheentry->typeidhash;
-		dbzdml->tableoid = cacheentry->tableoid;
-		namejsonposhash = cacheentry->namejsonposhash;
-		dbzdml->natts = cacheentry->natts;
-	}
-	else
-	{
-		schemaoid = get_namespace_oid(dbzdml->schema, true);
-		if (!OidIsValid(schemaoid))
-		{
-			char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
-			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "no valid OID found for schema '%s'", dbzdml->schema);
-			set_shm_connector_errmsg(myConnectorId, msg);
-
-			if (synchdb_log_event_on_error && g_eventStr != NULL)
-				elog(LOG, "%s", g_eventStr);
-
-			/* act based on error strategy */
-			if (synchdb_error_strategy == STRAT_EXIT_ON_ERROR)
-				elog(ERROR, "%s", msg);
-			else
-			{
-				destroyDBZDML(dbzdml);
-				dbzdml = NULL;
-				goto end;
-			}
-		}
-
-		dbzdml->tableoid = get_relname_relid(dbzdml->table, schemaoid);
-		if (!OidIsValid(dbzdml->tableoid))
-		{
-			char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
-			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "no valid OID found for table '%s'", dbzdml->table);
-			set_shm_connector_errmsg(myConnectorId, msg);
-
-			if (synchdb_log_event_on_error && g_eventStr != NULL)
-				elog(LOG, "%s", g_eventStr);
-
-			/* act based on error strategy */
-			if (synchdb_error_strategy == STRAT_EXIT_ON_ERROR)
-				elog(ERROR, "%s", msg);
-			else
-			{
-				destroyDBZDML(dbzdml);
-				dbzdml = NULL;
-				goto end;
-			}
-		}
-
-		/* populate cached information */
-		strlcpy(cacheentry->key.schema, dbzdml->schema, sizeof(cachekey.schema));
-		strlcpy(cacheentry->key.table, dbzdml->table, sizeof(cachekey.table));
-		cacheentry->tableoid = dbzdml->tableoid;
-
-		/* prepare a cached hash table for datatype look up with column name */
-		memset(&hash_ctl, 0, sizeof(hash_ctl));
-		hash_ctl.keysize = NAMEDATALEN;
-		hash_ctl.entrysize = sizeof(NameOidEntry);
-		hash_ctl.hcxt = TopMemoryContext;
-
-		cacheentry->typeidhash = hash_create("Name to OID Hash Table",
-											 512,
-											 &hash_ctl,
-											 HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
-
-		/* point to the cached datatype hash */
-		typeidhash = cacheentry->typeidhash;
-
-		/*
-		 * get the column data type IDs for all columns from PostgreSQL catalog
-		 * The type IDs are stored in typeidhash temporarily for the parser
-		 * below to look up
-		 */
-		rel = table_open(dbzdml->tableoid, AccessShareLock);
-		tupdesc = RelationGetDescr(rel);
-
-		/* get primary key bitmapset */
-		pkattrs = RelationGetIndexAttrBitmap(rel, INDEX_ATTR_BITMAP_PRIMARY_KEY);
-
-		/* cache tupdesc and save natts for later use */
-		cacheentry->tupdesc = CreateTupleDescCopy(tupdesc);
-		dbzdml->natts = tupdesc->natts;
-		cacheentry->natts = dbzdml->natts;
-
-		for (attnum = 1; attnum <= tupdesc->natts; attnum++)
-		{
-			Form_pg_attribute attr = TupleDescAttr(tupdesc, attnum - 1);
-			entry = (NameOidEntry *) hash_search(typeidhash, NameStr(attr->attname), HASH_ENTER, &found);
-			if (!found)
-			{
-				strlcpy(entry->name, NameStr(attr->attname), NAMEDATALEN);
-				entry->oid = attr->atttypid;
-				entry->position = attnum;
-				entry->typemod = attr->atttypmod;
-				if (pkattrs && bms_is_member(attnum - FirstLowInvalidHeapAttributeNumber, pkattrs))
-					entry->ispk = true;
-				else
-					entry->ispk = false;
-				get_type_category_preferred(entry->oid, &entry->typcategory, &entry->typispreferred);
-				strlcpy(entry->typname, format_type_be(attr->atttypid), NAMEDATALEN);
-			}
-		}
-		bms_free(pkattrs);
-		table_close(rel, AccessShareLock);
-
-		/*
-		 * build another hash to store json value's locations of schema data for correct additional param lookups
-		 * todo: combine this hash with typeidhash above to save one hash
-		 */
-		cacheentry->namejsonposhash = build_schema_jsonpos_hash(jb);
-		namejsonposhash = cacheentry->namejsonposhash;
-		if (!namejsonposhash)
-		{
-			/* dump the JSON change event as additional detail if available */
-			if (synchdb_log_event_on_error && g_eventStr != NULL)
-				elog(LOG, "%s", g_eventStr);
-
-			elog(ERROR, "cannot parse schema section of change event JSON. Abort");
-		}
-	}
-
-	switch(op)
-	{
-		case 'c':	/* create: data created after initial sync (INSERT) */
-		case 'r':	/* read: initial data read */
-		{
-			/* sample payload:
-			 * "payload": {
-			 * 		"before": null,
-			 * 		"after" : {
-			 * 			"order_number": 10001,
-			 * 			"order_date": 16816,
-			 * 			"purchaser": 1001,
-			 * 			"quantity": 1,
-			 * 			"product_id": 102
-			 * 		}
-			 * 	}
-			 *
-			 * 	This parser expects the payload to contain only scalar values. In some special
-			 * 	cases like geometry or oracle's number column type, the payload could contain
-			 * 	sub element like:
-			 * 	"after" : {
-			 * 		"id"; 1,
-			 * 		"g": {
-			 * 			"wkb": "AQIAAAACAAAAAAAAAAAAAEAAAAAAAADwPwAAAAAAABhAAAAAAAAAGEA=",
-			 * 			"srid": null
-			 * 		},
-			 * 		"h": null
-			 * 		"i": {
-             *          "scale": 0,
-             *          "value": "AQ=="
-             *      }
-			 * 	}
-			 * 	in this case, the parser will parse the entire sub element as string under the key "g"
-			 * 	in the above example.
-			 */
-			Datum datum_elems[2] ={CStringGetTextDatum("payload"), CStringGetTextDatum("after")};
-			dmlpayload = GET_JSONB_ELEM(jb, &datum_elems[0], 2);
-			if (dmlpayload)
-			{
-				int pause = 0;
-				it = JsonbIteratorInit(&dmlpayload->root);
-				while ((r = JsonbIteratorNext(&it, &v, false)) != WJB_DONE)
-				{
-					switch (r)
-					{
-						case WJB_BEGIN_OBJECT:
-							if (key != NULL)
-							{
-								pause = 1;
-							}
-							break;
-						case WJB_END_OBJECT:
-							if (pause)
-							{
-								pause = 0;
-								if (key)
-								{
-									int pathsize = strlen("payload.after.") + strlen(key) + 1;
-									char * tmpPath = (char *) palloc0 (pathsize);
-									snprintf(tmpPath, pathsize, "payload.after.%s", key);
-									if (getPathElementString(jb, tmpPath, &strinfo, false) == 0)
-										value = pstrdup(strinfo.data);
-									if(tmpPath)
-										pfree(tmpPath);
-								}
-							}
-							break;
-						case WJB_BEGIN_ARRAY:
-							if (key != NULL)
-							{
-								pause = 1;
-							}
-							break;
-						case WJB_END_ARRAY:
-							if (pause)
-							{
-								pause = 0;
-								if (key)
-								{
-									int pathsize = strlen("payload.after.") + strlen(key) + 1;
-									char * tmpPath = (char *) palloc0 (pathsize);
-									snprintf(tmpPath, pathsize, "payload.after.%s", key);
-									if (getPathElementString(jb, tmpPath, &strinfo, false) == 0)
-									{
-										/* postgres array is wrapped with curly brackets instead */
-										if (strinfo.len > 0 && strinfo.data[0] == '[')
-											strinfo.data[0] = '{';
-										if (strinfo.len > 0 && strinfo.data[strinfo.len - 1] == ']')
-											strinfo.data[strinfo.len - 1] = '}';
-
-										value = pstrdup(strinfo.data);
-									}
-									if(tmpPath)
-										pfree(tmpPath);
-								}
-							}
-							break;
-						case WJB_KEY:
-							if (pause)
-								break;
-							if (key)
-							{
-								pfree(key);
-								key = NULL;
-							}
-							if (value)
-							{
-								pfree(value);
-								value = NULL;
-							}
-							key = pnstrdup(v.val.string.val, v.val.string.len);
-							break;
-						case WJB_VALUE:
-						case WJB_ELEM:
-							if (pause)
-								break;
-							switch (v.type)
-							{
-								case jbvNull:
-									value = pstrdup("NULL");
-									break;
-								case jbvString:
-									value = pnstrdup(v.val.string.val, v.val.string.len);
-									break;
-								case jbvNumeric:
-									value = DatumGetCString(DirectFunctionCall1(numeric_out, PointerGetDatum(v.val.numeric)));
-									break;
-								case jbvBool:
-									if (v.val.boolean)
-										value = pstrdup("true");
-									else
-										value = pstrdup("false");
-									break;
-								case jbvBinary:
-									value = pstrdup("NULL");
-									break;
-								default:
-									value = pstrdup("NULL");
-									break;
-							}
-						break;
-						default:
-							break;
-					}
-
-					/* check if we have a key - value pair */
-					if (key != NULL && value != NULL)
-					{
-						char * mappedColumnName = NULL;
-						char * colname_lower = NULL;
-						StringInfoData colNameObjId;
-
-						colval = (DBZ_DML_COLUMN_VALUE *) palloc0(sizeof(DBZ_DML_COLUMN_VALUE));
-						colval->name = pstrdup(key);
-
-						/* a copy of original column name for expression rule lookup at later stage */
-						colval->remoteColumnName = pstrdup(colval->name);
-						fc_normalize_name(synchdb_letter_casing_strategy, colval->name, strlen(colval->name));
-
-						colval->value = pstrdup(value);
-
-						/* transform the column name if needed */
-						initStringInfo(&colNameObjId);
-						appendStringInfo(&colNameObjId, "%s.%s", objid.data, colval->remoteColumnName);
-						mappedColumnName = transform_object_name(colNameObjId.data, "column");
-						if (mappedColumnName)
-						{
-							/* replace the column name with looked up value here */
-							pfree(colval->name);
-							colval->name = pstrdup(mappedColumnName);
-						}
-						if (colNameObjId.data)
-							pfree(colNameObjId.data);
-
-						/* look up its data type */
-						entry = (NameOidEntry *) hash_search(typeidhash, colval->name, HASH_FIND, &found);
-						if (found)
-						{
-							colval->datatype = entry->oid;
-							colval->position = entry->position;
-							colval->typemod = entry->typemod;
-							colval->ispk = entry->ispk;
-							colval->typcategory = entry->typcategory;
-							colval->typispreferred = entry->typispreferred;
-							colval->typname = pstrdup(entry->typname);
-						}
-						else
-							elog(ERROR, "cannot find data type for column %s. Non-existent column?", colval->name);
-
-						/* jsonpos hash must be looked up using lower case names - todo */
-						colname_lower = pstrdup(colval->remoteColumnName);
-						fc_normalize_name(LCS_NORMALIZE_LOWERCASE, colname_lower, strlen(colname_lower));
-						entry2 = (NameJsonposEntry *) hash_search(namejsonposhash, colname_lower, HASH_FIND, &found);
-						if (found)
-						{
-							colval->dbztype = entry2->dbztype;
-							colval->timerep = entry2->timerep;
-							colval->scale = entry2->scale;
-						}
-						else
-							elog(ERROR, "cannot find json schema data for column %s(%s). invalid json event?",
-									colval->name, colname_lower);
-						pfree(colname_lower);
-
-						dbzdml->columnValuesAfter = lappend(dbzdml->columnValuesAfter, colval);
-						pfree(key);
-						pfree(value);
-						key = NULL;
-						value = NULL;
-					}
-				}
-			}
-			break;
-		}
-		case 'd':	/* delete: data deleted after initial sync (DELETE) */
-		{
-			/* sample payload:
-			 * "payload": {
-			 * 		"before" : {
-			 * 			"id": 1015,
-			 * 			"first_name": "first",
-			 * 			"last_name": "last",
-			 * 			"email": "abc@mail.com"
-			 * 		},
-			 * 		"after": null
-			 * 	}
-			 */
-			Datum datum_elems[2] = { CStringGetTextDatum("payload"), CStringGetTextDatum("before")};
-			dmlpayload = GET_JSONB_ELEM(jb, &datum_elems[0], 2);
-			if (dmlpayload)
-			{
-				int pause = 0;
-				it = JsonbIteratorInit(&dmlpayload->root);
-				while ((r = JsonbIteratorNext(&it, &v, false)) != WJB_DONE)
-				{
-					switch (r)
-					{
-						case WJB_BEGIN_OBJECT:
-							if (key != NULL)
-							{
-								pause = 1;
-							}
-							break;
-						case WJB_END_OBJECT:
-							if (pause)
-							{
-								pause = 0;
-								if (key)
-								{
-									int pathsize = strlen("payload.before.") + strlen(key) + 1;
-									char * tmpPath = (char *) palloc0 (pathsize);
-									snprintf(tmpPath, pathsize, "payload.before.%s", key);
-									if (getPathElementString(jb, tmpPath, &strinfo, false) == 0)
-										value = pstrdup(strinfo.data);
-									if(tmpPath)
-										pfree(tmpPath);
-								}
-							}
-							break;
-						case WJB_BEGIN_ARRAY:
-							if (key != NULL)
-							{
-								pause = 1;
-							}
-							break;
-						case WJB_END_ARRAY:
-							if (pause)
-							{
-								pause = 0;
-								if (key)
-								{
-									int pathsize = strlen("payload.after.") + strlen(key) + 1;
-									char * tmpPath = (char *) palloc0 (pathsize);
-									snprintf(tmpPath, pathsize, "payload.after.%s", key);
-									if (getPathElementString(jb, tmpPath, &strinfo, false) == 0)
-									{
-										/* postgres array is wrapped with curly brackets instead */
-										if (strinfo.len > 0 && strinfo.data[0] == '[')
-											strinfo.data[0] = '{';
-										if (strinfo.len > 0 && strinfo.data[strinfo.len - 1] == ']')
-											strinfo.data[strinfo.len - 1] = '}';
-
-										value = pstrdup(strinfo.data);
-									}
-									if(tmpPath)
-										pfree(tmpPath);
-								}
-							}
-							break;
-						case WJB_KEY:
-							if (pause)
-								break;
-							if (key)
-							{
-								pfree(key);
-								key = NULL;
-							}
-							if (value)
-							{
-								pfree(value);
-								value = NULL;
-							}
-							key = pnstrdup(v.val.string.val, v.val.string.len);
-							break;
-						case WJB_VALUE:
-						case WJB_ELEM:
-							if (pause)
-								break;
-							switch (v.type)
-							{
-								case jbvNull:
-									value = pnstrdup("NULL", strlen("NULL"));
-									break;
-								case jbvString:
-									value = pnstrdup(v.val.string.val, v.val.string.len);
-									break;
-								case jbvNumeric:
-									value = DatumGetCString(DirectFunctionCall1(numeric_out, PointerGetDatum(v.val.numeric)));
-									break;
-								case jbvBool:
-									if (v.val.boolean)
-										value = pnstrdup("true", strlen("true"));
-									else
-										value = pnstrdup("false", strlen("false"));
-									break;
-								case jbvBinary:
-									value = pnstrdup("NULL", strlen("NULL"));
-									break;
-								default:
-									value = pnstrdup("NULL", strlen("NULL"));
-									break;
-							}
-						break;
-						default:
-							break;
-					}
-
-					/* check if we have a key - value pair */
-					if (key != NULL && value != NULL)
-					{
-						char * mappedColumnName = NULL;
-						char * colname_lower = NULL;
-						StringInfoData colNameObjId;
-
-						colval = (DBZ_DML_COLUMN_VALUE *) palloc0(sizeof(DBZ_DML_COLUMN_VALUE));
-						colval->name = pstrdup(key);
-
-						/* a copy of original column name for expression rule lookup at later stage */
-						colval->remoteColumnName = pstrdup(colval->name);
-
-						fc_normalize_name(synchdb_letter_casing_strategy, colval->name, strlen(colval->name));
-
-						colval->value = pstrdup(value);
-
-						/* transform the column name if needed */
-						initStringInfo(&colNameObjId);
-						appendStringInfo(&colNameObjId, "%s.%s", objid.data, colval->remoteColumnName);
-						mappedColumnName = transform_object_name(colNameObjId.data, "column");
-						if (mappedColumnName)
-						{
-							/* replace the column name with looked up value here */
-							pfree(colval->name);
-							colval->name = pstrdup(mappedColumnName);
-						}
-						if (colNameObjId.data)
-							pfree(colNameObjId.data);
-
-						/* look up its data type */
-						entry = (NameOidEntry *) hash_search(typeidhash, colval->name, HASH_FIND, &found);
-						if (found)
-						{
-							colval->datatype = entry->oid;
-							colval->position = entry->position;
-							colval->typemod = entry->typemod;
-							colval->ispk = entry->ispk;
-							colval->typcategory = entry->typcategory;
-							colval->typispreferred = entry->typispreferred;
-							colval->typname = pstrdup(entry->typname);
-						}
-						else
-							elog(ERROR, "cannot find data type for column %s. Non-existent column?", colval->name);
-
-						/* jsonpos hash must be looked up using lower case names - todo */
-						colname_lower = pstrdup(colval->remoteColumnName);
-						fc_normalize_name(LCS_NORMALIZE_LOWERCASE, colname_lower, strlen(colname_lower));
-						entry2 = (NameJsonposEntry *) hash_search(namejsonposhash, colname_lower, HASH_FIND, &found);
-						if (found)
-						{
-							colval->dbztype = entry2->dbztype;
-							colval->timerep = entry2->timerep;
-							colval->scale = entry2->scale;
-						}
-						else
-							elog(ERROR, "cannot find json schema data for column %s(%s). invalid json event?",
-									colval->name, colname_lower);
-						pfree(colname_lower);
-
-						dbzdml->columnValuesBefore = lappend(dbzdml->columnValuesBefore, colval);
-						pfree(key);
-						pfree(value);
-						key = NULL;
-						value = NULL;
-					}
-				}
-			}
-			break;
-		}
-		case 'u':	/* update: data updated after initial sync (UPDATE) */
-		{
-			/* sample payload:
-			 * "payload": {
-			 * 		"before" : {
-			 * 			"order_number": 10006,
-			 * 			"order_date": 17449,
-			 * 			"purchaser": 1003,
-			 * 			"quantity": 5,
-			 * 			"product_id": 107
-			 * 		},
-			 * 		"after": {
-			 * 			"order_number": 10006,
-			 * 			"order_date": 17449,
-			 * 			"purchaser": 1004,
-			 * 			"quantity": 5,
-			 * 			"product_id": 107
-			 * 		}
-			 * 	}
-			 */
-			int i = 0;
-			for (i = 0; i < 2; i++)
-			{
-				/*
-				 * always initialize key, value to NULL before doing anything in case "before" at i = 0
-				 * is given as null in the case of postgres connector with replica identity = default
-				 */
-				key = NULL;
-				value = NULL;
-
-				/* need to parse before and after */
-				if (i == 0)
-				{
-					Datum datum_elems[2] = { CStringGetTextDatum("payload"), CStringGetTextDatum("before")};
-					dmlpayload = GET_JSONB_ELEM(jb, &datum_elems[0], 2);
-				}
-				else
-				{
-					Datum datum_elems[2] = { CStringGetTextDatum("payload"), CStringGetTextDatum("after")};
-					dmlpayload = GET_JSONB_ELEM(jb, &datum_elems[0], 2);
-				}
-				if (dmlpayload)
-				{
-					int pause = 0;
-					it = JsonbIteratorInit(&dmlpayload->root);
-					while ((r = JsonbIteratorNext(&it, &v, false)) != WJB_DONE)
-					{
-						switch (r)
-						{
-							case WJB_BEGIN_OBJECT:
-								if (key != NULL)
-								{
-									pause = 1;
-								}
-								break;
-							case WJB_END_OBJECT:
-								if (pause)
-								{
-									pause = 0;
-									if (key)
-									{
-										int pathsize = (i == 0 ? strlen("payload.before.") + strlen(key) + 1 :
-												strlen("payload.after.") + strlen(key) + 1);
-										char * tmpPath = (char *) palloc0 (pathsize);
-										if (i == 0)
-											snprintf(tmpPath, pathsize, "payload.before.%s", key);
-										else
-											snprintf(tmpPath, pathsize, "payload.after.%s", key);
-										if (getPathElementString(jb, tmpPath, &strinfo, false) == 0)
-											value = pstrdup(strinfo.data);
-										if(tmpPath)
-											pfree(tmpPath);
-									}
-								}
-								break;
-							case WJB_BEGIN_ARRAY:
-								if (key != NULL)
-								{
-									pause = 1;
-								}
-								break;
-							case WJB_END_ARRAY:
-								if (pause)
-								{
-									pause = 0;
-									if (key)
-									{
-										int pathsize = (i == 0 ? strlen("payload.before.") + strlen(key) + 1 :
-												strlen("payload.after.") + strlen(key) + 1);
-										char * tmpPath = (char *) palloc0 (pathsize);
-										if (i == 0)
-											snprintf(tmpPath, pathsize, "payload.before.%s", key);
-										else
-											snprintf(tmpPath, pathsize, "payload.after.%s", key);
-										if (getPathElementString(jb, tmpPath, &strinfo, false) == 0)
-										{
-											/* postgres array is wrapped with curly brackets instead */
-											if (strinfo.len > 0 && strinfo.data[0] == '[')
-												strinfo.data[0] = '{';
-											if (strinfo.len > 0 && strinfo.data[strinfo.len - 1] == ']')
-												strinfo.data[strinfo.len - 1] = '}';
-
-											value = pstrdup(strinfo.data);
-										}
-										if(tmpPath)
-											pfree(tmpPath);
-									}
-								}
-								break;
-							case WJB_KEY:
-								if (pause)
-									break;
-								if (key)
-								{
-									pfree(key);
-									key = NULL;
-								}
-								if (value)
-								{
-									pfree(value);
-									value = NULL;
-								}
-								key = pnstrdup(v.val.string.val, v.val.string.len);
-								break;
-							case WJB_VALUE:
-							case WJB_ELEM:
-								if (pause)
-									break;
-								switch (v.type)
-								{
-									case jbvNull:
-										value = pnstrdup("NULL", strlen("NULL"));
-										break;
-									case jbvString:
-										value = pnstrdup(v.val.string.val, v.val.string.len);
-										break;
-									case jbvNumeric:
-										value = DatumGetCString(DirectFunctionCall1(numeric_out, PointerGetDatum(v.val.numeric)));
-										break;
-									case jbvBool:
-										if (v.val.boolean)
-											value = pnstrdup("true", strlen("true"));
-										else
-											value = pnstrdup("false", strlen("false"));
-										break;
-									case jbvBinary:
-										value = pnstrdup("NULL", strlen("NULL"));
-										break;
-									default:
-										value = pnstrdup("NULL", strlen("NULL"));
-										break;
-								}
-							break;
-							default:
-								break;
-						}
-
-						/* check if we have a key - value pair */
-						if (key != NULL && value != NULL)
-						{
-							char * mappedColumnName = NULL;
-							char * colname_lower = NULL;
-							StringInfoData colNameObjId;
-
-							colval = (DBZ_DML_COLUMN_VALUE *) palloc0(sizeof(DBZ_DML_COLUMN_VALUE));
-							colval->name = pstrdup(key);
-
-							/* a copy of original column name for expression rule lookup at later stage */
-							colval->remoteColumnName = pstrdup(colval->name);
-
-							fc_normalize_name(synchdb_letter_casing_strategy, colval->name, strlen(colval->name));
-
-							colval->value = pstrdup(value);
-
-							/* transform the column name if needed */
-							initStringInfo(&colNameObjId);
-							appendStringInfo(&colNameObjId, "%s.%s", objid.data, colval->remoteColumnName);
-							mappedColumnName = transform_object_name(colNameObjId.data, "column");
-							if (mappedColumnName)
-							{
-								/* replace the column name with looked up value here */
-								pfree(colval->name);
-								colval->name = pstrdup(mappedColumnName);
-							}
-							if (colNameObjId.data)
-								pfree(colNameObjId.data);
-
-							/* look up its data type */
-							entry = (NameOidEntry *) hash_search(typeidhash, colval->name, HASH_FIND, &found);
-							if (found)
-							{
-								colval->datatype = entry->oid;
-								colval->position = entry->position;
-								colval->typemod = entry->typemod;
-								colval->ispk = entry->ispk;
-								colval->typcategory = entry->typcategory;
-								colval->typispreferred = entry->typispreferred;
-								colval->typname = pstrdup(entry->typname);
-							}
-							else
-								elog(ERROR, "cannot find data type for column %s. Non-existent column?", colval->name);
-
-							/* jsonpos hash must be looked up using lower case names - todo */
-							colname_lower = pstrdup(colval->remoteColumnName);
-							fc_normalize_name(LCS_NORMALIZE_LOWERCASE, colname_lower, strlen(colname_lower));
-							entry2 = (NameJsonposEntry *) hash_search(namejsonposhash, colname_lower, HASH_FIND, &found);
-							if (found)
-							{
-								colval->dbztype = entry2->dbztype;
-								colval->timerep = entry2->timerep;
-								colval->scale = entry2->scale;
-							}
-							else
-								elog(ERROR, "cannot find json schema data for column %s(%s). invalid json event?",
-										colval->name, colname_lower);
-							pfree(colname_lower);
-
-							if (i == 0)
-								dbzdml->columnValuesBefore = lappend(dbzdml->columnValuesBefore, colval);
-							else
-								dbzdml->columnValuesAfter = lappend(dbzdml->columnValuesAfter, colval);
-
-							pfree(key);
-							pfree(value);
-							key = NULL;
-							value = NULL;
-						}
-					}
-				}
-			}
-			break;
-		}
-		default:
-		{
-			elog(WARNING, "op %c not supported", op);
-			if(strinfo.data)
-				pfree(strinfo.data);
-
-			destroyDBZDML(dbzdml);
-			return NULL;
-		}
-	}
-
-	/*
-	 * finally, we need to sort dbzdml->columnValuesBefore and dbzdml->columnValuesAfter
-	 * based on position to align with PostgreSQL's attnum
-	 */
-	if (dbzdml->columnValuesBefore != NULL)
-		list_sort(dbzdml->columnValuesBefore, list_sort_cmp);
-
-	if (dbzdml->columnValuesAfter != NULL)
-		list_sort(dbzdml->columnValuesAfter, list_sort_cmp);
-
-end:
-	if (strinfo.data)
-		pfree(strinfo.data);
-
-	if (objid.data)
-		pfree(objid.data);
-
-	return dbzdml;
-}
-
-/*
- * fc_processDBZChangeEvent
- *
- * Main function to process Debezium change event
- */
-int
-fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
-		int flag, const char * name, bool isfirst, bool islast)
-{
-	Datum jsonb_datum;
-	Jsonb * jb;
-	Jsonb * source = NULL;
-	Jsonb * payload = NULL;
-	StringInfoData strinfo;
-	ConnectorType type;
-	MemoryContext tempContext, oldContext;
-	bool islastsnapshot = false;
-	int ret = -1;
-	struct timeval tv;
-	Datum datum_elems[2] = {CStringGetTextDatum("payload"), CStringGetTextDatum("source")};
-	Datum datum_payload[1] = {CStringGetTextDatum("payload")};
-
-	tempContext = AllocSetContextCreate(TopMemoryContext,
-										"FORMAT_CONVERTER",
-										ALLOCSET_DEFAULT_SIZES);
-
-	oldContext = MemoryContextSwitchTo(tempContext);
-
-	initStringInfo(&strinfo);
-
-    /* Convert event string to JSONB */
-	PG_TRY();
-	{
-	    jsonb_datum = DirectFunctionCall1(jsonb_in, CStringGetDatum(event));
-	    jb = DatumGetJsonbP(jsonb_datum);
-	}
-	PG_CATCH();
-	{
-		FlushErrorState();
-		elog(WARNING, "bad json message: %s", event);
-		increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
-		MemoryContextSwitchTo(oldContext);
-		MemoryContextDelete(tempContext);
-		return -1;
-	}
-	PG_END_TRY();
-
-    /* Obtain source element - required */
-	source = GET_JSONB_ELEM(jb, &datum_elems[0], 2);
-    if (source)
-    {
-		JsonbValue * v = NULL;
-		JsonbValue vbuf;
-		char * tmp = NULL;
-
-		/* payload.source.connector - required */
-		v = getKeyJsonValueFromContainer(&source->root, "connector", strlen("connector"), &vbuf);
-		if (!v)
-		{
-			elog(WARNING, "malformed change request - no connector attribute specified");
-	    	increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
-	    	MemoryContextSwitchTo(oldContext);
-	    	MemoryContextDelete(tempContext);
-			return -1;
-		}
-		tmp = pnstrdup(v->val.string.val, v->val.string.len);
-		type = fc_get_connector_type(tmp);
-		pfree(tmp);
-
-		/* payload.source.snapshot - required */
-		v = getKeyJsonValueFromContainer(&source->root, "snapshot", strlen("snapshot"), &vbuf);
-		if (!v)
-		{
-			elog(WARNING, "malformed DML change request - no snapshot attribute specified");
-			increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
-	    	MemoryContextSwitchTo(oldContext);
-	    	MemoryContextDelete(tempContext);
-			return -1;
-		}
-		tmp = pnstrdup(v->val.string.val, v->val.string.len);
-	    if (!strcmp(tmp, "true") || !strcmp(tmp, "last"))
-	    {
-			if (flag & CONNFLAG_SCHEMA_SYNC_MODE)
-			{
-				if (get_shm_connector_stage_enum(myConnectorId) != STAGE_SCHEMA_SYNC)
-					set_shm_connector_stage(myConnectorId, STAGE_SCHEMA_SYNC);
-			}
-			/* Recovery events after an FDW snapshot also carry snapshot=true. */
-			else if (flag & CONNFLAG_INITIAL_SNAPSHOT_MODE)
-			{
-				if (get_shm_connector_stage_enum(myConnectorId) != STAGE_INITIAL_SNAPSHOT)
-					set_shm_connector_stage(myConnectorId, STAGE_INITIAL_SNAPSHOT);
-			}
-
-			if (!isInSnapshot && !strcmp(tmp, "true"))
-			{
-				isInSnapshot = true;
-				/* first snapshot event: log the snapshot begin timestamp */
-				gettimeofday(&tv, NULL);
-				myBatchStats->snapstats.snapstats_begintime_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
-
-				/*
-				 * when begintime_ts is set, we assume it is the beginning of a snapshot, so
-				 * we set endtime_ts to 0 to indicate a fresh start.
-				 */
-				myBatchStats->snapstats.snapstats_endtime_ts = 0;
-			}
-
-	    	if (!strcmp(tmp, "last"))
-	    	{
-	    		islastsnapshot = true;
-	    		/* last snapshot event: log the snapshot begin timestamp */
-				gettimeofday(&tv, NULL);
-				myBatchStats->snapstats.snapstats_endtime_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
-	    	}
-	    }
-	    else
-	    {
-	    	if (get_shm_connector_stage_enum(myConnectorId) != STAGE_CHANGE_DATA_CAPTURE)
-	    		set_shm_connector_stage(myConnectorId, STAGE_CHANGE_DATA_CAPTURE);
-	    }
-	    pfree(tmp);
-
-#ifdef WITH_OLR
-		elog(DEBUG1, "islastsnapshot %d, type %d", islastsnapshot, get_shm_connector_type_enum(myConnectorId));
-	    if (islastsnapshot && get_shm_connector_type_enum(myConnectorId) == TYPE_OLR)
-	    {
-			orascn scn = 0, c_scn = 0;
-			/*
-			 * OLR connector only - get this event's scn and c_scn and set to
-			 * OLR client so that it would start CDC from beyond this last
-			 * snapshot event
-			 */
-			v = getKeyJsonValueFromContainer(&source->root, "scn", strlen("scn"), &vbuf);
-			if (v && v->type != jbvNull)
-			{
-				if (v->type == jbvString)
-				{
-					tmp = pnstrdup(v->val.string.val, v->val.string.len);
-					elog(WARNING, "scn %s", tmp);
-					scn = strtoull(tmp, NULL, 10);
-					pfree(tmp);
-				}
-				else
-					elog(WARNING, "scn not a string...");
-			}
-
-			v = getKeyJsonValueFromContainer(&source->root, "commit_scn", strlen("commit_scn"), &vbuf);
-			if (v && v->type != jbvNull)
-			{
-				if (v->type == jbvString)
-				{
-					tmp = pnstrdup(v->val.string.val, v->val.string.len);
-					elog(WARNING, "commit_scn %s", tmp);
-					c_scn = strtoull(tmp, NULL, 10);
-					pfree(tmp);
-				}
-				else
-					elog(WARNING, "commit scn not a string...");
-			}
-			elog(WARNING, "last snapshot event is at: scn=%llu c_scn=%llu", scn, c_scn);
-
-			olr_client_set_scns(scn, c_scn > 0 ? c_scn : scn, 0);
-	    }
-#endif
-    }
-    else
-    {
-		/* if payload.source is absent we assume this is a transaction boundary event */
-		payload = GET_JSONB_ELEM(jb, &datum_payload[0], 1);
-		if (payload)
-		{
-			JsonbValue * v = NULL;
-			JsonbValue vbuf;
-			char * tmp = NULL;
-
-			/* payload.status - required */
-			v = getKeyJsonValueFromContainer(&payload->root, "status", strlen("status"), &vbuf);
-			if (!v)
-			{
-				elog(WARNING, "malformed change request - no status in transaction boundary payload");
-				increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
-				MemoryContextSwitchTo(oldContext);
-				MemoryContextDelete(tempContext);
-				return -1;
-			}
-			increment_connector_statistics(myBatchStats, STATS_TX, 1);
-			tmp = pnstrdup(v->val.string.val, v->val.string.len);
-			elog(DEBUG1, "transaction boundary status: %s", tmp);
-			pfree(tmp);
-
-			/* tm - only at first and last record within a batch */
-			/* update processing timestamps */
-			if (islast)
-			{
-				v = getKeyJsonValueFromContainer(&payload->root, "ts_ms", strlen("ts_ms"), &vbuf);
-				if (v)
-				{
-					myBatchStats->genstats.stats_last_src_ts = DatumGetUInt64(DirectFunctionCall1(numeric_int8,
-							NumericGetDatum(v->val.numeric)));
-				}
-				gettimeofday(&tv, NULL);
-				myBatchStats->genstats.stats_last_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
-			}
-
-			if (isfirst)
-			{
-				v = getKeyJsonValueFromContainer(&jb->root, "ts_ms", strlen("ts_ms"), &vbuf);
-				if (v)
-				{
-					myBatchStats->genstats.stats_first_src_ts = DatumGetUInt64(DirectFunctionCall1(numeric_int8,
-							NumericGetDatum(v->val.numeric)));
-				}
-				gettimeofday(&tv, NULL);
-				myBatchStats->genstats.stats_first_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
-			}
-			MemoryContextSwitchTo(oldContext);
-			MemoryContextDelete(tempContext);
-			return -1;
-		}
-		else
-		{
-			elog(WARNING, "malformed change request - no source element");
-			increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
-			MemoryContextSwitchTo(oldContext);
-			MemoryContextDelete(tempContext);
-			return -1;
-		}
-    }
-
-    /* Check if it's a DDL or DML event */
-    ret = getPathElementString(jb, "payload.op", &strinfo, true);
-    /*
-     * if payload.op exists and value equals 'm' or the entire payload.op missing,
-     * then it is about DDL.
-     */
-    if ((!ret && strinfo.data && strinfo.data[0] == 'm') || ret)
-    {
-        /* Process DDL event */
-    	DBZ_DDL * dbzddl = NULL;
-    	PG_DDL * pgddl = NULL;
-    	bool deriveMsg = false;
-
-    	if (strinfo.data && strinfo.data[0] == 'm')
-    	{
-        	elog(WARNING, "postgres connector's op = m");
-        	deriveMsg = true;
-    	}
-
-    	/* (1) parse */
-    	set_shm_connector_state(myConnectorId, STATE_PARSING);
-    	dbzddl = parseDBZDDL(jb, isfirst, islast, deriveMsg);
-    	if (!dbzddl)
-    	{
-    		set_shm_connector_state(myConnectorId, STATE_SYNCING);
-    		increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
-    		MemoryContextSwitchTo(oldContext);
-    		MemoryContextDelete(tempContext);
-    		return -1;
-    	}
-
-    	/* (2) convert */
-    	set_shm_connector_state(myConnectorId, STATE_CONVERTING);
-    	pgddl = convert2PGDDL(dbzddl, type);
-    	if (!pgddl)
-    	{
-    		set_shm_connector_state(myConnectorId, STATE_SYNCING);
-    		increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
-    		destroyDBZDDL(dbzddl);
-    		MemoryContextSwitchTo(oldContext);
-    		MemoryContextDelete(tempContext);
-    		return -1;
-    	}
-
-    	/* (3) execute */
-    	set_shm_connector_state(myConnectorId, STATE_EXECUTING);
-    	ret = ra_executePGDDL(pgddl, type);
-    	if(ret)
-    	{
-    		set_shm_connector_state(myConnectorId, STATE_SYNCING);
-    		increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
-    		destroyDBZDDL(dbzddl);
-    		destroyPGDDL(pgddl);
-    		MemoryContextSwitchTo(oldContext);
-    		MemoryContextDelete(tempContext);
-    		return -1;
-    	}
-
-		/* (4) update attribute map table */
-    	updateSynchdbAttribute(dbzddl, pgddl, get_shm_connector_type_enum(myConnectorId), name);
-
-    	/* (5) record only the first and last change event's processing timestamps only */
-    	if (islast)
-    	{
-			myBatchStats->genstats.stats_last_src_ts = dbzddl->src_ts_ms;
-			gettimeofday(&tv, NULL);
-			myBatchStats->genstats.stats_last_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
-    	}
-
-    	if (isfirst)
-    	{
-			myBatchStats->genstats.stats_first_src_ts = dbzddl->src_ts_ms;
-			gettimeofday(&tv, NULL);
-			myBatchStats->genstats.stats_first_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
-    	}
-
-    	/* increment DDLs only in CDC stage */
-    	if (!isInSnapshot)
-    		increment_connector_statistics(myBatchStats, STATS_DDL, 1);
-
-    	/* increment snapshot table count only in initial snapshot stage */
-    	if (isInSnapshot && dbzddl->type == DDL_CREATE_TABLE)
-    		increment_connector_statistics(myBatchStats, STATS_TABLES, 1);
-
-		/* (6) clean up */
-    	if (islastsnapshot)
-    		isInSnapshot = false;
-
-    	set_shm_connector_state(myConnectorId, (islastsnapshot &&
-    			((flag & CONNFLAG_SCHEMA_SYNC_MODE) || (flag & CONNFLAG_INITIAL_SNAPSHOT_MODE)) ?
-    			STATE_SCHEMA_SYNC_DONE : STATE_SYNCING));
-    	destroyDBZDDL(dbzddl);
-    	destroyPGDDL(pgddl);
-    }
-    else
-    {
-        /* Process DML event */
-    	DBZ_DML * dbzdml = NULL;
-    	PG_DML * pgdml = NULL;
-
-    	/* (1) parse */
-    	set_shm_connector_state(myConnectorId, STATE_PARSING);
-    	dbzdml = parseDBZDML(jb, strinfo.data[0], type, source, isfirst, islast);
-    	if (!dbzdml)
-		{
-			set_shm_connector_state(myConnectorId, STATE_SYNCING);
-			increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
-			MemoryContextSwitchTo(oldContext);
-			MemoryContextDelete(tempContext);
-			return -1;
-		}
-
-    	/* (2) convert */
-    	set_shm_connector_state(myConnectorId, STATE_CONVERTING);
-    	pgdml = convert2PGDML(dbzdml, type);
-    	if (!pgdml)
-    	{
-    		set_shm_connector_state(myConnectorId, STATE_SYNCING);
-    		increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
-    		destroyDBZDML(dbzdml);
-    		MemoryContextSwitchTo(oldContext);
-    		MemoryContextDelete(tempContext);
-    		return -1;
-    	}
-
-    	/* (3) execute */
-    	set_shm_connector_state(myConnectorId, STATE_EXECUTING);
-    	ret = ra_executePGDML(pgdml, type, myBatchStats, isInSnapshot);
-    	if(ret)
-    	{
-    		set_shm_connector_state(myConnectorId, STATE_SYNCING);
-    		increment_connector_statistics(myBatchStats, STATS_BAD_CHANGE_EVENT, 1);
-        	destroyDBZDML(dbzdml);
-        	destroyPGDML(pgdml);
-        	MemoryContextSwitchTo(oldContext);
-        	MemoryContextDelete(tempContext);
-    		return -1;
-    	}
-
-    	/* (4) record only the first and last change event's processing timestamps only */
-    	if (islast)
-    	{
-			myBatchStats->genstats.stats_last_src_ts = dbzdml->src_ts_ms;
-			gettimeofday(&tv, NULL);
-			myBatchStats->genstats.stats_last_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
-    	}
-
-    	if (isfirst)
-    	{
-			myBatchStats->genstats.stats_first_src_ts = dbzdml->src_ts_ms;
-			gettimeofday(&tv, NULL);
-			myBatchStats->genstats.stats_first_pg_ts = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
-    	}
-
-    	/* increment DMLs only in CDC stage */
-    	if (!isInSnapshot)
-    		increment_connector_statistics(myBatchStats, STATS_DML, 1);
-
-       	/* (5) clean up */
-    	if (islastsnapshot)
-    		isInSnapshot = false;
-
-    	set_shm_connector_state(myConnectorId, (islastsnapshot &&
-    			((flag & CONNFLAG_SCHEMA_SYNC_MODE) || (flag & CONNFLAG_INITIAL_SNAPSHOT_MODE)) ?
-    			STATE_SCHEMA_SYNC_DONE : STATE_SYNCING));
-    	destroyDBZDML(dbzdml);
-    	destroyPGDML(pgdml);
-    }
-
-	if(strinfo.data)
-		pfree(strinfo.data);
-
-	if (jb)
-		pfree(jb);
-
-	MemoryContextSwitchTo(oldContext);
-	MemoryContextDelete(tempContext);
-	return 0;
+	return outcome;
 }

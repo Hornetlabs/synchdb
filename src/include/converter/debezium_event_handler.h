@@ -8,6 +8,8 @@
 #ifndef SYNCHDB_SRC_INCLUDE_CONVERTER_DEBEZIUM_EVENT_HANDLER_H_
 #define SYNCHDB_SRC_INCLUDE_CONVERTER_DEBEZIUM_EVENT_HANDLER_H_
 
+#include "executor/event_result.h"
+
 /*
  * DbzType
  *
@@ -29,9 +31,11 @@ typedef enum _DbzType
 	DBZTYPE_INT64,
 	DBZTYPE_STRUCT,
 	DBZTYPE_STRING,
+	/* Validated PostgreSQL array input, prepared by the typed row binder. */
+	DBZTYPE_ARRAY_TEXT,
 } DbzType;
 
-int fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
+SynchdbEventOutcome fc_processDBZChangeEvent(const char * event, SynchdbStatistics * myBatchStats,
 		int flag, const char * name, bool isfirst, bool islast);
 
 

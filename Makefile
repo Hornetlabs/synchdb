@@ -3,16 +3,24 @@
 MODULE_big = synchdb
 
 EXTENSION = synchdb
-DATA_built = synchdb--1.0.sql
+DATA_built = synchdb--1.1.sql
 
 # Keep the original SQL definition order.  These are the sources for the
 # generated extension installation script; do not edit that script directly.
 SQL_SOURCES = src/sql/core.sql \
+              src/sql/catalog_connector.sql \
+              src/sql/catalog_credentials.sql \
+              src/sql/catalog_identity.sql \
+              src/sql/catalog_bootstrap.sql \
+              src/sql/catalog_control.sql \
+              src/sql/catalog_artifact.sql \
+              src/sql/catalog_views.sql \
               src/sql/fdw/prepare.sql \
               src/sql/fdw/postgres.sql \
               src/sql/fdw/mysql.sql \
               src/sql/fdw/sqlserver.sql \
               src/sql/fdw/oracle.sql \
+              src/sql/fdw/source_positions.sql \
               src/sql/fdw/metadata.sql \
               src/sql/fdw/stage.sql \
               src/sql/fdw/schema.sql \
@@ -20,12 +28,16 @@ SQL_SOURCES = src/sql/core.sql \
               src/sql/fdw/data.sql \
               src/sql/fdw/table_mappings.sql \
               src/sql/fdw/finalize.sql \
+              src/sql/fdw/bootstrap.sql \
               src/sql/fdw/snapshot.sql \
               src/sql/fdw/schema_sync.sql \
               src/sql/fdw/types.sql \
-              src/sql/fdw/compat.sql
+              src/sql/fdw/compat.sql \
+              src/sql/catalog_config_backup.sql \
+              src/sql/permissions.sql
 
-EXTRA_CLEAN += synchdb--1.0.sql.tmp
+EXTRA_CLEAN += synchdb--1.1.sql.tmp
+EXTRA_CLEAN += .synchdb-build-options .synchdb-build-options.tmp
 PGFILEDESC = "synchdb - allows logical replication with heterogeneous databases"
 
 REGRESS = synchdb
@@ -35,9 +47,50 @@ REGRESS_OPTS = --inputdir=./src/test/regress --outputdir=./src/test/regress/resu
 WITH_OLR ?= 0
 
 OBJS = src/backend/synchdb/synchdb.o \
+       src/backend/runtime/run_spec.o \
+       src/backend/runtime/run_options.o \
+       src/backend/runtime/controller.o \
+       src/backend/runtime/controller_api.o \
+       src/backend/runtime/controller_registry.o \
+       src/backend/runtime/run_registry.o \
+       src/backend/runtime/run_registry_worker.o \
+       src/backend/runtime/run_registry_control.o \
+       src/backend/runtime/java_runtime.o \
+       src/backend/runtime/java_jni.o \
+       src/backend/runtime/java_operations.o \
+       src/backend/runtime/java_batch.o \
+       src/backend/runtime/worker_runtime.o \
+       src/backend/snapshot/bootstrap.o \
+       src/backend/snapshot/bootstrap_type.o \
+       src/backend/snapshot/artifact_store.o \
+       src/backend/source/consistency.o \
+       src/backend/source/debezium_frame.o \
+       src/backend/source/json_input.o \
+       src/backend/source/debezium_event.o \
+       src/backend/source/debezium_row.o \
+       src/backend/source/debezium_logical.o \
+       src/backend/source/debezium_unavailable.o \
+       src/backend/source/debezium_schema.o \
+       src/backend/catalog/catalog_access.o \
+       src/backend/catalog/connector_store.o \
+       src/backend/catalog/credentials.o \
+       src/backend/catalog/control_store.o \
+       src/backend/catalog/mapping_store.o \
+       src/backend/catalog/attribute_store.o \
        src/backend/converter/format_converter.o \
+       src/backend/converter/debezium_bind.o \
+       src/backend/converter/value_codec.o \
+       src/backend/converter/transform_expression.o \
+       src/backend/converter/rule_snapshot.o \
+       src/backend/converter/ddl_plan.o \
        src/backend/converter/debezium_event_handler.o \
-       src/backend/executor/replication_agent.o
+       src/backend/executor/replication_agent.o \
+       src/backend/executor/spi_writer.o \
+       src/backend/executor/tuple_writer.o \
+       src/backend/executor/target_validate.o \
+       src/backend/executor/pg_compat.o \
+       src/backend/executor/row_identity.o \
+       src/backend/executor/batch_apply.o
 
 DBZ_ENGINE_PATH = src/backend/debezium
 
@@ -68,6 +121,9 @@ JDK_LIB_PATH := $(JDK_HOME_PATH)/lib/server
 
 PG_CFLAGS = -I$(JDK_INCLUDE_PATH) -I$(JDK_INCLUDE_PATH_OS) -I./src/include -I${PROTOBUF_C_INCLUDE_DIR}
 PG_CPPFLAGS = -I$(JDK_INCLUDE_PATH) -I$(JDK_INCLUDE_PATH_OS) -I./src/include -I${PROTOBUF_C_INCLUDE_DIR}
+# A shared library can link with undeclared backend functions, then fail only
+# when PostgreSQL loads it. Reject missing server APIs at compilation time.
+PG_CPPFLAGS += -Werror=implicit-function-declaration
 PG_LDFLAGS = -L$(JDK_LIB_PATH) -ljvm
 
 
@@ -76,6 +132,8 @@ OBJS += src/backend/converter/olr_event_handler.o \
 		src/backend/olr/OraProtoBuf.pb-c.o \
 		src/backend/utils/netio_utils.o \
 		src/backend/olr/olr_client.o
+
+OBJS += src/backend/olr/olr_handoff.o
 
 PG_LDFLAGS += -lprotobuf-c -L$(PROTOBUF_C_LIB_DIR)
 PG_CFLAGS += -DWITH_OLR
@@ -86,7 +144,7 @@ ifdef USE_PGXS
 PG_CONFIG = pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
-PG_MAJOR := $(shell $(PG_CONFIG) --majorversion)
+PG_MAJOR := $(shell $(PG_CONFIG) --version | sed 's/^[^0-9]*\([0-9]*\).*/\1/')
 else
 subdir = contrib/synchdb
 top_builddir = ../..
@@ -95,10 +153,22 @@ include $(top_srcdir)/contrib/contrib-global.mk
 PG_MAJOR := $(MAJORVERSION)
 endif
 
-synchdb--1.0.sql: $(addprefix $(srcdir)/, $(SQL_SOURCES)) $(srcdir)/Makefile
+# Make does not track command-line compiler flag changes. Rebuild both native
+# and LLVM objects when switching OLR support, including an existing default
+# build followed by `make WITH_OLR=1 install`.
+.PHONY: synchdb-build-options-force
+.synchdb-build-options: synchdb-build-options-force
+	@printf '%s\n' 'WITH_OLR=$(WITH_OLR)' > $@.tmp
+	@if cmp -s $@.tmp $@; then rm -f $@.tmp; else mv $@.tmp $@; fi
+
+# Private runtime structs are shared by many translation units. PGXS does not
+# generate dependency files for these headers; mixing old/new struct layouts
+# after an incremental install corrupts worker state.
+$(OBJS) $(patsubst %.o,%.bc,$(OBJS)): .synchdb-build-options $(wildcard $(srcdir)/src/include/*.h $(srcdir)/src/include/*/*.h)
+
+synchdb--1.1.sql: $(addprefix $(srcdir)/, $(SQL_SOURCES)) $(srcdir)/Makefile
 	cat $(addprefix $(srcdir)/, $(SQL_SOURCES)) > $@.tmp
 	mv $@.tmp $@
-
 
 check_protobufc:
 	@echo "Checking protobuf-c installation"

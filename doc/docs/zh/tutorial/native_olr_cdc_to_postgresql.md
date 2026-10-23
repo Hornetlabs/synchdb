@@ -1,5 +1,13 @@
 #原生 Openlog Replicator 連接器
 
+## 快照到 CDC 的交接约束
+
+原生 OLR 交接以 OLR 1.8.5 验证，要求 Debezium 快照引擎、单 redo 线程和完整的配置 schema。OLR 的 JSON 输出必须包含事务边界、完整列元数据和每条消息的提交 SCN：`format.message=2`、`format.schema=7`、`format.scn-type=3`，并在 `flags` 中启用 `4096`（输出检查点）；保留现有 DDL 标志时可设为 `4128`。
+
+连接器在源 schema 中维护 `SYNCHDB_OLR_FENCE`，需要建表和读取数据库身份、活动事务及 redo 目录的权限。该内部表不复制到目标。源探针必须通过实际 OLR 连接到达，快照生产者全部提交并成功完成后才进入 CDC。原生快照的读取 SCN 和未完成事务 ID 用于区分快照已覆盖的数据与之后提交的跨快照事务。目标数据和 OLR 恢复位置在同一 PostgreSQL 事务中提交，随后确认源端消息。
+
+交接状态保存在 `synchdb_olr_positions`，按连接器 UUID 和 artifact generation 隔离。保留日志必须连续覆盖最初选择的 redo 序列；快照期间不得修改捕获表的结构。快照中断、日志缺失、数据库 incarnation 改变或 OLR 起点晚于已验证边界时，连接器停止并要求显式恢复，不自动重置进度。旧的别名 SCN 文件和快照完成标记不能用于恢复。`always` 重新建基线需要先清理目标并显式重置 artifact generation。FDW 仍仅支持快照或 schema 预览，不能交接至 CDC。
+
 ## **準備用於 SynchDB 的 Oracle 資料庫**
 
 在使用 SynchDB 透過原生 Openlog Replicator (OLR) 連接器進行複製之前，OLR 和 Oracle 資料庫本身都需要按照[此處](../../getting-started/remote_database_setups/)中概述的步驟進行設定。
@@ -34,7 +42,7 @@ SELECT synchdb_add_olr_conninfo(
 
 SynchDB 中的「初始快照」（或表快照）是指複製所有指定表的表結構以及初始資料。這類似於 PostgreSQL 邏輯複製中的「表同步」。當使用預設的 `initial` 模式啟動連接器時，它會在進入變更資料擷取 (CDC) 階段之前自動執行初始快照。可以使用 `no_data` 模式部分省略此步驟。有關所有快照選項，請參閱[此處](../../user-guide/start_stop_connector/)。
 
-初始快照完成後，連接器在後續重新啟動時不會再次執行初始快照，而是直接從上次未完成的偏移量處恢復 CDC。此行為由 Debezium 引擎管理的元資料檔案控制。有關元資料檔案的更多信息，請參閱[此處](../../architecture/metadata_files/)。
+初始快照完成後，連接器在後續重新啟動時不會再次執行初始快照，而是直接從上次未完成的偏移量處恢復 CDC。恢復使用已提交的 `synchdb_olr_positions` 記錄及引擎擁有的 artifact generation；僅憑 Debezium 元資料不能進入 CDC。有關元資料檔案的更多信息，請參閱[此處](../../architecture/metadata_files/)。
 
 ## **不同的連接器啟動模式**
 
@@ -109,14 +117,14 @@ SELECT synchdb_start_engine_bgw('olrconn', 'no_data');
 
 ### **始終執行初始快照 + CDC**
 
-使用 `always` 模式啟動連接器將始終擷取擷取表的模式，始終重新執行初始快照，然後再進行 CDC。這類似於重置按鈕，因為使用此模式將重建所有內容。請謹慎使用此模式，尤其是在捕獲大量表時，這可能需要很長時間才能完成。重建完成後，CDC 將照常恢復。
+`always` 對新的 artifact generation 執行完整快照。重新建立既有基線前，須停止連接器、準備乾淨的目標，並呼叫 `synchdb_artifact_reset(connector_uuid)`。既有 generation 會拒絕 `always`，須明確重置；若要從持久化游標恢復 CDC，請使用 `initial`。
 
 ```sql
 SELECT synchdb_start_engine_bgw('olrconn', 'always');
 
 ```
 
-初始快照完成後，CDC 將開始。在 `always` 模式下重新啟動連接器將重複上述過程。
+初始快照與交接驗證完成後開始 CDC。再次建立基線仍須明確清理目標並重置 generation。
 
 ## **Oracle 連接器的可用快照模式**
 
@@ -130,7 +138,7 @@ SELECT synchdb_start_engine_bgw('olrconn', 'always');
 
 在嘗試對當前表和資料（可能非常龐大）進行初始快照之前，可以在當前資料遷移之前「預覽」來源表和目標表之間的所有表和資料類型對應。這樣，您有機會在實際遷移之前修改資料類型對應或物件名稱。這可以透過特殊的「schemasync」初始快照模式來實現。
 
-請注意，您必須將 `synchdb.olr_snapshot_engine` 設定為 'fdw' 才能使用 `schemasync` 模式預覽表。
+`schemasync` 可以使用原生快照引擎，也可以使用 FDW 進行離線 schema 預覽。FDW 不會建立 CDC 交接邊界。
 
 ### **建立連接器並以 `schemasync` 模式啟動它**
 
@@ -138,7 +146,7 @@ SELECT synchdb_start_engine_bgw('olrconn', 'always');
 
 ```sql
 SELECT synchdb_add_conninfo(
-    'oracleconn', 
+    'olrconn',
     '127.0.0.1', 
     1521, 
     'DBZUSER', 
@@ -147,7 +155,7 @@ SELECT synchdb_add_conninfo(
     'DBZUSER', 
     'null', 
     'null', 
-    'oracle'
+    'olr'
 );
 
 SELECT synchdb_add_olr_conninfo(
@@ -241,104 +249,18 @@ SELECT * from synchdb_att_view WHERE name = 'olrconn';
 
 ```
 
-### **恢復連接器或重新執行整個快照**
+### 恢復連接器或重新建立快照
 
-確認物件映射正確後，即可對連接器進行匯總。請注意，復原操作只會傳輸新的表更改，不會複製表中的現有資料。
+原生 `schemasync` 完成交接後可恢復 CDC，但不會複製表中已有的資料。FDW schema 預覽不能直接恢復為 OLR CDC。若要複製已有資料，須停止預覽、選用 Debezium 快照引擎、準備乾淨的目標並重置連接器的 artifact generation，再以選定的映射規則啟動新的 `initial` 快照。
 
-```sql
-SELECT synchdb_resume_engine('olrconn');
-```
+## 捕獲範圍
 
-為了捕獲表中的現有數據，我們還可以使用新的物件映射規則重新建立整個快照。
+目前已驗證的原生 OLR 交接要求捕獲完整的設定 schema。連接器的表及 snapshot-table 篩選器須留空，OLR 也須捕獲該 schema，包括內部表 `SYNCHDB_OLR_FENCE`。工作程序將此表作為來源證據，不會複製到目標。原生 `initial_only`、FDW `initial_only` 和 FDW `schemasync` 仍可選擇表；這些只執行快照的操作不會建立 CDC 交接邊界。
 
-```sql
-SELECT synchdb_stop_engine_bgw('olrconn');
-SELECT synchdb_start_engine_bgw('olrconn', 'always');
-```
+來源驗證會在實際 OLR 連線上暫存尚未確認的變更。`synchdb.olr_read_buffer_size` 須能容納此重播積壓和最大的來源事務；超過上限時連接器停止，不會確認尚未提交的批次。
 
-## **選擇性表同步**
+## 持久化重播位置
 
-### **選擇所需表並首次啟動同步**
+可在 `synchdb_olr_positions` 查看 `snapshot_scn`、`scn`、`c_scn`、`c_idx`。`(c_scn, c_idx)` 是真正的 OLR 重播座標，不能以 Oracle 快照 SCN 代替。游標與目標資料在同一事務中提交，因此同一連接器停止後再啟動會從已提交的位置恢復。
 
-表格選擇在連接器建立階段透過 `synchdb_add_conninfo()` 函數完成，該函數用於指定要從中複製的表列表（以完全限定名稱 (FQN) 表示，並以逗號分隔）。
-
-例如，以下命令建立一個連接器，該連接器僅從遠端 Oracle 資料庫複製 `FREE.ORDERS` 表中的變更。
-```sql
-SELECT synchdb_add_conninfo(
-    'olrconn', 
-    '127.0.0.1', 
-    1521, 
-    'DBZUSER', 
-    'dbz', 
-    'FREE', 
-    'DBZUSER', 
-    'DBZUSER.ORDERS', 
-    'null', 
-    'oracle'
-);
-```
-
-首次啟動此連接器時，將觸發執行初始快照，並複製選定的表的架構和資料。
-
-```sql
-SELECT synchdb_start_engine_bgw('olrconn');
-```
-
-### **驗證連接器狀態和表格**
-
-檢查連接器狀態和新表格：
-```sql
-postgres=# Select name, state, err from synchdb_state_view;
-   name  |  state  |   err
----------+---------+----------
- olrconn | polling | no error
-
-postgres=# \dt free.*
-          List of tables
- Schema |  Name  | Type  | Owner
---------+--------+-------+--------
- free   | orders | table | ubuntu
-
-```
-
-預設情況下，來源資料庫名稱會對應到目標資料庫的模式，並且字母大小寫策略為小寫，因此 `FREE.ORDERS` 在 PostgreSQL 中會變成 `free.orders`。表完成初始快照後，連接器將啟動 CDC 以串流傳輸這些表的後續變更。
-
-### **運行時加入更多要複製的表**
-
-上一節中的 `olrconn` 已完成初始快照並取得了所選表格的表格模式。如果我們想要新增更多要複製的表，則需要通知 Debezium 引擎更新後的表格部分，並再次執行初始快照。具體操作如下：
-
-1. 更新 `synchdb_conninfo` 表以包含其他表。
-
-2. 在本例中，我們將 `DBZUSER.CUSTOMERS` 表加入同步清單：
-
-```sql
-UPDATE synchdb_conninfo 
-SET data = jsonb_set(data, '{table}', '"DBZUSER.ORDERS,DBZUSER.CUSTOMERS"') 
-WHERE name = 'olrconn';
-```
-
-3. 將快照模式設為“始終”，然後重新啟動連接器，以執行另一次初始快照：
-
-```sql
-DROP table free.orders;
-SELECT synchdb_restart_connector('olrconn', 'always');
-```
-
-這迫使 Debezium 在進行 CDC 串流之前，重新建立所有表格的快照，包括現有的 `free.orders` 表和新的 `free.customers` 表。這意味著，要新增表，必須刪除現有表（以防止重複表和主鍵錯誤），並重新建立整個初始快照。這相當冗餘，Debezium 建議使用增量快照來新增資料表，而無需重新建立快照。一旦我們將增量快照支援新增至 SynchDB，我們將更新此流程。
-
-### **驗證更新後的表格**
-
-現在，我們可以再次檢查我們的表：
-```sql
-postgres=# \dt free.*
-          List of tables
- Schema      |  Name  | Type  | Owner
--------------+--------+-------+--------
- free        | orders | table | ubuntu
- customers   | orders | table | ubuntu
-
-```
-
-### **篩選 Openlog Replicator 表（重要）**
-
-對於初始快照（透過 Debezium 或 FDW），我們可以選擇要複製的表。但是，一旦連接器通過 Openlog Replicator 進入 CDC 階段，所選的表格篩選器不會自動應用於 Openlog Replicator。使用者需要配置 Openlog Replicator 服務，使其僅輸出所選表的變更事件。如果 SynchDB 和 Openlog Replicator 的表格篩選器不一致，SynchDB 可能會收到它尚未建立對應表的變更事件，從而導致錯誤。 因此，將 SynchDB 和 Openlog Replicator 配置為使用相同的表格過濾器是一種很好的做法。
+`synchdb_set_offset()` 不允許手動修改 OLR 位移。恢復時須一起還原相符的目標資料與交接狀態，或準備乾淨的目標並明確重置 artifact generation，建立新基線。不要直接修改游標表或複製舊 SCN 檔案以跳過來源驗證。

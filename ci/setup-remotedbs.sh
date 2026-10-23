@@ -628,6 +628,28 @@ EOF
 
 }
 
+function prepare_ora19c_capture_logs()
+{
+	# ALL snapshot boundaries inspect MIN(FIRST_CHANGE#) from every V$LOG
+	# group, but mine only CURRENT redo and archived logs. After enabling
+	# ARCHIVELOG, cycle every group so no pre-ARCHIVELOG inactive group can
+	# supply an SCN absent from that minable set. Keep the consistency check.
+	docker exec -i ora19c sqlplus -S / as sysdba <<'EOF'
+WHENEVER OSERROR EXIT FAILURE;
+WHENEVER SQLERROR EXIT SQL.SQLCODE;
+DECLARE
+    log_groups PLS_INTEGER;
+BEGIN
+    SELECT COUNT(*) INTO log_groups FROM v$log;
+    FOR i IN 1..log_groups LOOP
+        EXECUTE IMMEDIATE 'ALTER SYSTEM ARCHIVE LOG CURRENT';
+    END LOOP;
+END;
+/
+EXIT;
+EOF
+}
+
 function setup_hammerdb()
 {
 	which=${WHICH:?please provide which hammerdb type, mysql, sqlserver or oracle}
@@ -697,6 +719,33 @@ function setup_olr()
 			echo "OpenLogReplicator in unknown state. Remove it and try again..."
         fi
     fi
+	# Do not hand tests an exited container's "invalid IP". The published
+	# 1.8.5 image can fail before main() in ASan initialization; retry only
+	# that recognizable startup failure, with a fixed limit.
+	local attempt olr_ip startup_retries=0
+	for attempt in $(seq 1 120); do
+		state=$(docker inspect -f '{{.State.Status}}' OpenLogReplicator)
+		if [ "$state" = "exited" ]; then
+			if [ "$startup_retries" -lt 3 ] &&
+				docker logs --tail 30 OpenLogReplicator 2>&1 | grep -q 'AddressSanitizer:DEADLYSIGNAL'; then
+				startup_retries=$((startup_retries + 1))
+				echo "retrying OLR sanitizer startup ($startup_retries/3)..."
+				docker start OpenLogReplicator >/dev/null
+			else
+				docker logs --tail 40 OpenLogReplicator >&2
+				return 1
+			fi
+		elif [ "$state" = "running" ]; then
+			olr_ip=$(docker inspect -f '{{(index .NetworkSettings.Networks "synchdbnet").IPAddress}}' OpenLogReplicator)
+			if python3 -c 'import socket,sys; socket.create_connection((sys.argv[1],7070),1).close()' "$olr_ip" 2>/dev/null; then
+				echo "OpenLogReplicator is accepting connections"
+				return 0
+			fi
+		fi
+		sleep 1
+	done
+	docker logs --tail 40 OpenLogReplicator >&2
+	return 1
 }
 
 function setup_postgres()
@@ -740,6 +789,7 @@ function setup_remotedb()
 			;;
 		"ora19c")
 			setup_ora19c "notolr"
+			prepare_ora19c_capture_logs || exit 1
 			;;
 		"hammerdb")
 			setup_hammerdb
@@ -748,6 +798,7 @@ function setup_remotedb()
 			OLRVER=${OLRVER:?please provide OLR version via OLRVER env variable}
 			setup_oradata
 			setup_ora19c "olr"
+			prepare_ora19c_capture_logs || exit 1
 			setup_olr
 			;;
 		"postgres")

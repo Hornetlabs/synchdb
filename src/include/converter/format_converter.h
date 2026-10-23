@@ -20,10 +20,13 @@
 #define SYNCHDB_FORMAT_CONVERTER_H_
 
 #include "utils/hsearch.h"
+#include "utils/memutils.h"
+#include "utils/relcache.h"
 #include "nodes/pg_list.h"
 #include "utils/jsonb.h"
 #include "executor/replication_agent.h"
 #include "synchdb/synchdb.h"
+#include "converter/rule_snapshot.h"
 
 /* constants */
 #define RULEFILE_DATATYPE_TRANSFORM 1
@@ -102,12 +105,24 @@ typedef struct
 
 typedef struct
 {
-	char name[NAMEDATALEN];
+	char *name;
 	int jsonpos;
 	int dbztype;
 	TimeRep timerep;
 	int scale;
 } NameJsonposEntry;
+
+typedef struct SourceColumnCache
+{
+	HTAB *hash;
+	MemoryContext context;
+} SourceColumnCache;
+
+SourceColumnCache *fc_create_source_column_cache(MemoryContext context);
+NameJsonposEntry *fc_source_column_lookup(SourceColumnCache *cache, const char *name);
+void fc_source_column_insert(SourceColumnCache *cache, const char *name,
+							 int jsonpos, int dbztype, TimeRep timerep, int scale);
+void fc_destroy_source_column_cache(SourceColumnCache *cache);
 
 /* Structure to represent a column value in a DML event */
 typedef struct dbz_dml_column_value
@@ -115,6 +130,7 @@ typedef struct dbz_dml_column_value
 	char * name;	/* name of the column field */
 	char * remoteColumnName;	/* original column name from remote server */
 	char * value;	/* expressed as string as taken from json */
+	bool is_null;	/* source JSON null; text content never determines nullness */
 	Oid datatype;	/* data type Oid as defined by PostgreSQL */
 	int position;	/* position of this column value, start from 1 */
 	int scale;		/* location of decimal point - decimal type only */
@@ -130,6 +146,7 @@ typedef struct dbz_dml_column_value
 /* Structure to represent a DML event */
 typedef struct dbz_dml
 {
+	Oid identity_index_oid; /* selected by the live Debezium binder; 0 for legacy OLR */
 	char op;
 	char * schema;
 	char * table;
@@ -152,15 +169,19 @@ typedef struct dataCacheKey
 	char schema[SYNCHDB_CONNINFO_DB_NAME_SIZE];
 	char table[SYNCHDB_CONNINFO_DB_NAME_SIZE];
 } DataCacheKey;
+
+void fc_invalidate_data_cache(const DataCacheKey *key);
+
 typedef struct dataCacheEntry
 {
 	DataCacheKey key;
-	TupleDesc tupdesc;
 	Oid tableoid;
 	HTAB * typeidhash;
-	HTAB * namejsonposhash;
+	SourceColumnCache *namejsonposhash;
 	int natts;
 } DataCacheEntry;
+
+extern HTAB *dataCacheHash;
 
 typedef struct datatypeHashKey
 {
@@ -175,29 +196,6 @@ typedef struct datatypeHashEntry
 	int pgsqlTypeLength;
 } DatatypeHashEntry;
 
-typedef struct objMapHashKey
-{
-	char extObjName[SYNCHDB_OBJ_NAME_SIZE];
-	char extObjType[SYNCHDB_OBJ_TYPE_SIZE];
-} ObjMapHashKey;
-
-typedef struct objMapHashEntry
-{
-	ObjMapHashKey key;
-	char pgsqlObjName[SYNCHDB_OBJ_NAME_SIZE];
-} ObjMapHashEntry;
-
-typedef struct transformExpressionHashKey
-{
-	char extObjName[SYNCHDB_OBJ_NAME_SIZE];
-} TransformExpressionHashKey;
-
-typedef struct transformExpressionHashEntry
-{
-	TransformExpressionHashKey key;
-	char pgsqlTransExpress[SYNCHDB_TRANSFORM_EXPRESSION_SIZE];
-} TransformExpressionHashEntry;
-
 /* Function prototypes */
 ConnectorType fc_get_connector_type(const char * connector);
 void fc_initFormatConverter(ConnectorType connectorType);
@@ -205,6 +203,7 @@ void fc_deinitFormatConverter(ConnectorType connectorType);
 void fc_initDataCache(void);
 void fc_deinitDataCache(void);
 void fc_resetDataCache(void);
+void fc_ensureDataCache(void);
 bool fc_load_objmap(const char * name, ConnectorType connectorType);
 char * escapeSingleQuote(const char * in, bool addquote);
 int getPathElementString(Jsonb * jb, char * path, StringInfoData * strinfoout, bool removequotes);
@@ -216,9 +215,17 @@ int list_sort_cmp(const ListCell *a, const ListCell *b);
 PG_DDL * convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type);
 void updateSynchdbAttribute(DBZ_DDL * dbzddl, PG_DDL * pgddl, ConnectorType conntype, const char * name);
 PG_DML * convert2PGDML(DBZ_DML * dbzdml, ConnectorType type);
+SynchdbTargetColumn *fc_convert_target_column(DBZ_DML_COLUMN_VALUE *source,
+												const char *remote_object_id,
+												Relation relation, ConnectorType type);
+/* Scalar source representation only; no mapping/transform evaluation. */
+char *fc_convert_value_text(DBZ_DML_COLUMN_VALUE *source, ConnectorType type);
 bool fc_translate_datatype(ConnectorType connectorType,
 		const char * ext_datatype, int * ext_length, int * ext_scale,
 		char ** pg_datatype, int * pg_datatype_len);
+bool fc_translate_datatype_rules(const SynchdbRuleSnapshot *rules,
+		ConnectorType type, const char *source, int *length, int *scale,
+		char **target, int *target_length);
 void fc_normalize_name(LetterCasingStrategy strategy, char * name, int len);
 
 #endif /* SYNCHDB_FORMAT_CONVERTER_H_ */

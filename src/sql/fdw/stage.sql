@@ -1,16 +1,18 @@
-CREATE OR REPLACE FUNCTION synchdb_create_stage_fts(
-    p_connector_name        name,                         -- connector name for attribute rows
-    p_desired_db            name,                         -- db token to match entries in snapshottable
-    p_desired_schema        name,                         -- schema to match when entry includes schema
-    p_stage_schema          name DEFAULT 'ora_stage'::name, -- target schema in Postgres
-    p_server_name           name DEFAULT 'oracle'::name,  -- oracle_fdw server name
-    p_lower_names           boolean DEFAULT true,         -- legacy: lower-case PG table/column names
-    p_on_exists             text DEFAULT 'replace',       -- 'replace' | 'drop' | 'skip'
-    p_offset                text DEFAULT NULL,            -- offset like scn, binlog pos..etc
-    p_source_schema         name DEFAULT 'ora_obj'::name, -- metadata source schema (…columns)
-    p_snapshot_tables       text DEFAULT NULL,            -- CSV of db.schema.table; when set, bypass conninfo
-    p_write_dbz_schema_info boolean DEFAULT false,        -- when true, store Debezium schema-history JSON
-    p_case_strategy         text DEFAULT 'asis'           -- 'upper' | 'lower' | 'asis' (table/column casing)
+CREATE OR REPLACE FUNCTION synchdb_create_stage_fts_plan(
+    p_connector_name        text,                         -- connector name for attribute rows
+    p_desired_db            text,                         -- db token to match entries in snapshottable
+    p_desired_schema        text,                         -- schema to match when entry includes schema
+    p_stage_schema          name, -- target schema in Postgres
+    p_server_name           name,  -- oracle_fdw server name
+    p_lower_names           boolean,         -- legacy: lower-case PG table/column names
+    p_on_exists             text,         -- 'error' | 'replace' | 'drop' | 'skip'
+    p_offset                text,            -- offset like scn, binlog pos..etc
+    p_source_schema         name, -- metadata source schema (…columns)
+    p_snapshot_tables       text,            -- CSV of db.schema.table; when set, bypass conninfo
+    p_write_dbz_schema_info boolean,        -- when true, store Debezium schema-history JSON
+    p_case_strategy         text, -- 'upper' | 'lower' | 'asis' (table/column casing)
+    p_frozen_tables        jsonb,
+    p_record_attributes    boolean
 ) RETURNS void
 LANGUAGE plpgsql
 AS $$
@@ -33,7 +35,7 @@ DECLARE
 
   base_sql       text;
 
-  use_explicit   boolean := (p_snapshot_tables IS NOT NULL AND btrim(p_snapshot_tables) <> '');
+  use_explicit   boolean := (p_snapshot_tables IS NOT NULL);
   v_ext_db       text;      -- per-table db token for ext_tbname when explicit list is used
   v_tbl_name_l   text;
   v_relid        oid;
@@ -62,9 +64,13 @@ DECLARE
   v_case_strategy text;
   -- expression used for column name in dynamic SQL (e.g., 'lower(c.column_name)')
   v_colname_expr  text;
+  v_table_name_expr text;
+  v_extension_schema name;
 
   -- possible offsets
   v_offset_json jsonb;
+  v_bad_selection text;
+  v_collision text;
   v_scn          numeric;    -- oracle
   v_binlog_file  text;       -- mysql
   v_binlog_pos   bigint;     -- mysql
@@ -119,7 +125,8 @@ BEGIN
   ----------------------------------------------------------------------
   SELECT (data->>'connector')::name,
          data->>'srcdb',
-		 COALESCE( NULLIF(data->'snapshottable', 'null'::jsonb), data->'table')
+		 COALESCE(NULLIF(NULLIF(data->'snapshottable', 'null'::jsonb), '"null"'::jsonb),
+                  NULLIF(NULLIF(data->'table', 'null'::jsonb), '"null"'::jsonb))
     INTO v_conn_type, v_srcdb, v_snapcfg
   FROM synchdb_conninfo
   WHERE name = p_connector_name;
@@ -136,100 +143,76 @@ BEGIN
   --   A) Explicit list mode (p_snapshot_tables provided)
   --   B) Conninfo+snapshottable mode (legacy/default)
   ----------------------------------------------------------------------
+  IF p_frozen_tables IS NULL THEN
   CREATE TEMP TABLE IF NOT EXISTS tmp_snap_list (
     db    text NOT NULL,
     schem text,     -- NULL => item didn’t specify schema
     tbl   text NOT NULL
   ) ON COMMIT DROP;
   TRUNCATE tmp_snap_list;
+  END IF;
 
-  IF use_explicit THEN
-    -- Mode A: parse CSV of db.schema.table triplets (enforce 3-part)
-    INSERT INTO tmp_snap_list(db, schem, tbl)
-	SELECT
-      CASE WHEN array_length(parts,1) = 3 THEN parts[1]
-           WHEN array_length(parts,1) = 2 THEN parts[1]  -- treat as db
-      END AS db,
-      CASE WHEN array_length(parts,1) = 3 THEN parts[2]
-           WHEN array_length(parts,1) = 2 THEN NULL             -- schem unknown
-      END AS schem,
-      CASE WHEN array_length(parts,1) = 3 THEN parts[3]
-           WHEN array_length(parts,1) = 2 THEN parts[2]
-      END AS tbl
-    FROM (
-      SELECT regexp_split_to_array(trim(x), '\.') AS parts
-      FROM regexp_split_to_table(p_snapshot_tables, '\s*,\s*') AS t(x)
-      WHERE trim(x) <> ''
-    ) s
-    WHERE array_length(parts,1) IN (2,3);
+  -- The legacy string sentinel means no configured filter, not an empty list.
+  IF v_snapcfg = '"null"'::jsonb THEN
+    v_snapcfg := NULL;
+  END IF;
 
-    v_use_filter := EXISTS (SELECT 1 FROM tmp_snap_list);
-  ELSE
-    -- Mode B: legacy behavior using synchdb_conninfo + data->snapshottable
-    IF v_snapcfg IS NULL OR v_snapcfg::text = 'null' THEN
-      v_use_filter := false;  -- migrate all (but we'll still restrict by p_desired_schema below)
-    ELSE
-      v_type := jsonb_typeof(v_snapcfg);
-
-      -- Build v_snaptext as a single comma-separated list, regardless of input shape
-      IF v_type = 'string' THEN
-        v_snaptext := trim(both '"' from v_snapcfg::text);
-        IF position('file:' IN v_snaptext) = 1 THEN
-          v_snaptext := read_snapshot_table_list(v_snaptext, v_conn_type::text, p_desired_db::text);
-        END IF;
-      ELSIF v_type = 'array' THEN
-        SELECT string_agg(x, ',')
-          INTO v_snaptext
+  IF p_frozen_tables IS NOT NULL THEN
+    IF jsonb_typeof(p_frozen_tables) <> 'array' THEN
+      RAISE EXCEPTION 'Invalid frozen FDW table selection' USING ERRCODE = '22023';
+    END IF;
+    v_use_filter := false;
+  ELSIF use_explicit THEN
+    v_snaptext := p_snapshot_tables;
+    v_use_filter := true;
+  ELSIF v_snapcfg IS NOT NULL AND v_snapcfg <> 'null'::jsonb THEN
+    v_use_filter := true;
+    v_type := jsonb_typeof(v_snapcfg);
+    IF v_type = 'string' THEN
+      v_snaptext := v_snapcfg #>> '{}';
+      IF position('file:' IN v_snaptext) = 1 THEN
+        v_snaptext := read_snapshot_table_list(v_snaptext, v_conn_type::text, p_desired_db::text);
+      END IF;
+    ELSIF v_type = 'array' THEN
+      IF EXISTS (SELECT 1 FROM jsonb_array_elements(v_snapcfg) e
+                 WHERE jsonb_typeof(e) <> 'string') THEN
+        RAISE EXCEPTION 'Snapshot table list must contain only strings';
+      END IF;
+      SELECT string_agg(x, ',') INTO v_snaptext
         FROM jsonb_array_elements_text(v_snapcfg) AS t(x);
-      ELSE
-        RAISE EXCEPTION 'synchdb_conninfo[%.data->snapshottable] must be string or array, got %',
-                        p_connector_name, v_type;
-      END IF;
+    ELSE
+      RAISE EXCEPTION 'synchdb_conninfo[%.data->snapshottable] must be string or array, got %',
+                      p_connector_name, v_type;
+    END IF;
+  END IF;
 
-	  -- normalize
-      IF lower(v_conn_type::text) <> 'mysql' THEN
-        SELECT string_agg(
-                 CASE
-                   WHEN array_length(parts,1) = 2 THEN format('%s.%s.%s',
-                                                             p_desired_db::text,
-                                                             parts[1],
-                                                             parts[2])
-                   WHEN array_length(parts,1) = 3 THEN trim(x)  -- keep as-is if someone still provides 3 parts
-                   ELSE NULL
-                 END,
-                 ','
-               )
-          INTO v_snaptext
-        FROM (
-           SELECT trim(x) AS x,
-                 regexp_split_to_array(trim(x), '\.') AS parts
-             FROM regexp_split_to_table(v_snaptext, '\s*,\s*') AS t(x)
-           WHERE trim(x) <> ''
-        ) s
-        WHERE array_length(parts,1) IN (2,3);
-      END IF;
-	 
-	  RAISE NOTICE 'Normalized snapshottable list: %', v_snaptext;
+  IF v_use_filter THEN
+    IF v_snaptext IS NULL OR btrim(v_snaptext) = '' THEN
+      RAISE EXCEPTION 'Snapshot table selection is explicitly empty';
+    END IF;
 
-      -- Parse CSV into tmp_snap_list allowing "db.tbl" or "db.schema.tbl"
-      INSERT INTO tmp_snap_list(db, schem, tbl)
-      SELECT
-        (parts)[1] AS db,
-        CASE WHEN array_length(parts,1) = 3 THEN (parts)[2] ELSE NULL END AS schem,
-        CASE WHEN array_length(parts,1) = 3 THEN (parts)[3]
-             WHEN array_length(parts,1) = 2 THEN (parts)[2]
-             ELSE NULL END AS tbl
-      FROM (
-        SELECT regexp_split_to_array(trim(x), '\.') AS parts
-        FROM regexp_split_to_table(v_snaptext, '\s*,\s*') AS t(x)
-        WHERE trim(x) <> ''
-      ) s
-      WHERE array_length(parts,1) IN (2,3);
+    SELECT x INTO v_bad_selection
+      FROM (SELECT x, regexp_split_to_array(btrim(x), '\.') AS parts
+              FROM regexp_split_to_table(v_snaptext, '\s*,\s*') t(x)) s
+     WHERE array_length(parts, 1) NOT IN (2, 3)
+        OR EXISTS (SELECT 1 FROM unnest(parts) p WHERE btrim(p) = '')
+     LIMIT 1;
+    IF FOUND THEN
+      RAISE EXCEPTION 'Invalid snapshot table identifier: %', v_bad_selection;
+    END IF;
 
-      -- Keep only rows that match desired DB (legacy behavior)
-      DELETE FROM tmp_snap_list WHERE db <> p_desired_db;
+    INSERT INTO tmp_snap_list(db, schem, tbl)
+    SELECT DISTINCT
+      CASE WHEN NOT use_explicit AND v_conn_type <> 'mysql' AND array_length(parts, 1) = 2
+           THEN p_desired_db::text ELSE parts[1] END,
+      CASE WHEN array_length(parts, 1) = 3 THEN parts[2]
+           WHEN NOT use_explicit AND v_conn_type <> 'mysql' THEN parts[1] END,
+      parts[array_length(parts, 1)]
+      FROM (SELECT regexp_split_to_array(btrim(x), '\.') AS parts
+              FROM regexp_split_to_table(v_snaptext, '\s*,\s*') t(x)) s;
 
-      v_use_filter := EXISTS (SELECT 1 FROM tmp_snap_list);
+    IF EXISTS (SELECT 1 FROM tmp_snap_list WHERE lower(db) <> lower(p_desired_db)) THEN
+      RAISE EXCEPTION 'Snapshot selection contains a database outside the configured scope %', p_desired_db;
     END IF;
   END IF;
 
@@ -261,6 +244,15 @@ BEGIN
     v_colname_expr := 'c.column_name';
   END IF;
 
+  IF p_frozen_tables IS NOT NULL THEN
+    SELECT n.nspname INTO STRICT v_extension_schema FROM pg_catalog.pg_extension e
+      JOIN pg_catalog.pg_namespace n ON n.oid=e.extnamespace WHERE e.extname='synchdb';
+    v_colname_expr:=format('%I.synchdb_bootstrap_normalize_name(c.column_name,%L)',v_extension_schema,v_case_strategy);
+    v_table_name_expr:=format('%I.synchdb_bootstrap_normalize_name(table_name,%L)',v_extension_schema,v_case_strategy);
+  ELSE
+    v_table_name_expr:=format('CASE %L WHEN ''lower'' THEN lower(table_name) WHEN ''upper'' THEN upper(table_name) ELSE table_name END',v_case_strategy);
+  END IF;
+
   -- ensure stage schema
   EXECUTE format('CREATE SCHEMA IF NOT EXISTS %I', p_stage_schema);
 
@@ -272,15 +264,22 @@ BEGIN
        FROM %1$I.columns
       WHERE upper("schema") = upper(%2$L)
             AND lower(table_name) <> ''log_mining_flush''
+            AND lower(table_name) <> ''synchdb_olr_fence''
             AND lower(table_name) <> ''synchdb_wal_lsn''
       GROUP BY "schema", table_name',
     p_source_schema,
     p_desired_schema::text
   );
 
+  IF p_frozen_tables IS NOT NULL THEN
+    base_sql := format(
+      'SELECT c."schema" AS ora_owner, c.table_name FROM %I.columns c
+        WHERE EXISTS (SELECT 1 FROM jsonb_array_elements(%L::jsonb) f
+                       WHERE f->>''db''=%L AND f->>''schema''=c."schema" AND f->>''table''=c.table_name)
+        GROUP BY c."schema",c.table_name', p_source_schema,p_frozen_tables::text,p_desired_db::text);
+  END IF;
+
   IF v_use_filter THEN
-    IF use_explicit THEN
-      -- Match by table and (optionally) owner from the explicit list; still within desired schema
       base_sql := base_sql || '
         HAVING EXISTS (
           SELECT 1
@@ -288,20 +287,40 @@ BEGIN
            WHERE lower(table_name) = lower(f.tbl)
              AND (f.schem IS NULL OR lower("schema") = lower(f.schem))
         )';
-    ELSE
-      -- Legacy gating: require DB == p_desired_db and (optionally) exact schema match in tmp list
-      base_sql := base_sql || format(
-        ' HAVING EXISTS (
-             SELECT 1
-               FROM tmp_snap_list f
-              WHERE f.db  = %L
-                AND lower(table_name) = f.tbl
-                AND (f.schem IS NULL OR f.schem = %L)
-          )',
-        lower(p_desired_db),
-        lower(p_desired_schema)
-      );
+
+    EXECUTE format(
+      'SELECT f.db || ''.'' || coalesce(f.schem || ''.'', '''') || f.tbl
+         FROM tmp_snap_list f
+        WHERE (SELECT count(*) FROM (%s) selected
+                WHERE lower(selected.table_name) = lower(f.tbl)
+                  AND (f.schem IS NULL OR lower(selected.ora_owner) = lower(f.schem))) <> 1
+        LIMIT 1', base_sql)
+      INTO v_bad_selection;
+    IF v_bad_selection IS NOT NULL THEN
+      RAISE EXCEPTION 'Snapshot table selection has no unique match in the configured schema: %', v_bad_selection;
     END IF;
+  END IF;
+
+  -- Reject normalization collisions before replacing any existing stage FT.
+  EXECUTE format(
+    'SELECT normalized FROM
+       (SELECT (%s)::name AS normalized
+          FROM (%s) selected) names
+      GROUP BY normalized HAVING count(*) > 1 LIMIT 1',
+    v_table_name_expr, base_sql) INTO v_collision;
+  IF v_collision IS NOT NULL THEN
+    RAISE EXCEPTION 'Snapshot table names collide after normalization: %', v_collision;
+  END IF;
+
+  EXECUTE format(
+    'SELECT c."schema" || ''.'' || c.table_name || ''.'' || (%s)::name
+       FROM %I.columns c JOIN (%s) selected
+         ON c."schema" = selected.ora_owner AND c.table_name = selected.table_name
+      GROUP BY c."schema", c.table_name, (%s)::name
+     HAVING count(*) > 1 LIMIT 1',
+    v_colname_expr, p_source_schema, base_sql, v_colname_expr) INTO v_collision;
+  IF v_collision IS NOT NULL THEN
+    RAISE EXCEPTION 'Snapshot column names collide after normalization: %', v_collision;
   END IF;
 
   RAISE NOTICE 'base sql = %', base_sql;
@@ -313,11 +332,13 @@ BEGIN
 
   BEGIN
 	-- decide PG table name according to case strategy
-    v_tbl_pg := CASE v_case_strategy
-                  WHEN 'lower' THEN lower(r.table_name)
-                  WHEN 'upper' THEN upper(r.table_name)
-                  ELSE r.table_name
-                END;
+    IF p_frozen_tables IS NOT NULL THEN
+        EXECUTE format('SELECT %I.synchdb_bootstrap_normalize_name($1,$2)',v_extension_schema)
+          INTO STRICT v_tbl_pg USING r.table_name,v_case_strategy;
+    ELSE
+        v_tbl_pg := CASE v_case_strategy WHEN 'lower' THEN lower(r.table_name)
+                    WHEN 'upper' THEN upper(r.table_name) ELSE r.table_name END;
+    END IF;
 
     -- does the FT already exist?
     SELECT EXISTS (
@@ -335,8 +356,11 @@ BEGIN
       ELSIF p_on_exists = 'skip' THEN
         RAISE NOTICE 'Skipping %.% (already exists)', p_stage_schema, v_tbl_pg;
         CONTINUE;
+      ELSIF p_on_exists = 'error' THEN
+        RAISE EXCEPTION 'Stage foreign table %.% already exists', p_stage_schema, v_tbl_pg
+          USING ERRCODE = '42P07';
       ELSE
-        RAISE EXCEPTION 'Unknown p_on_exists value: % (use replace|drop|skip)', p_on_exists;
+        RAISE EXCEPTION 'Unknown p_on_exists value: % (use error|replace|drop|skip)', p_on_exists;
       END IF;
     END IF;
 
@@ -418,8 +442,7 @@ BEGIN
 	END IF;
 
     IF v_cols_sql IS NULL THEN
-      RAISE NOTICE 'No columns found for %.% — skipping', r.ora_owner, r.table_name;
-      CONTINUE;
+      RAISE EXCEPTION 'No columns found for selected source %.%', r.ora_owner, r.table_name USING ERRCODE = '22000';
     END IF;
 
     -- Create the staging FT (snapshot or not)
@@ -531,13 +554,7 @@ BEGIN
       EXECUTE format($SQL$
           SELECT string_agg(
                    (
-                     quote_ident(
-                       CASE
-                         WHEN %L = 'lower' THEN lower(c.column_name)
-                         WHEN %L = 'upper' THEN upper(c.column_name)
-                         ELSE c.column_name
-                       END
-                     )
+                     quote_ident(%s)
                      || ' ' ||
                      synchdb_translate_datatype(
                          %L::name,
@@ -569,8 +586,7 @@ BEGIN
            WHERE c."schema"   = %L
              AND c.table_name = %L
         $SQL$,
-          p_case_strategy,
-          p_case_strategy,
+          v_colname_expr,
           v_conn_type,
           p_source_schema,
           r.ora_owner,
@@ -606,7 +622,9 @@ BEGIN
     INTO STRICT v_relid;
 
     -- Determine db token for ext_tbname:
-    IF use_explicit THEN
+    IF p_frozen_tables IS NOT NULL THEN
+      v_ext_db := p_desired_db::text;
+    ELSIF use_explicit THEN
       SELECT f.db
         INTO v_ext_db
       FROM tmp_snap_list f
@@ -634,6 +652,8 @@ BEGIN
     ------------------------------------------------------------------
     v_tbl_name_l := r.table_name;
 
+    -- Planning must not publish bindings to temporary foreign table OIDs.
+    IF p_record_attributes THEN
     -- Refresh synchdb_attribute rows for this table
 	IF v_conn_type IN ('oracle','olr','postgres','sqlserver') THEN
 	   DELETE FROM public.synchdb_attribute
@@ -642,7 +662,7 @@ BEGIN
 		   AND ext_tbname = format('%s.%s.%s',
 								   v_ext_db,
 								   r.ora_owner,
-								   v_tbl_name_l)::name;
+								   v_tbl_name_l) COLLATE pg_catalog."C";
 
 		EXECUTE format($ins$
 		  INSERT INTO public.synchdb_attribute
@@ -652,9 +672,9 @@ BEGIN
 			  %L::name,
 			  %s::oid,
   			  row_number() OVER (ORDER BY c.position)::smallint,
-			  %L::name,
-			  c.column_name::name,
-			  lower(c.type_name)::name
+			  %L::text,
+			  c.column_name::text,
+			  lower(c.type_name)::text
 		  FROM %I.columns c
 		  WHERE c."schema"   = %L
 			AND c.table_name = %L
@@ -671,7 +691,7 @@ BEGIN
 						 AND ext_tbname = format('%s.%s.%s',
 												  v_ext_db,
 												  r.ora_owner,
-												  v_tbl_name_l)::name),
+												  v_tbl_name_l) COLLATE pg_catalog."C"),
 					 r.ora_owner, r.table_name, v_relid::text,
 					 format('%s.%s.%s', v_ext_db, r.ora_owner, v_tbl_name_l);
 					 
@@ -682,7 +702,7 @@ BEGIN
 		   AND type       = v_conn_type
 		   AND ext_tbname = format('%s.%s',
 								   v_ext_db,
-								   v_tbl_name_l)::name;
+								   v_tbl_name_l) COLLATE pg_catalog."C";
 
 		EXECUTE format($ins$
 		  INSERT INTO public.synchdb_attribute
@@ -692,9 +712,9 @@ BEGIN
 			  %L::name,
 			  %s::oid,
 			  c.position::smallint,
-			  %L::name,
-			  c.column_name::name,
-			  lower(c.type_name)::name
+			  %L::text,
+			  c.column_name::text,
+			  lower(c.type_name)::text
 		  FROM %I.columns c
 		  WHERE c."schema"   = %L
 			AND c.table_name = %L
@@ -710,7 +730,7 @@ BEGIN
 						 AND type = v_conn_type
 						 AND ext_tbname = format('%s.%s',
 												  v_ext_db,
-												  v_tbl_name_l)::name),
+												  v_tbl_name_l) COLLATE pg_catalog."C"),
 					 r.ora_owner, r.table_name, v_relid::text,
 					 format('%s.%s', v_ext_db, v_tbl_name_l);
 					 
@@ -718,6 +738,8 @@ BEGIN
 		RAISE EXCEPTION 'Unsupported connector type: %', v_conn_type;
 	END IF;
     ------------------------------------------------------------------
+    END IF; -- p_record_attributes
+
     -- Build, log, and store Debezium schema-history JSON (if enabled)
     ------------------------------------------------------------------
     IF p_write_dbz_schema_info THEN
@@ -851,6 +873,7 @@ BEGIN
       USING v_msg_json::text;
     END IF;
   EXCEPTION WHEN OTHERS THEN
+    IF p_frozen_tables IS NOT NULL THEN RAISE; END IF;
     RAISE WARNING 'an error has occured while creating a table schema';
     EXECUTE format(
             'CREATE TABLE IF NOT EXISTS %I.%I (
@@ -965,6 +988,28 @@ BEGIN
 END;
 $$;
 
-COMMENT ON FUNCTION synchdb_create_stage_fts(name, name, name, name, name, boolean, text, text, name, text, boolean, text) IS
+COMMENT ON FUNCTION synchdb_create_stage_fts_plan(text, text, text, name, name, boolean, text, text, name, text, boolean, text, jsonb, boolean) IS
    'create a staging schema, migrate table schemas with translated data types';
 
+-- Legacy callers retain their explicit list/configuration behavior.  The new
+-- coordinator never rediscovers a frozen scope or writes temporary bindings.
+CREATE OR REPLACE FUNCTION synchdb_create_stage_fts(
+    p_connector_name        name,                         -- connector name for attribute rows
+    p_desired_db            name,                         -- db token to match entries in snapshottable
+    p_desired_schema        name,                         -- schema to match when entry includes schema
+    p_stage_schema          name DEFAULT 'ora_stage'::name, -- target schema in Postgres
+    p_server_name           name DEFAULT 'oracle'::name,  -- oracle_fdw server name
+    p_lower_names           boolean DEFAULT true,         -- legacy: lower-case PG table/column names
+    p_on_exists             text DEFAULT 'error',         -- 'error' | 'replace' | 'drop' | 'skip'
+    p_offset                text DEFAULT NULL,            -- offset like scn, binlog pos..etc
+    p_source_schema         name DEFAULT 'ora_obj'::name, -- metadata source schema (…columns)
+    p_snapshot_tables       text DEFAULT NULL,            -- CSV of db.schema.table; when set, bypass conninfo
+    p_write_dbz_schema_info boolean DEFAULT false,        -- when true, store Debezium schema-history JSON
+    p_case_strategy         text DEFAULT 'asis'           -- 'upper' | 'lower' | 'asis' (table/column casing)
+) RETURNS void LANGUAGE plpgsql AS $$
+BEGIN
+    PERFORM synchdb_create_stage_fts_plan(p_connector_name::text,p_desired_db::text,p_desired_schema::text,
+        p_stage_schema,p_server_name,p_lower_names,p_on_exists,p_offset,p_source_schema,
+        p_snapshot_tables,p_write_dbz_schema_info,p_case_strategy,NULL::jsonb,true);
+END;
+$$;
