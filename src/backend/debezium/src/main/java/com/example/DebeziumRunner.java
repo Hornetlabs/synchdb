@@ -795,10 +795,10 @@ public class DebeziumRunner {
 
 		if (myParameters.snapshottable.equals("null"))
 			logger.warn("snapshottable is null - skip setting snapshot.include.collection.list property");
-		else if (myParameters.table.startsWith("file:"))
+		else if (myParameters.snapshottable.startsWith("file:"))
         {
             logger.warn("reading snapshot table list from file...");
-            String filepath = myParameters.table.substring(5);
+            String filepath = myParameters.snapshottable.substring(5);
             File tablefile = new File(filepath);
             if (tablefile.exists())
             {
