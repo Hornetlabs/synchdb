@@ -66,7 +66,7 @@ typedef struct pg_dml
 } PG_DML;
 
 /* Function prototypes */
-int ra_executePGDDL(PG_DDL * pgddl, ConnectorType type);
+int ra_executePGDDL(PG_DDL * pgddl, ConnectorType type, SynchdbStatistics * stats);
 int ra_executePGDML(PG_DML * pgdml, ConnectorType type, SynchdbStatistics * myBatchStats,
 		bool isInSnapshot);
 int ra_getConninfoByName(const char * name, ConnectionInfo * conninfo, char ** connector);

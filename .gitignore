@@ -4,8 +4,10 @@ dbz-engine/target/
 testenv/olr/oradata/
 testenv/olr/checkpoint/
 testenv/olr/olrswap/
+src/test/pytests/__pycache__/
 src/test/pytests/synchdbtests/__pycache__/
 src/test/pytests/synchdbtests/t/__pycache__/
+src/test/pytests/truncate/__pycache__/
 src/backend/debezium/target/
 synchdb_testdir/
 
@@ -15,3 +17,6 @@ synchdb_testdir/
 # Generated extension installation script (sources live in src/sql/).
 /synchdb--1.0.sql
 /synchdb--1.0.sql.tmp
+
+# vscode
+.vscode/

@@ -235,3 +235,4 @@ synchdb.dbz_min_row_to_stream_results = 0
     - 定期检查系统日志
     - 监控连接器状态
     - 制定配置变更流程
+`synchdb.dbz_skipped_oeprations` 保留历史拼写；`synchdb.dbz_skipped_operations` 不是已注册的别名。默认 `t` 跳过 TRUNCATE。设置为 `none` 或空字符串可启用全部操作；更改后需要重启 Debezium 连接器。详见 [TRUNCATE 复制](../architecture/ddl_replication.md#truncate-table)。
