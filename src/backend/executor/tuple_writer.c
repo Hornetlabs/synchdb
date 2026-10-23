@@ -22,7 +22,6 @@
 #include "executor/tuple_writer.h"
 #include "miscadmin.h"
 #include "optimizer/optimizer.h"
-#include "parser/parse_coerce.h"
 #include "parser/parse_relation.h"
 #include "replication/logicalrelation.h"
 #include "rewrite/rewriteHandler.h"
@@ -169,7 +168,7 @@ fill_tuple_defaults(Relation relation, EState *estate, TupleTableSlot *slot,
 		if (expression == NULL)
 			/* Match the ordinary INSERT planner: an implicit NULL must still
 			 * pass any domain constraints before reaching row triggers. */
-			expression = (Expr *) coerce_null_to_domain(attribute->atttypid,
+			expression = synchdb_pg_null_default(attribute->atttypid,
 														   attribute->atttypmod,
 														   attribute->attcollation,
 														   attribute->attlen,

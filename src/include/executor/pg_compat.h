@@ -12,6 +12,8 @@ extern Oid synchdb_pg_primary_key_index(Relation relation, bool allow_deferrable
 extern void synchdb_pg_init_range_table(EState *estate, List *range_table,
 									   List *permissions);
 extern void synchdb_pg_close_trigger_relations(EState *estate);
+extern Expr *synchdb_pg_null_default(Oid type, int32 typmod, Oid collation,
+									int length, bool by_value);
 extern bool synchdb_pg_before_update(EState *estate, EPQState *epq,
 									ResultRelInfo *result, ItemPointer tuple_id,
 									TupleTableSlot *new_slot);

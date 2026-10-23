@@ -141,6 +141,11 @@ function build_synchdb()
 		make WITH_OLR=1 install_dbz
 	)
 
+	# Shared-library linking permits unresolved backend symbols. Exercise the
+	# exact installed server/extension pair before publishing an artifact.
+	LD_LIBRARY_PATH="${installdir}/usr/local/lib:${LD_LIBRARY_PATH:-}" \
+		bash "${basedir}/ci/check-extension-load.sh" "${pgconfig}"
+
 	cd "$installdir"
 	tar czvf "${artifact}.tar.gz" *
 	mv "${artifact}.tar.gz" "$basedir"

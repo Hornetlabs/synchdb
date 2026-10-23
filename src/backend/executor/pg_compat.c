@@ -11,6 +11,8 @@
 #include "commands/trigger.h"
 #include "common/base64.h"
 #include "executor/pg_compat.h"
+#include "nodes/makefuncs.h"
+#include "parser/parse_coerce.h"
 #include "postmaster/bgworker.h"
 #include "utils/acl.h"
 #include "utils/inval.h"
@@ -108,13 +110,11 @@ synchdb_pg_init_range_table(EState *estate, List *range_table, List *permissions
 void
 synchdb_pg_close_trigger_relations(EState *estate)
 {
-#if PG_VERSION_NUM >= 180000
-	ExecCloseTrigTargetRelations(estate);
-#else
 	ListCell *cell;
 
-	/* PostgreSQL 16/17 originally keep this loop inside
-	 * ExecCloseResultRelations. Only close the dummy trigger relations here;
+	/* Early PG18 releases and IvorySQL 5 still keep this loop inside
+	 * ExecCloseResultRelations, without exporting a separate helper.
+	 * Only close the dummy trigger relations here;
 	 * the estate context still owns this list and its ResultRelInfos. */
 	foreach(cell, estate->es_trig_target_relations)
 	{
@@ -124,7 +124,25 @@ synchdb_pg_close_trigger_relations(EState *estate)
 		Assert(result->ri_NumIndices == 0);
 		table_close(result->ri_RelationDesc, NoLock);
 	}
-#endif
+}
+
+Expr *
+synchdb_pg_null_default(Oid type, int32 typmod, Oid collation,
+						int length, bool by_value)
+{
+	int32 base_typmod = typmod;
+	Oid base_type = getBaseTypeAndTypmod(type, &base_typmod);
+	Node *expression = (Node *) makeConst(base_type, base_typmod, collation,
+										 length, (Datum) 0, true, by_value);
+
+	/* coerce_null_to_domain is absent from older PG16/IvorySQL 3 releases.
+	 * Build the same base-typed NULL and retain domain NOT NULL/CHECK tests.
+	 * A NULL already bearing the domain type would bypass those tests. */
+	if (base_type != type)
+		expression = coerce_to_domain(expression, base_type, base_typmod, type,
+									  COERCION_IMPLICIT, COERCE_IMPLICIT_CAST,
+									  -1, false);
+	return (Expr *) expression;
 }
 
 bool

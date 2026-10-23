@@ -121,6 +121,9 @@ JDK_LIB_PATH := $(JDK_HOME_PATH)/lib/server
 
 PG_CFLAGS = -I$(JDK_INCLUDE_PATH) -I$(JDK_INCLUDE_PATH_OS) -I./src/include -I${PROTOBUF_C_INCLUDE_DIR}
 PG_CPPFLAGS = -I$(JDK_INCLUDE_PATH) -I$(JDK_INCLUDE_PATH_OS) -I./src/include -I${PROTOBUF_C_INCLUDE_DIR}
+# A shared library can link with undeclared backend functions, then fail only
+# when PostgreSQL loads it. Reject missing server APIs at compilation time.
+PG_CPPFLAGS += -Werror=implicit-function-declaration
 PG_LDFLAGS = -L$(JDK_LIB_PATH) -ljvm
 
 

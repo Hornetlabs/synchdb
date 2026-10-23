@@ -15,7 +15,7 @@ def olr_ddl_metadata_interval(dbvendor):
 
 
 def _ddl_query(cursor, vendor, name, query, ready, timeout=300):
-    if vendor != "olr":
+    if vendor not in ("olr", "sqlserver"):
         return run_pg_query(cursor, query)
     deadline = time.monotonic() + timeout
     while True:
@@ -28,7 +28,7 @@ def _ddl_query(cursor, vendor, name, query, ready, timeout=300):
         cursor.execute("SELECT actual_state,last_error FROM synchdb_control_view WHERE name=%s", (name,))
         state = cursor.fetchone()
         assert state and state[0] not in ("FAILED", "RETRY_WAIT"), state
-        assert time.monotonic() < deadline, f"OLR DDL did not reach its expected target state: {rows}"
+        assert time.monotonic() < deadline, f"{vendor} DDL did not reach its expected target state: {rows}"
         time.sleep(0.2)
 
 
@@ -796,12 +796,9 @@ def test_AlterTableiAddColumn(pg_cursor, dbvendor):
     elif dbvendor == "sqlserver":
         rows = run_remote_query(dbvendor, "ALTER TABLE alter_table_add_col ADD age INT;")
 
-        rows = run_remote_query(dbvendor, """
-            EXEC sys.sp_cdc_disable_table @source_schema='dbo',
-            @source_name='alter_table_add_col',
-            @capture_instance='alter_table_add_col_1';
-        """)
-
+        # Keep the reader's current capture table alive while it crosses the
+        # new instance's start LSN. Dropping it first races an in-flight poll.
+        # Both instances are removed with the source table after worker stop.
         rows = run_remote_query(dbvendor, """
             EXEC sys.sp_cdc_enable_table @source_schema = 'dbo',
             @source_name = 'alter_table_add_col', @role_name = NULL,
@@ -823,10 +820,17 @@ def test_AlterTableiAddColumn(pg_cursor, dbvendor):
             WHERE name = '{name}' AND
             type = '{connectorType}'
             AND pg_tbname = '{dbname}.alter_table_add_col'
+        ORDER BY attnum
         """,
         lambda rows: (len(rows) == 4) and (rows[3][3] == "age"))
     assert len(rows) == 4
     assert rows[3][3] == "age"
+
+    if dbvendor == "sqlserver":
+        rows = _ddl_query(pg_cursor, dbvendor, name,
+            f"SELECT age FROM {dbname}.alter_table_add_col WHERE name='s'",
+            lambda rows: rows == [(35,)])
+        assert rows == [(35,)]
 
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
