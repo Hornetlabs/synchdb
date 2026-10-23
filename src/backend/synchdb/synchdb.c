@@ -44,6 +44,7 @@
 #include "storage/lwlock.h"
 #include "storage/proc.h"
 #include "storage/ipc.h"
+#include "storage/shmem.h"
 #include "storage/fd.h"
 #include "miscadmin.h"
 #include "utils/wait_event.h"
@@ -220,6 +221,7 @@ static int populate_debezium_metadata(ConnectionInfo * connInfo, ConnectorType c
 		const char * dstdb, const char * srcdb);
 static int launch_fdw_based_snapshot(ConnectorType connectorType, ConnectionInfo *connInfo,
 		char * snapshotMode, bool schemahistory);
+static void synchdb_shmem_request(void);
 
 /*
  * has_running_connectors_for_db
@@ -4184,6 +4186,32 @@ get_shm_ora_compat(int connectorId)
 	return sdb_state->connectors[connectorId].conninfo.isOraCompat;
 }
 
+#if PG_VERSION_NUM >= 150000
+static shmem_request_hook_type prev_shmem_request_hook = NULL;
+#endif
+
+/*
+ * synchdb_shmem_request - Request shared memory for synchdb
+ *
+ * Reserve enough shared memory to hold the connector states for the maximum
+ * number of connector workers allowed by synchdb.max_connector_workers.
+ * Without this reservation the allocation performed by synchdb_init_shmem()
+ * silently depends on whatever free space happens to be left over in the main
+ * shared memory segment.
+ */
+static void
+synchdb_shmem_request(void)
+{
+#if PG_VERSION_NUM >= 150000
+	/* chain to any previously installed hook */
+	if (prev_shmem_request_hook)
+		prev_shmem_request_hook();
+#endif
+
+	RequestAddinShmemSpace(sizeof(SynchdbSharedState) +
+						   sizeof(ActiveConnectors) * synchdb_max_connector_workers);
+}
+
 /*
  * _PG_init - Initialize the SynchDB extension
  */
@@ -4496,6 +4524,20 @@ _PG_init(void)
 							 NULL,
 							 NULL,
 							 NULL);
+
+	/*
+	 * Request the shared memory needed to hold the connector states. Since
+	 * PG 15 this has to be done from the shmem_request_hook. Earlier versions
+	 * allow a direct call, but only while shared_preload_libraries is being
+	 * processed.
+	 */
+#if PG_VERSION_NUM >= 150000
+	prev_shmem_request_hook = shmem_request_hook;
+	shmem_request_hook = synchdb_shmem_request;
+#else
+	if (process_shared_preload_libraries_in_progress)
+		synchdb_shmem_request();
+#endif
 
 	/* initialize data type mapping engine for all connectors */
 	fc_initFormatConverter(TYPE_MYSQL);
@@ -5561,22 +5603,22 @@ synchdb_add_conninfo(PG_FUNCTION_ARGS)
 	/* table can be empty or NULL */
 	if (VARSIZE(table_text) - VARHDRSZ == 0)
 		strlcpy(connInfo.table, "null", SYNCHDB_CONNINFO_TABLELIST_SIZE);
-	else if (VARSIZE(table_text) - VARHDRSZ > SYNCHDB_CONNINFO_TABLELIST_SIZE)
+	else if (VARSIZE(table_text) - VARHDRSZ >= SYNCHDB_CONNINFO_TABLELIST_SIZE)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("table list cannot be longer than %d",
-						 SYNCHDB_CONNINFO_TABLELIST_SIZE)));
+						 SYNCHDB_CONNINFO_TABLELIST_SIZE - 1)));
 	else
 		strlcpy(connInfo.table, text_to_cstring(table_text), SYNCHDB_CONNINFO_TABLELIST_SIZE);
 
 	/* snapshot table can be empty or NULL */
 	if (VARSIZE(snapshottable_text) - VARHDRSZ == 0)
 		strlcpy(connInfo.snapshottable, "null", SYNCHDB_CONNINFO_TABLELIST_SIZE);
-	else if (VARSIZE(snapshottable_text) - VARHDRSZ > SYNCHDB_CONNINFO_TABLELIST_SIZE)
+	else if (VARSIZE(snapshottable_text) - VARHDRSZ >= SYNCHDB_CONNINFO_TABLELIST_SIZE)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("snapshot table cannot be longer than %d",
-						 SYNCHDB_CONNINFO_TABLELIST_SIZE)));
+						 SYNCHDB_CONNINFO_TABLELIST_SIZE - 1)));
 	else
 		strlcpy(connInfo.snapshottable, text_to_cstring(snapshottable_text),
 				SYNCHDB_CONNINFO_TABLELIST_SIZE);
