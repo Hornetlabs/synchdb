@@ -415,17 +415,17 @@ def test_DropTable(pg_cursor, dbvendor):
 
     _ddl_delay(dbvendor, 60, 60, 20)
 
-    connectorType = "oracle" if dbvendor == "oracle23ai" else dbvendor
-    rows = _ddl_query(pg_cursor, dbvendor, name, f"""
-        SELECT ext_tbname, pg_tbname FROM synchdb_att_view
-            WHERE name = '{name}' AND
-            type = '{connectorType}'
-            AND pg_tbname = '{dbname}.drop_table_test'
-        """,
-        lambda rows: (len(rows) == 0))
-    
-    ### sqlserver treats drop table as alter table drop all columns
+    # SQL Server was already exempt from the DROP metadata assertion; do not
+    # make its asynchronous DDL poll require that unsupported result either.
     if dbvendor != "sqlserver":
+        connectorType = "oracle" if dbvendor == "oracle23ai" else dbvendor
+        rows = _ddl_query(pg_cursor, dbvendor, name, f"""
+            SELECT ext_tbname, pg_tbname FROM synchdb_att_view
+                WHERE name = '{name}' AND
+                type = '{connectorType}'
+                AND pg_tbname = '{dbname}.drop_table_test'
+            """,
+            lambda rows: (len(rows) == 0))
         assert len(rows) == 0
 
     stop_and_delete_synchdb_connector(pg_cursor, name)
@@ -506,17 +506,16 @@ def test_DropTableWithSpace(pg_cursor, dbvendor):
 
     _ddl_delay(dbvendor, 60, 100, 20)
 
-    connectorType = "oracle" if dbvendor == "oracle23ai" else dbvendor
-    rows = _ddl_query(pg_cursor, dbvendor, name, f"""
-        SELECT ext_tbname, pg_tbname FROM synchdb_att_view
-            WHERE name = '{name}' AND
-            type = '{connectorType}'
-            AND pg_tbname = '{dbname}.drop with space'
-        """,
-        lambda rows: (len(rows) == 0))
-    
-    ### sqlserver treats drop table as alter table drop all columns
+    # Preserve the same SQL Server exception as the unquoted DROP case.
     if dbvendor != "sqlserver":
+        connectorType = "oracle" if dbvendor == "oracle23ai" else dbvendor
+        rows = _ddl_query(pg_cursor, dbvendor, name, f"""
+            SELECT ext_tbname, pg_tbname FROM synchdb_att_view
+                WHERE name = '{name}' AND
+                type = '{connectorType}'
+                AND pg_tbname = '{dbname}.drop with space'
+            """,
+            lambda rows: (len(rows) == 0))
         assert len(rows) == 0
 
     stop_and_delete_synchdb_connector(pg_cursor, name)
