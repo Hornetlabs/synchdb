@@ -138,6 +138,8 @@ SET data = jsonb_set(data, '{snapshottable}', '"public.customers"')
 WHERE name = 'pgconn';
 ```
 
+<<**IMPORTANT**>> For the PostgreSQL connector, both the `table` and the `snapshot table` options are written in the form of `[schema].[table]` (such as `public.customers`); the database name is **not** part of the value, unlike SQL Server and Oracle. A wrong value (such as `postgres.public.customers`) does not raise any error, but no table will be re-snapshotted at all. See the *Snapshot Table Format* section in [Create a Connector](../../user-guide/create_a_connector/) for more details.
+
 After the initial snapshot, CDC will begin. Restarting a connector in `always` mode will repeat the same process described above.
 
 ## **Possible Snapshot Modes for Postgres Connector**

@@ -140,6 +140,8 @@ SET data = jsonb_set(data, '{snapshottable}', '"inventory.customers"')
 WHERE name = 'mysqlconn';
 ```
 
+<<**NOTE**>> The `snapshot table` value must be expressed in the full table identifier of the source database, which depends on the connector type. MySQL table identifiers do not contain a schema name, so `[database].[table]` (such as `inventory.customers`) is used here. SQL Server and Oracle use `[database].[schema].[table]` (such as `testDB.dbo.customers` and `FREE.DBZUSER.CUSTOMERS`), while PostgreSQL uses `[schema].[table]` (such as `public.customers`). See the *Snapshot Table Format* section in [Create a Connector](../../user-guide/create_a_connector/) for more details.
+
 After the initial snapshot, CDC will begin. Restarting a connector in `always` mode will repeat the same process described above.
 
 ## **Possible Snapshot Modes for MySQL Connector**
