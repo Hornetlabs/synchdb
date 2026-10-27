@@ -2925,9 +2925,25 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, char * remoteObj
 	elog(DEBUG1, "%s: col %s typoid %d timerep %d dbztype %d category %c",__FUNCTION__,
 			colval->name, colval->datatype, colval->timerep, colval->dbztype, colval->typcategory);
 
-	if (!in || strlen(in) == 0 || !strcasecmp(in, "NULL"))
+	/*
+	 * A NULL value coming from the source is encoded as the literal text
+	 * "NULL" by the event parser. An empty string, however, is a legitimate
+	 * value for character types and must not be collapsed into NULL, or it
+	 * would violate a NOT NULL constraint on the target column.
+	 */
+	if (!in || !strcasecmp(in, "NULL"))
 	{
 		elog(DEBUG1,"NULL input value, returning NULL");
+		return NULL;
+	}
+
+	if (strlen(in) == 0 &&
+		colval->datatype != BPCHAROID &&
+		colval->datatype != TEXTOID &&
+		colval->datatype != VARCHAROID &&
+		colval->datatype != CSTRINGOID)
+	{
+		elog(DEBUG1,"empty input value, returning NULL");
 		return NULL;
 	}
 
