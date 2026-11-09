@@ -6,7 +6,7 @@ EXTENSION = synchdb
 DATA_built = synchdb--1.1.sql
 # The release bundle carries this generated, restricted upgrade edge. Install
 # it alongside the fresh-install SQL so ALTER EXTENSION needs no manual copy.
-DATA = migration/sql/synchdb--1.0--1.1.sql
+DATA = upgrade-v1.4-to-v1.5/sql/synchdb--1.0--1.1.sql
 
 # Keep the original SQL definition order.  These are the sources for the
 # generated extension installation script; do not edit that script directly.

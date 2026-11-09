@@ -19,6 +19,12 @@ This architecture allows PostgreSQL to leverage the rich ecosystem of Debezium c
 
 🔗 Learn more about Debezium [here](https://debezium.io/documentation/reference/stable/index.html).
 
+## **Migrating from v1.4 to v1.5**
+
+Existing v1.4 deployments must follow the migration procedure before switching to v1.5. The procedure preserves connector settings, target tables, credentials, and synchronization positions while updating the extension catalogs and stored state. Replacing the shared library or Java package alone is not sufficient.
+
+The English migration manual is in the source repository at: `upgrade-v1.4-to-v1.5/README.md`. The same directory contains the required upgrade tools.
+
 ## **Notable Features**
 
 - Efficient data synchronization

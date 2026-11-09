@@ -16,9 +16,10 @@ SynchDB is a dual-language module, combining Java (for utilizing Debezium Embedd
 
 Visit SynchDB documentation site [here](https://docs.synchdb.com/) for more design details.
 
-For an existing v1.4 deployment, use the [migration bundle](migration/README.md)
-and its [automatic upgrade guide](migration/automatic.md) to preserve the target
-tables and source positions when moving to this refactored version.
+For an existing v1.4 deployment, use the
+[v1.4 to v1.5 migration guide](upgrade-v1.4-to-v1.5/README.md) to preserve target
+tables and source positions. The guide and required tools are together in
+`upgrade-v1.4-to-v1.5/`.
 
 ## Architecture
 SynchDB extension consists of these major components:

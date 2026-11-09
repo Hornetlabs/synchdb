@@ -1,0 +1,1127 @@
+{
+  "format": "synchdb-legacy-catalog-profile",
+  "format_version": 1,
+  "source_release": "v1.4",
+  "source_tag": "v1.4",
+  "source_tag_object": "0756e247ca07083244559cb4616c5dedf1b3da97",
+  "source_tag_object_type": "commit",
+  "source_commit": "0756e247ca07083244559cb4616c5dedf1b3da97",
+  "source_version": "1.0",
+  "source_sql": {
+    "path": "synchdb--1.0.sql",
+    "sha256": "7bb39808f3b1c93fb126d2db31f548af4d9f1f51e9de29526adbe0a52ab3bbd3"
+  },
+  "catalog_extraction": {
+    "server_version": "18.6",
+    "source": "unmodified v1.4 SQL installed with its matching C library; extension-owned objects only",
+    "normalization": "pg_catalog search_path; every member must remain in the extension schema; column attnotnull covers PostgreSQL 18 NOT NULL constraints"
+  },
+  "catalog": {
+    "functions": [
+      {
+        "kind": "f",
+        "name": "mysql_type_to_jdbc",
+        "result": "integer",
+        "strict": true,
+        "language": "plpgsql",
+        "arguments": "mysql_type_text text",
+        "volatility": "i",
+        "configuration": [],
+        "security_definer": false,
+        "identity_arguments": "mysql_type_text text",
+        "in_extension_schema": true
+      },
+      {
+        "kind": "f",
+        "name": "oracle_type_to_jdbc",
+        "result": "integer",
+        "strict": true,
+        "language": "plpgsql",
+        "arguments": "ora_type_text text",
+        "volatility": "i",
+        "configuration": [],
+        "security_definer": false,
+        "identity_arguments": "ora_type_text text",
+        "in_extension_schema": true
+      },
+      {
+        "kind": "f",
+        "name": "read_snapshot_table_list",
+        "result": "text",
+        "strict": false,
+        "language": "plpgsql",
+        "arguments": "file_uri text, p_conn_type text, p_desired_db text",
+        "volatility": "v",
+        "configuration": [],
+        "security_definer": false,
+        "identity_arguments": "file_uri text, p_conn_type text, p_desired_db text",
+        "in_extension_schema": true
+      },
+      {
+        "kind": "f",
+        "name": "synchdb_add_conninfo",
+        "result": "integer",
+        "strict": true,
+        "language": "c",
+        "arguments": "name, text, integer, text, text, text, text, text, text, text",
+        "volatility": "i",
+        "configuration": [],
+        "security_definer": false,
+        "identity_arguments": "name, text, integer, text, text, text, text, text, text, text",
+        "in_extension_schema": true
+      },
+      {
+        "kind": "f",
+        "name": "synchdb_add_extra_conninfo",
+        "result": "integer",
+        "strict": true,
+        "language": "c",
+        "arguments": "name, name, text, text, text, text",
+        "volatility": "i",
+        "configuration": [],
+        "security_definer": false,
+        "identity_arguments": "name, name, text, text, text, text",
+        "in_extension_schema": true
+      },
+      {
+        "kind": "f",
+        "name": "synchdb_add_fdw_conninfo",
+        "result": "integer",
+        "strict": true,
+        "language": "c",
+        "arguments": "name, text, text, text, text",
+        "volatility": "i",
+        "configuration": [],
+        "security_definer": false,
+        "identity_arguments": "name, text, text, text, text",
+        "in_extension_schema": true
+      },
+      {
+        "kind": "f",
+        "name": "synchdb_add_infinispan",
+        "result": "integer",
+        "strict": true,
+        "language": "c",
+        "arguments": "name, name, integer",
+        "volatility": "i",
+        "configuration": [],
+        "security_definer": false,
+        "identity_arguments": "name, name, integer",
+        "in_extension_schema": true
+      },
+      {
+        "kind": "f",
+        "name": "synchdb_add_jmx_conninfo",
+        "result": "integer",
+        "strict": true,
+        "language": "c",
+        "arguments": "name, text, integer, text, integer, boolean, text, text, boolean, text, text, text, text",
+        "volatility": "i",
+        "configuration": [],
+        "security_definer": false,
+        "identity_arguments": "name, text, integer, text, integer, boolean, text, text, boolean, text, text, text, text",
+        "in_extension_schema": true
+      },
+      {
+        "kind": "f",
+        "name": "synchdb_add_jmx_exporter_conninfo",
+        "result": "integer",
+        "strict": true,
+        "language": "c",
+        "arguments": "name, text, integer, text",
+        "volatility": "i",
+        "configuration": [],
+        "security_definer": false,
+        "identity_arguments": "name, text, integer, text",
+        "in_extension_schema": true
+      },
+      {
+        "kind": "f",
+        "name": "synchdb_add_objmap",
+        "result": "integer",
+        "strict": true,
+        "language": "c",
+        "arguments": "name, name, name, text",
+        "volatility": "i",
+        "configuration": [],
+        "security_definer": false,
+        "identity_arguments": "name, name, name, text",
+        "in_extension_schema": true
+      },
+      {
+        "kind": "f",
+        "name": "synchdb_add_olr_conninfo",
+        "result": "integer",
+        "strict": true,
+        "language": "c",
+        "arguments": "name, text, integer, text",
+        "volatility": "i",
+        "configuration": [],
+        "security_definer": false,
+        "identity_arguments": "name, text, integer, text",
+        "in_extension_schema": true
+      },
+      {
+        "kind": "f",
+        "name": "synchdb_apply_column_mappings",
+        "result": "void",
+        "strict": false,
+        "language": "plpgsql",
+        "arguments": "p_src_schema name, p_connector_name name, p_desired_db name, p_desired_schema name DEFAULT NULL::name, p_case_strategy text DEFAULT 'asis'::text",
+        "volatility": "v",
+        "configuration": [],
+        "security_definer": false,
+        "identity_arguments": "p_src_schema name, p_connector_name name, p_desired_db name, p_desired_schema name, p_case_strategy text",
+        "in_extension_schema": true
+      },
+      {
+        "kind": "f",
+        "name": "synchdb_apply_table_mappings",
+        "result": "void",
+        "strict": false,
+        "language": "plpgsql",
+        "arguments": "p_src_schema name, p_connector_name name, p_desired_db name, p_desired_schema name DEFAULT NULL::name, p_case_strategy text DEFAULT 'asis'::text",
+        "volatility": "v",
+        "configuration": [],
+        "security_definer": false,
+        "identity_arguments": "p_src_schema name, p_connector_name name, p_desired_db name, p_desired_schema name, p_case_strategy text",
+        "in_extension_schema": true
+      },
+      {
+        "kind": "f",
+        "name": "synchdb_create_current_binlog_pos_ft",
+        "result": "void",
+        "strict": false,
+        "language": "plpgsql",
+        "arguments": "p_schema name, p_server name",
+        "volatility": "v",
+        "configuration": [
+          "search_path=pg_catalog"
+        ],
+        "security_definer": false,
+        "identity_arguments": "p_schema name, p_server name",
+        "in_extension_schema": true
+      },
+      {
+        "kind": "f",
+        "name": "synchdb_create_current_lsn_ft",
+        "result": "void",
+        "strict": false,
+        "language": "plpgsql",
+        "arguments": "p_schema name, p_server name",
+        "volatility": "v",
+        "configuration": [
+          "search_path=pg_catalog"
+        ],
+        "security_definer": false,
+        "identity_arguments": "p_schema name, p_server name",
+        "in_extension_schema": true
+      },
+      {
+        "kind": "f",
+        "name": "synchdb_create_current_scn_ft",
+        "result": "void",
+        "strict": false,
+        "language": "plpgsql",
+        "arguments": "p_schema name, p_server name",
+        "volatility": "v",
+        "configuration": [],
+        "security_definer": false,
+        "identity_arguments": "p_schema name, p_server name",
+        "in_extension_schema": true
+      },
+      {
+        "kind": "f",
+        "name": "synchdb_create_mysql_objs",
+        "result": "void",
+        "strict": false,
+        "language": "plpgsql",
+        "arguments": "server name, schema name DEFAULT 'public'::name, options jsonb DEFAULT NULL::jsonb",
+        "volatility": "v",
+        "configuration": [
+          "search_path=pg_catalog"
+        ],
+        "security_definer": false,
+        "identity_arguments": "server name, schema name, options jsonb",
+        "in_extension_schema": true
+      },
+      {
+        "kind": "f",
+        "name": "synchdb_create_ora_stage_fts",
+        "result": "void",
+        "strict": false,
+        "language": "plpgsql",
+        "arguments": "p_connector_name name, p_desired_db name, p_desired_schema name, p_stage_schema name DEFAULT 'ora_stage'::name, p_server_name name DEFAULT 'oracle'::name, p_lower_names boolean DEFAULT true, p_on_exists text DEFAULT 'replace'::text, p_offset text DEFAULT NULL::text, p_source_schema name DEFAULT 'ora_obj'::name, p_snapshot_tables text DEFAULT NULL::text, p_write_dbz_schema_info boolean DEFAULT false, p_case_strategy text DEFAULT 'asis'::text",
+        "volatility": "v",
+        "configuration": [],
+        "security_definer": false,
+        "identity_arguments": "p_connector_name name, p_desired_db name, p_desired_schema name, p_stage_schema name, p_server_name name, p_lower_names boolean, p_on_exists text, p_offset text, p_source_schema name, p_snapshot_tables text, p_write_dbz_schema_info boolean, p_case_strategy text",
+        "in_extension_schema": true
+      },
+      {
+        "kind": "f",
+        "name": "synchdb_create_oraviews",
+        "result": "void",
+        "strict": false,
+        "language": "plpgsql",
+        "arguments": "server name, schema name DEFAULT 'public'::name, options jsonb DEFAULT NULL::jsonb",
+        "volatility": "v",
+        "configuration": [
+          "search_path=pg_catalog"
+        ],
+        "security_definer": false,
+        "identity_arguments": "server name, schema name, options jsonb",
+        "in_extension_schema": true
+      },
+      {
+        "kind": "f",
+        "name": "synchdb_create_pg_objs",
+        "result": "void",
+        "strict": false,
+        "language": "plpgsql",
+        "arguments": "server name, schema name DEFAULT 'public'::name, options jsonb DEFAULT NULL::jsonb",
+        "volatility": "v",
+        "configuration": [
+          "search_path=pg_catalog"
+        ],
+        "security_definer": false,
+        "identity_arguments": "server name, schema name, options jsonb",
+        "in_extension_schema": true
+      },
+      {
+        "kind": "f",
+        "name": "synchdb_del_conninfo",
+        "result": "integer",
+        "strict": true,
+        "language": "c",
+        "arguments": "name",
+        "volatility": "i",
+        "configuration": [],
+        "security_definer": false,
+        "identity_arguments": "name",
+        "in_extension_schema": true
+      },
+      {
+        "kind": "f",
+        "name": "synchdb_del_extra_conninfo",
+        "result": "integer",
+        "strict": true,
+        "language": "c",
+        "arguments": "name",
+        "volatility": "i",
+        "configuration": [],
+        "security_definer": false,
+        "identity_arguments": "name",
+        "in_extension_schema": true
+      },
+      {
+        "kind": "f",
+        "name": "synchdb_del_fdw_conninfo",
+        "result": "integer",
+        "strict": true,
+        "language": "c",
+        "arguments": "name",
+        "volatility": "i",
+        "configuration": [],
+        "security_definer": false,
+        "identity_arguments": "name",
+        "in_extension_schema": true
+      },
+      {
+        "kind": "f",
+        "name": "synchdb_del_infinispan",
+        "result": "integer",
+        "strict": true,
+        "language": "c",
+        "arguments": "name",
+        "volatility": "i",
+        "configuration": [],
+        "security_definer": false,
+        "identity_arguments": "name",
+        "in_extension_schema": true
+      },
+      {
+        "kind": "f",
+        "name": "synchdb_del_jmx_conninfo",
+        "result": "integer",
+        "strict": true,
+        "language": "c",
+        "arguments": "name",
+        "volatility": "i",
+        "configuration": [],
+        "security_definer": false,
+        "identity_arguments": "name",
+        "in_extension_schema": true
+      },
+      {
+        "kind": "f",
+        "name": "synchdb_del_jmx_exporter_conninfo",
+        "result": "integer",
+        "strict": true,
+        "language": "c",
+        "arguments": "name",
+        "volatility": "i",
+        "configuration": [],
+        "security_definer": false,
+        "identity_arguments": "name",
+        "in_extension_schema": true
+      },
+      {
+        "kind": "f",
+        "name": "synchdb_del_objmap",
+        "result": "integer",
+        "strict": true,
+        "language": "c",
+        "arguments": "name, name, name",
+        "volatility": "i",
+        "configuration": [],
+        "security_definer": false,
+        "identity_arguments": "name, name, name",
+        "in_extension_schema": true
+      },
+      {
+        "kind": "f",
+        "name": "synchdb_del_olr_conninfo",
+        "result": "integer",
+        "strict": true,
+        "language": "c",
+        "arguments": "name",
+        "volatility": "i",
+        "configuration": [],
+        "security_definer": false,
+        "identity_arguments": "name",
+        "in_extension_schema": true
+      },
+      {
+        "kind": "f",
+        "name": "synchdb_do_initial_snapshot",
+        "result": "text",
+        "strict": false,
+        "language": "plpgsql",
+        "arguments": "p_connector_name name, p_secret text, p_source_schema name, p_stage_schema name, p_dest_schema name, p_lookup_db text, p_lookup_schema name, p_lower_names boolean DEFAULT true, p_on_exists text DEFAULT 'replace'::text, p_offset text DEFAULT NULL::text, p_snapshot_tables text DEFAULT NULL::text, p_use_subtx boolean DEFAULT true, p_write_schema_hist boolean DEFAULT false, p_case_strategy text DEFAULT 'asis'::text",
+        "volatility": "v",
+        "configuration": [],
+        "security_definer": false,
+        "identity_arguments": "p_connector_name name, p_secret text, p_source_schema name, p_stage_schema name, p_dest_schema name, p_lookup_db text, p_lookup_schema name, p_lower_names boolean, p_on_exists text, p_offset text, p_snapshot_tables text, p_use_subtx boolean, p_write_schema_hist boolean, p_case_strategy text",
+        "in_extension_schema": true
+      },
+      {
+        "kind": "f",
+        "name": "synchdb_do_schema_sync",
+        "result": "text",
+        "strict": false,
+        "language": "plpgsql",
+        "arguments": "p_connector_name name, p_secret text, p_source_schema name, p_stage_schema name, p_dest_schema name, p_lookup_db text, p_lookup_schema name, p_lower_names boolean DEFAULT true, p_on_exists text DEFAULT 'replace'::text, p_offset text DEFAULT NULL::text, p_snapshot_tables text DEFAULT NULL::text, p_use_subtx boolean DEFAULT true, p_write_schema_hist boolean DEFAULT false, p_case_strategy text DEFAULT 'asis'::text",
+        "volatility": "v",
+        "configuration": [],
+        "security_definer": false,
+        "identity_arguments": "p_connector_name name, p_secret text, p_source_schema name, p_stage_schema name, p_dest_schema name, p_lookup_db text, p_lookup_schema name, p_lower_names boolean, p_on_exists text, p_offset text, p_snapshot_tables text, p_use_subtx boolean, p_write_schema_hist boolean, p_case_strategy text",
+        "in_extension_schema": true
+      },
+      {
+        "kind": "f",
+        "name": "synchdb_finalize_initial_snapshot",
+        "result": "void",
+        "strict": false,
+        "language": "plpgsql",
+        "arguments": "p_source_schema name, p_stage_schema name, p_connector_name name, p_meta_schema name",
+        "volatility": "v",
+        "configuration": [],
+        "security_definer": false,
+        "identity_arguments": "p_source_schema name, p_stage_schema name, p_connector_name name, p_meta_schema name",
+        "in_extension_schema": true
+      },
+      {
+        "kind": "f",
+        "name": "synchdb_get_state",
+        "result": "SETOF record",
+        "strict": true,
+        "language": "c",
+        "arguments": "",
+        "volatility": "i",
+        "configuration": [],
+        "security_definer": false,
+        "identity_arguments": "",
+        "in_extension_schema": true
+      },
+      {
+        "kind": "f",
+        "name": "synchdb_get_stats",
+        "result": "SETOF record",
+        "strict": true,
+        "language": "c",
+        "arguments": "",
+        "volatility": "i",
+        "configuration": [],
+        "security_definer": false,
+        "identity_arguments": "",
+        "in_extension_schema": true
+      },
+      {
+        "kind": "f",
+        "name": "synchdb_log_jvm_meminfo",
+        "result": "integer",
+        "strict": true,
+        "language": "c",
+        "arguments": "name",
+        "volatility": "i",
+        "configuration": [],
+        "security_definer": false,
+        "identity_arguments": "name",
+        "in_extension_schema": true
+      },
+      {
+        "kind": "f",
+        "name": "synchdb_materialize_ora_metadata",
+        "result": "void",
+        "strict": false,
+        "language": "plpgsql",
+        "arguments": "p_source_schema name, p_dest_schema name, p_on_exists text DEFAULT 'replace'::text",
+        "volatility": "v",
+        "configuration": [],
+        "security_definer": false,
+        "identity_arguments": "p_source_schema name, p_dest_schema name, p_on_exists text",
+        "in_extension_schema": true
+      },
+      {
+        "kind": "f",
+        "name": "synchdb_materialize_schema",
+        "result": "void",
+        "strict": false,
+        "language": "plpgsql",
+        "arguments": "p_connector_name name, p_src_schema name, p_dst_schema name, p_on_exists text DEFAULT 'skip'::text",
+        "volatility": "v",
+        "configuration": [],
+        "security_definer": false,
+        "identity_arguments": "p_connector_name name, p_src_schema name, p_dst_schema name, p_on_exists text",
+        "in_extension_schema": true
+      },
+      {
+        "kind": "f",
+        "name": "synchdb_migrate_data_with_transforms",
+        "result": "void",
+        "strict": false,
+        "language": "plpgsql",
+        "arguments": "p_src_schema name, p_connector_name name, p_dst_schema name, p_desired_db name, p_offset text, p_case_strategy text, p_desired_schema name DEFAULT NULL::name, p_do_truncate boolean DEFAULT false, p_rows_per_tick integer DEFAULT 0, p_continue_on_error boolean DEFAULT true, p_batch_subxact boolean DEFAULT true",
+        "volatility": "v",
+        "configuration": [],
+        "security_definer": false,
+        "identity_arguments": "p_src_schema name, p_connector_name name, p_dst_schema name, p_desired_db name, p_offset text, p_case_strategy text, p_desired_schema name, p_do_truncate boolean, p_rows_per_tick integer, p_continue_on_error boolean, p_batch_subxact boolean",
+        "in_extension_schema": true
+      },
+      {
+        "kind": "f",
+        "name": "synchdb_migrate_data_with_transforms_nosubs",
+        "result": "void",
+        "strict": false,
+        "language": "plpgsql",
+        "arguments": "p_src_schema name, p_connector_name name, p_dst_schema name, p_desired_db name, p_desired_schema name DEFAULT NULL::name, p_do_truncate boolean DEFAULT false, p_rows_per_tick integer DEFAULT 0",
+        "volatility": "v",
+        "configuration": [],
+        "security_definer": false,
+        "identity_arguments": "p_src_schema name, p_connector_name name, p_dst_schema name, p_desired_db name, p_desired_schema name, p_do_truncate boolean, p_rows_per_tick integer",
+        "in_extension_schema": true
+      },
+      {
+        "kind": "f",
+        "name": "synchdb_migrate_primary_keys",
+        "result": "void",
+        "strict": false,
+        "language": "plpgsql",
+        "arguments": "p_oraobj_schema name, p_dst_schema name, p_case_strategy text DEFAULT 'asis'::text",
+        "volatility": "v",
+        "configuration": [],
+        "security_definer": false,
+        "identity_arguments": "p_oraobj_schema name, p_dst_schema name, p_case_strategy text",
+        "in_extension_schema": true
+      },
+      {
+        "kind": "f",
+        "name": "synchdb_pause_engine",
+        "result": "integer",
+        "strict": true,
+        "language": "c",
+        "arguments": "name",
+        "volatility": "i",
+        "configuration": [],
+        "security_definer": false,
+        "identity_arguments": "name",
+        "in_extension_schema": true
+      },
+      {
+        "kind": "f",
+        "name": "synchdb_prepare_initial_snapshot",
+        "result": "text",
+        "strict": false,
+        "language": "plpgsql",
+        "arguments": "p_connector_name name, p_master_key text DEFAULT NULL::text",
+        "volatility": "v",
+        "configuration": [],
+        "security_definer": true,
+        "identity_arguments": "p_connector_name name, p_master_key text",
+        "in_extension_schema": true
+      },
+      {
+        "kind": "f",
+        "name": "synchdb_reload_objmap",
+        "result": "integer",
+        "strict": true,
+        "language": "c",
+        "arguments": "name",
+        "volatility": "i",
+        "configuration": [],
+        "security_definer": false,
+        "identity_arguments": "name",
+        "in_extension_schema": true
+      },
+      {
+        "kind": "f",
+        "name": "synchdb_reset_stats",
+        "result": "integer",
+        "strict": true,
+        "language": "c",
+        "arguments": "name",
+        "volatility": "i",
+        "configuration": [],
+        "security_definer": false,
+        "identity_arguments": "name",
+        "in_extension_schema": true
+      },
+      {
+        "kind": "f",
+        "name": "synchdb_restart_connector",
+        "result": "integer",
+        "strict": true,
+        "language": "c",
+        "arguments": "name, name",
+        "volatility": "i",
+        "configuration": [],
+        "security_definer": false,
+        "identity_arguments": "name, name",
+        "in_extension_schema": true
+      },
+      {
+        "kind": "f",
+        "name": "synchdb_resume_engine",
+        "result": "integer",
+        "strict": true,
+        "language": "c",
+        "arguments": "name",
+        "volatility": "i",
+        "configuration": [],
+        "security_definer": false,
+        "identity_arguments": "name",
+        "in_extension_schema": true
+      },
+      {
+        "kind": "f",
+        "name": "synchdb_set_dbz_loglevel",
+        "result": "integer",
+        "strict": true,
+        "language": "c",
+        "arguments": "name, text",
+        "volatility": "i",
+        "configuration": [],
+        "security_definer": false,
+        "identity_arguments": "name, text",
+        "in_extension_schema": true
+      },
+      {
+        "kind": "f",
+        "name": "synchdb_set_offset",
+        "result": "integer",
+        "strict": true,
+        "language": "c",
+        "arguments": "name, text",
+        "volatility": "i",
+        "configuration": [],
+        "security_definer": false,
+        "identity_arguments": "name, text",
+        "in_extension_schema": true
+      },
+      {
+        "kind": "f",
+        "name": "synchdb_set_snapstats",
+        "result": "void",
+        "strict": true,
+        "language": "c",
+        "arguments": "name, bigint, bigint, bigint, bigint",
+        "volatility": "i",
+        "configuration": [],
+        "security_definer": false,
+        "identity_arguments": "name, bigint, bigint, bigint, bigint",
+        "in_extension_schema": true
+      },
+      {
+        "kind": "f",
+        "name": "synchdb_start_engine_bgw",
+        "result": "integer",
+        "strict": true,
+        "language": "c",
+        "arguments": "name",
+        "volatility": "i",
+        "configuration": [],
+        "security_definer": false,
+        "identity_arguments": "name",
+        "in_extension_schema": true
+      },
+      {
+        "kind": "f",
+        "name": "synchdb_start_engine_bgw",
+        "result": "integer",
+        "strict": true,
+        "language": "c",
+        "arguments": "name, name",
+        "volatility": "i",
+        "configuration": [],
+        "security_definer": false,
+        "identity_arguments": "name, name",
+        "in_extension_schema": true
+      },
+      {
+        "kind": "f",
+        "name": "synchdb_stop_engine_bgw",
+        "result": "integer",
+        "strict": true,
+        "language": "c",
+        "arguments": "name",
+        "volatility": "i",
+        "configuration": [],
+        "security_definer": false,
+        "identity_arguments": "name",
+        "in_extension_schema": true
+      },
+      {
+        "kind": "f",
+        "name": "synchdb_translate_datatype",
+        "result": "text",
+        "strict": true,
+        "language": "c",
+        "arguments": "name, name, bigint, bigint, bigint",
+        "volatility": "i",
+        "configuration": [],
+        "security_definer": false,
+        "identity_arguments": "name, name, bigint, bigint, bigint",
+        "in_extension_schema": true
+      },
+      {
+        "kind": "f",
+        "name": "synchdb_type_to_jdbc",
+        "result": "integer",
+        "strict": true,
+        "language": "plpgsql",
+        "arguments": "p_connector text, p_type_text text",
+        "volatility": "i",
+        "configuration": [],
+        "security_definer": false,
+        "identity_arguments": "p_connector text, p_type_text text",
+        "in_extension_schema": true
+      }
+    ],
+    "relations": [
+      {
+        "kind": "v",
+        "name": "synchdb_att_view",
+        "columns": [
+          {
+            "name": "name",
+            "type": "name",
+            "default": null,
+            "not_null": false
+          },
+          {
+            "name": "type",
+            "type": "name",
+            "default": null,
+            "not_null": false
+          },
+          {
+            "name": "attnum",
+            "type": "smallint",
+            "default": null,
+            "not_null": false
+          },
+          {
+            "name": "ext_tbname",
+            "type": "name",
+            "default": null,
+            "not_null": false
+          },
+          {
+            "name": "pg_tbname",
+            "type": "text",
+            "default": null,
+            "not_null": false
+          },
+          {
+            "name": "ext_attname",
+            "type": "name",
+            "default": null,
+            "not_null": false
+          },
+          {
+            "name": "pg_attname",
+            "type": "name",
+            "default": null,
+            "not_null": false
+          },
+          {
+            "name": "ext_atttypename",
+            "type": "name",
+            "default": null,
+            "not_null": false
+          },
+          {
+            "name": "pg_atttypename",
+            "type": "text",
+            "default": null,
+            "not_null": false
+          },
+          {
+            "name": "transform",
+            "type": "text",
+            "default": null,
+            "not_null": false
+          }
+        ],
+        "constraints": [],
+        "in_extension_schema": true
+      },
+      {
+        "kind": "r",
+        "name": "synchdb_attribute",
+        "columns": [
+          {
+            "name": "name",
+            "type": "name",
+            "default": null,
+            "not_null": true
+          },
+          {
+            "name": "type",
+            "type": "name",
+            "default": null,
+            "not_null": true
+          },
+          {
+            "name": "attrelid",
+            "type": "oid",
+            "default": null,
+            "not_null": true
+          },
+          {
+            "name": "attnum",
+            "type": "smallint",
+            "default": null,
+            "not_null": true
+          },
+          {
+            "name": "ext_tbname",
+            "type": "name",
+            "default": null,
+            "not_null": false
+          },
+          {
+            "name": "ext_attname",
+            "type": "name",
+            "default": null,
+            "not_null": false
+          },
+          {
+            "name": "ext_atttypename",
+            "type": "name",
+            "default": null,
+            "not_null": false
+          }
+        ],
+        "constraints": [
+          {
+            "name": "synchdb_attribute_pkey",
+            "definition": "PRIMARY KEY (name, type, attrelid, attnum)"
+          }
+        ],
+        "in_extension_schema": true
+      },
+      {
+        "kind": "v",
+        "name": "synchdb_cdcstats",
+        "columns": [
+          {
+            "name": "name",
+            "type": "text",
+            "default": null,
+            "not_null": false
+          },
+          {
+            "name": "ddls",
+            "type": "bigint",
+            "default": null,
+            "not_null": false
+          },
+          {
+            "name": "dmls",
+            "type": "bigint",
+            "default": null,
+            "not_null": false
+          },
+          {
+            "name": "creates",
+            "type": "bigint",
+            "default": null,
+            "not_null": false
+          },
+          {
+            "name": "updates",
+            "type": "bigint",
+            "default": null,
+            "not_null": false
+          },
+          {
+            "name": "deletes",
+            "type": "bigint",
+            "default": null,
+            "not_null": false
+          },
+          {
+            "name": "txs",
+            "type": "bigint",
+            "default": null,
+            "not_null": false
+          },
+          {
+            "name": "truncates",
+            "type": "bigint",
+            "default": null,
+            "not_null": false
+          }
+        ],
+        "constraints": [],
+        "in_extension_schema": true
+      },
+      {
+        "kind": "r",
+        "name": "synchdb_conninfo",
+        "columns": [
+          {
+            "name": "name",
+            "type": "text",
+            "default": null,
+            "not_null": true
+          },
+          {
+            "name": "isactive",
+            "type": "boolean",
+            "default": null,
+            "not_null": false
+          },
+          {
+            "name": "data",
+            "type": "jsonb",
+            "default": null,
+            "not_null": false
+          }
+        ],
+        "constraints": [
+          {
+            "name": "synchdb_conninfo_pkey",
+            "definition": "PRIMARY KEY (name)"
+          }
+        ],
+        "in_extension_schema": true
+      },
+      {
+        "kind": "v",
+        "name": "synchdb_genstats",
+        "columns": [
+          {
+            "name": "name",
+            "type": "text",
+            "default": null,
+            "not_null": false
+          },
+          {
+            "name": "bad_events",
+            "type": "bigint",
+            "default": null,
+            "not_null": false
+          },
+          {
+            "name": "total_events",
+            "type": "bigint",
+            "default": null,
+            "not_null": false
+          },
+          {
+            "name": "batches_done",
+            "type": "bigint",
+            "default": null,
+            "not_null": false
+          },
+          {
+            "name": "average_batch_size",
+            "type": "bigint",
+            "default": null,
+            "not_null": false
+          },
+          {
+            "name": "first_src_ts",
+            "type": "bigint",
+            "default": null,
+            "not_null": false
+          },
+          {
+            "name": "first_pg_ts",
+            "type": "bigint",
+            "default": null,
+            "not_null": false
+          },
+          {
+            "name": "last_src_ts",
+            "type": "bigint",
+            "default": null,
+            "not_null": false
+          },
+          {
+            "name": "last_pg_ts",
+            "type": "bigint",
+            "default": null,
+            "not_null": false
+          }
+        ],
+        "constraints": [],
+        "in_extension_schema": true
+      },
+      {
+        "kind": "r",
+        "name": "synchdb_objmap",
+        "columns": [
+          {
+            "name": "name",
+            "type": "name",
+            "default": null,
+            "not_null": true
+          },
+          {
+            "name": "objtype",
+            "type": "name",
+            "default": null,
+            "not_null": true
+          },
+          {
+            "name": "enabled",
+            "type": "boolean",
+            "default": null,
+            "not_null": false
+          },
+          {
+            "name": "srcobj",
+            "type": "name",
+            "default": null,
+            "not_null": true
+          },
+          {
+            "name": "dstobj",
+            "type": "text",
+            "default": null,
+            "not_null": false
+          }
+        ],
+        "constraints": [
+          {
+            "name": "synchdb_objmap_pkey",
+            "definition": "PRIMARY KEY (name, objtype, srcobj)"
+          }
+        ],
+        "in_extension_schema": true
+      },
+      {
+        "kind": "v",
+        "name": "synchdb_snapstats",
+        "columns": [
+          {
+            "name": "name",
+            "type": "text",
+            "default": null,
+            "not_null": false
+          },
+          {
+            "name": "tables",
+            "type": "bigint",
+            "default": null,
+            "not_null": false
+          },
+          {
+            "name": "rows",
+            "type": "bigint",
+            "default": null,
+            "not_null": false
+          },
+          {
+            "name": "snapshot_begin_ts",
+            "type": "bigint",
+            "default": null,
+            "not_null": false
+          },
+          {
+            "name": "snapshot_end_ts",
+            "type": "bigint",
+            "default": null,
+            "not_null": false
+          }
+        ],
+        "constraints": [],
+        "in_extension_schema": true
+      },
+      {
+        "kind": "v",
+        "name": "synchdb_state_view",
+        "columns": [
+          {
+            "name": "name",
+            "type": "text",
+            "default": null,
+            "not_null": false
+          },
+          {
+            "name": "connector_type",
+            "type": "text",
+            "default": null,
+            "not_null": false
+          },
+          {
+            "name": "pid",
+            "type": "integer",
+            "default": null,
+            "not_null": false
+          },
+          {
+            "name": "stage",
+            "type": "text",
+            "default": null,
+            "not_null": false
+          },
+          {
+            "name": "state",
+            "type": "text",
+            "default": null,
+            "not_null": false
+          },
+          {
+            "name": "err",
+            "type": "text",
+            "default": null,
+            "not_null": false
+          },
+          {
+            "name": "last_dbz_offset",
+            "type": "text",
+            "default": null,
+            "not_null": false
+          }
+        ],
+        "constraints": [],
+        "in_extension_schema": true
+      }
+    ]
+  }
+}
