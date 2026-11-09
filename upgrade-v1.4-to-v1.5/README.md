@@ -19,6 +19,8 @@ Keep the old PostgreSQL instance running until the automatic script stops it. Do
 
 For a step-by-step maintenance procedure, use [Manual upgrade](manual-upgrade.md). Choose one procedure for an upgrade; do not insert manual installation or import operations into a running automatic upgrade.
 
+To practice from source checkout through old synchronization, manual upgrade, and data verification on an isolated local environment, use [Local MySQL rehearsal](mysql-local-rehearsal.md).
+
 ## Migration stages
 
 | Stage | What you do |

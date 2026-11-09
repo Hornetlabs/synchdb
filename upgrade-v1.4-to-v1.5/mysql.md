@@ -6,6 +6,8 @@ The SynchDB release changes from **v1.4 to v1.5**. The extension version recorde
 
 Follow the automatic procedure below, together with the [automatic upgrade guide](automatic-upgrade.md). If you need to execute individual maintenance steps, use the [manual upgrade guide](manual-upgrade.md) instead. Do not mix the two procedures during one execution.
 
+For a complete isolated exercise on this machine, including source checkout, compilation, v1.4 synchronization, manual upgrade, and data checks, use [Local MySQL rehearsal](mysql-local-rehearsal.md).
+
 ## Stage 1: check MySQL and the existing connector
 
 **Run on the MySQL source, as the source database administrator:**
