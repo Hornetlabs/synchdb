@@ -222,7 +222,6 @@ static void publish_worker_run(int connectorId, SynchdbWorkerRun *run,
 		const SynchdbRunSpec *spec, const SynchdbRequest *consumed_request);
 static void prepare_bgw(BackgroundWorker *worker, const SynchdbRunSpec *spec, const SynchdbRunHandle *handle);
 static bool worker_should_stop(void);
-static int32 start_registered_worker(const SynchdbRunSpec *spec);
 static const char *connectorStateAsString(ConnectorState state);
 static void reset_shm_request_state(int connectorId);
 static int dbz_engine_set_offset(ConnectorType connectorType, char *db, char *offset, char *file);
@@ -2686,25 +2685,6 @@ get_shm_connector_name_by_id(int connectorId)
 }
 
 /*
- * get_shm_conn_user_by_id - Get the username associated with connector id
- *
- * This method gets the username value of the given connector from shared memory
- *
- * @param connectorId: Connector ID of interest
- */
-const char *
-get_shm_connector_user_by_id(int connectorId)
-{
-	static char value[SYNCHDB_ERRMSG_SIZE];
-	SynchdbRunView view;
-
-	strlcpy(value, "no user", sizeof(value));
-	if (read_connector_view(connectorId, &view) && view.user[0] != '\0')
-		strlcpy(value, view.user, sizeof(value));
-	return value;
-}
-
-/*
  * get_shm_ora_compat - check if we are running against oracle compatible ivorysql
  *
  * This method returns true if we are in oracle compatible mode, false otherwise
@@ -3358,103 +3338,47 @@ synchdb_control_build_spec(const char *name, const char *mode, Jsonb *options,
 }
 
 static int32
-start_registered_worker(const SynchdbRunSpec *spec)
+enqueue_start(const char *name, const char *mode)
 {
-    return synchdb_control_receipt(synchdb_control_enqueue(spec->connection.name,"START",spec,NULL));
+	ConnectionInfo connection = {0};
+	SynchdbRunSpec run;
+	char *connector = NULL;
+	ConnectorType type;
+
+	if (ra_getConninfoByName(name, &connection, &connector) != 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("connection name does not exist: %s", name),
+				 errhint("use synchdb_add_conninfo to add one first")));
+	type = fc_get_connector_type(connector);
+#ifdef WITH_OLR
+	if (type == TYPE_OLR && (connection.olr.olr_host[0] == '\0' ||
+							connection.olr.olr_source[0] == '\0' ||
+							connection.olr.olr_port <= 0))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("OLR conninfo is missing"),
+				 errhint("use synchdb_add_olr_conninfo to add it")));
+#endif
+	if (!pg_strcasecmp(mode, "schemasync"))
+	{
+		mode = "no_data";
+		connection.flag |= CONNFLAG_SCHEMA_SYNC_MODE;
+	}
+	build_run_spec(&run, &connection, type, mode);
+	return synchdb_control_receipt(synchdb_control_enqueue(connection.name, "START", &run, NULL));
 }
 
-/*
- * synchdb_start_engine_bgw_snapshot_mode
- *
- * This function starts a connector with a custom snapshot mode
- */
 Datum
 synchdb_start_engine_bgw_snapshot_mode(PG_FUNCTION_ARGS)
 {
-	ConnectionInfo connInfo = {0};
-	SynchdbRunSpec run;
-	char *connector = NULL;
-	int ret = -1;
-	char * _snapshotMode = "initial";
-
-	/* Parse input arguments */
-	Name name = PG_GETARG_NAME(0);
-	Name snapshotmode = PG_GETARG_NAME(1);
-
-	ret = ra_getConninfoByName(NameStr(*name), &connInfo, &connector);
-	if (ret)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("[synchdb_start_engine_bgw_snapshot_mode] connection name does not exist: %s", NameStr(*name)),
-				 errhint("use synchdb_add_conninfo to add one first")));
-
-	_snapshotMode = NameStr(*snapshotmode);
-	if (!strcasecmp(_snapshotMode, "schemasync"))
-	{
-		_snapshotMode = "no_data";
-		connInfo.flag |= CONNFLAG_SCHEMA_SYNC_MODE;
-	}
-
-
-#ifdef WITH_OLR
-	/* check if OLR conninfo exists and warn user to add it as needed */
-	if (fc_get_connector_type(connector) == TYPE_OLR &&
-		(strlen(connInfo.olr.olr_host) == 0 ||
-		strlen(connInfo.olr.olr_source) == 0 ||
-		connInfo.olr.olr_port <= 0))
-	{
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("OLR conninfo is missing"),
-				 errhint("use synchdb_add_olr_conninfo to add it")));
-	}
-#endif
-	build_run_spec(&run, &connInfo, fc_get_connector_type(connector), _snapshotMode);
-
-	PG_RETURN_INT32(start_registered_worker(&run));
+	PG_RETURN_INT32(enqueue_start(NameStr(*PG_GETARG_NAME(0)), NameStr(*PG_GETARG_NAME(1))));
 }
 
-/*
- * synchdb_start_engine_bgw
- *
- * This function starts a connector with the default initial snapshot mode
- */
 Datum
 synchdb_start_engine_bgw(PG_FUNCTION_ARGS)
 {
-	ConnectionInfo connInfo = {0};
-	SynchdbRunSpec run;
-	char *connector = NULL;
-	int ret = -1;
-	/* By default, we use snapshot mode = initial */
-	char * snapshotMode = "initial";
-
-	/* Parse input arguments */
-	Name name = PG_GETARG_NAME(0);
-
-	ret = ra_getConninfoByName(NameStr(*name), &connInfo, &connector);
-	if (ret)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("[synchdb_start_engine_bgw] connection name does not exist: %s", NameStr(*name)),
-				 errhint("use synchdb_add_conninfo to add one first")));
-
-#ifdef WITH_OLR
-	/* check if OLR conninfo exists and warn user to add it as needed */
-	if (fc_get_connector_type(connector) == TYPE_OLR &&
-		(strlen(connInfo.olr.olr_host) == 0 ||
-		strlen(connInfo.olr.olr_source) == 0 ||
-		connInfo.olr.olr_port <= 0))
-	{
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("OLR conninfo is missing"),
-				 errhint("use synchdb_add_olr_conninfo to add it")));
-	}
-#endif
-	build_run_spec(&run, &connInfo, fc_get_connector_type(connector), snapshotMode);
-
-	PG_RETURN_INT32(start_registered_worker(&run));
+	PG_RETURN_INT32(enqueue_start(NameStr(*PG_GETARG_NAME(0)), "initial"));
 }
 
 /*

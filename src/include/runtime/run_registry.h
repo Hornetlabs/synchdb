@@ -46,7 +46,6 @@ typedef struct SynchdbRunView
 	ConnectorStage stage;
 	ConnectorType type;
 	char name[SYNCHDB_CONNINFO_NAME_SIZE];
-	char user[SYNCHDB_CONNINFO_USERNAME_SIZE];
 	char errmsg[SYNCHDB_ERRMSG_SIZE];
 	char dbzoffset[SYNCHDB_OFFSET_SIZE];
 	bool isOraCompat;
@@ -104,9 +103,6 @@ extern bool synchdb_registry_cancel(SynchdbSharedState *state, const SynchdbRunH
 extern bool synchdb_registry_find_run(SynchdbSharedState *state, const SynchdbConnectorKey *key,
                                      SynchdbRunHandle *run);
 extern bool synchdb_registry_run_active(SynchdbSharedState *state, const SynchdbRunHandle *run);
-/* Unlike run_active, this also accepts the same generation's FREE display row. */
-extern bool synchdb_registry_run_unchanged(SynchdbSharedState *state, const SynchdbRunHandle *run,
-                                          const SynchdbConnectorKey *key);
 extern bool synchdb_registry_owned(SynchdbSharedState *state, const SynchdbWorkerOwner *owner);
 extern SynchdbRunGate synchdb_registry_gate(SynchdbSharedState *state, const SynchdbWorkerOwner *owner);
 extern void synchdb_registry_cleanup_failed(SynchdbSharedState *state,

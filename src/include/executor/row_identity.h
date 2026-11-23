@@ -4,6 +4,7 @@
 
 #include "postgres.h"
 #include "access/attnum.h"
+#include "executor/target_change.h"
 #include "nodes/bitmapset.h"
 #include "utils/relcache.h"
 
@@ -30,5 +31,8 @@ typedef struct SynchdbRowIdentity
  * Result belongs to CurrentMemoryContext; the index lock lasts to transaction end.
  * Until source old-field provenance is available, identity uses the PK columns. */
 extern SynchdbRowIdentity *synchdb_resolve_row_identity(Relation relation);
+
+extern SynchdbRowIdentity *synchdb_validate_row_identity(Relation relation,
+														const SynchdbTargetChange *change);
 
 #endif /* SYNCHDB_ROW_IDENTITY_H */

@@ -20,7 +20,6 @@ registry_copy_view(const SynchdbSharedState *state, int slot, SynchdbRunView *vi
 	view->stage = entry->stage;
 	view->type = entry->type;
 	memcpy(view->name, entry->conninfo.name, sizeof(view->name));
-	memcpy(view->user, entry->conninfo.user, sizeof(view->user));
 	memcpy(view->errmsg, entry->errmsg, sizeof(view->errmsg));
 	memcpy(view->dbzoffset, entry->dbzoffset, sizeof(view->dbzoffset));
 	view->isOraCompat = entry->conninfo.isOraCompat;

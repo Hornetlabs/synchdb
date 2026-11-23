@@ -502,30 +502,32 @@ public class DebeziumRunner {
 					break;
 				}
 				case TYPE_ORACLE:
+				case TYPE_OPENLOG_REPLICATOR:
 				{
-			        props.setProperty("connector.class", "io.debezium.connector.oracle.OracleConnector");
-
-	                props.setProperty("database.dbname", myParameters.database);
-					if (myParameters.database.equals("null"))
-	                    logger.warn("database is null - skip setting database.include.list property");
-	                else
-	                {
-	                    /* srcdb may be in "CDB/PDB" format; split if a slash is present */
-	                    int slashIdx = myParameters.database.indexOf('/');
-	                    if(slashIdx > 0){
-	                        String cdb = myParameters.database.substring(0, slashIdx);
-	                        String pdb = myParameters.database.substring(slashIdx + 1);
-	                        props.setProperty("database.dbname", cdb);
-	                        props.setProperty("database.pdb.name", pdb);
-	                        logger.info("Oracle CDB/PDB mode: dbname=" + cdb + " pdb.name=" + pdb);
-	                    }else{
-	                        props.setProperty("database.dbname", myParameters.database);
-	                    }
-	                }
-					/* limit to this Oracle user's schema for now so we do not replicate tables from other schemas */
+					props.setProperty("connector.class", "io.debezium.connector.oracle.OracleConnector");
+					String database = myParameters.database;
+					int slash = database.indexOf('/');
+					if (slash > 0)
+					{
+						String cdb = database.substring(0, slash);
+						String pdb = database.substring(slash + 1);
+						props.setProperty("database.dbname", cdb);
+						props.setProperty("database.pdb.name", pdb);
+						logger.info("Oracle CDB/PDB mode: dbname=" + cdb + " pdb.name=" + pdb);
+					}
+					else
+					{
+						props.setProperty("database.dbname", database);
+						if (database.equals("null"))
+							logger.warn("database is null - skip setting database.include.list property");
+					}
 					props.setProperty("schema.include.list", myParameters.srcschema);
 					props.setProperty("lob.enabled", "true");
 					props.setProperty("unavailable.value.placeholder", "__synchdb_unavailable_value");
+
+					/* Native OLR uses Debezium only for its initial snapshot. */
+					if (myParameters.connectorType == TYPE_OPENLOG_REPLICATOR)
+						break;
 
 					/* openlog replicator - via debezium */
 					if (myParameters.olrHost != null && myParameters.olrSource != null && myParameters.olrPort > 0)
@@ -535,8 +537,8 @@ public class DebeziumRunner {
 						props.setProperty("openlogreplicator.port", String.valueOf(myParameters.olrPort));
 						props.setProperty("database.connection.adapter", "olr");
 					}
-			else
-			logger.warn("olrHost is null - skip setting Openlog Replicator property");
+					else
+						logger.warn("olrHost is null - skip setting Openlog Replicator property");
 					if (myParameters.logminerStreamMode != null)
 					{
 						props.setProperty("database.connection.adapter", myParameters.logminerStreamMode);
@@ -553,34 +555,6 @@ public class DebeziumRunner {
 					}
 					break;
 				}
-				case TYPE_OPENLOG_REPLICATOR:
-	            {
-					/* openlog replicator - native. Rely on debezium for initial snapshot only */
-	                props.setProperty("connector.class", "io.debezium.connector.oracle.OracleConnector");
-
-	                props.setProperty("database.dbname", myParameters.database);
-	                if (myParameters.database.equals("null"))
-	                    logger.warn("database is null - skip setting database.include.list property");
-	                else
-	                {
-	                    /* srcdb may be in "CDB/PDB" format; split if a slash is present */
-	                    int slashIdx = myParameters.database.indexOf('/');
-	                    if(slashIdx > 0){
-	                        String cdb = myParameters.database.substring(0, slashIdx);
-	                        String pdb = myParameters.database.substring(slashIdx + 1);
-	                        props.setProperty("database.dbname", cdb);
-	                        props.setProperty("database.pdb.name", pdb);
-	                        logger.info("Oracle CDB/PDB mode: dbname=" + cdb + " pdb.name=" + pdb);
-	                    }else{
-	                        props.setProperty("database.dbname", myParameters.database);
-	                    }
-	                }
-	                /* limit to this Oracle user's schema for now so we do not replicate tables from other schemas */
-	                props.setProperty("schema.include.list", myParameters.srcschema);
-	                props.setProperty("lob.enabled", "true");
-	                props.setProperty("unavailable.value.placeholder", "__synchdb_unavailable_value");
-	                break;
-	            }
 				case TYPE_SQLSERVER:
 				{
 			        props.setProperty("connector.class", "io.debezium.connector.sqlserver.SqlServerConnector");

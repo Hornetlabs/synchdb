@@ -209,14 +209,12 @@ void fc_deinitDataCache(void);
 void fc_resetDataCache(void);
 void fc_ensureDataCache(void);
 bool fc_load_objmap(const char * name, ConnectorType connectorType);
-char * escapeSingleQuote(const char * in, bool addquote);
-int getPathElementString(Jsonb * jb, char * path, StringInfoData * strinfoout, bool removequotes);
-void remove_double_quotes(StringInfoData * str);
-bool find_exact_string_match(const char * line, const char * wordtofind);
 char * transform_object_name(const char * objid, const char * objtype);
 void splitIdString(char * id, char ** db, char ** schema, char ** table, bool usedb);
 int list_sort_cmp(const ListCell *a, const ListCell *b);
-PG_DDL * convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type);
+#ifdef WITH_OLR
+PG_DDL *fc_convert_olr_ddl(DBZ_DDL *dbzddl);
+#endif
 void updateSynchdbAttribute(DBZ_DDL * dbzddl, PG_DDL * pgddl, ConnectorType conntype, const char * name);
 PG_DML * convert2PGDML(DBZ_DML * dbzdml, ConnectorType type);
 SynchdbTargetColumn *fc_convert_target_column(DBZ_DML_COLUMN_VALUE *source,

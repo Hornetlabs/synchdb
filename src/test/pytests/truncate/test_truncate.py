@@ -327,6 +327,19 @@ def test_native_truncate_followed_by_mapped_insert(db, schema, table):
 
 
 @pytest.mark.skipif(not WITH_OLR, reason="requires SYNCHDB_TEST_WITH_OLR=1")
+def test_native_delete_with_object_key(db):
+    db.execute("CREATE TABLE fixture.object_keys(id jsonb PRIMARY KEY)")
+    db.execute("INSERT INTO fixture.object_keys VALUES ('{\"part\": 42}'), ('{\"part\": 43}')")
+    record = native()
+    record["payload"][0] = {"op": "d", "schema": {
+        "owner": "SRC", "table": "ITEMS", "columns": [
+            {"name": "ID", "type": "varchar2", "nullable": False}]},
+        "before": {"ID": {"part": 42}}}
+    apply(db, record, native=True, mapped="fixture.object_keys")
+    assert rows(db, "fixture.object_keys") == [({"part": 43},)]
+
+
+@pytest.mark.skipif(not WITH_OLR, reason="requires SYNCHDB_TEST_WITH_OLR=1")
 def test_native_keyword_as_table_name(db):
     db.execute("CREATE TABLE fixture.reuse(id int); INSERT INTO fixture.reuse VALUES(2)")
     assert apply(db, native("TRUNCATE TABLE SRC.REUSE DROP STORAGE", "REUSE"), native=True)["truncates"] == 1

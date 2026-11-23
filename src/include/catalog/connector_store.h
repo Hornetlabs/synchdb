@@ -21,8 +21,6 @@
 extern bool synchdb_connector_store_get(const char *name,
 										ConnectionInfo *out, char **connector,
 										MemoryContext result_context);
-extern void synchdb_connector_store_list_active(char ***out, int *numout,
-											MemoryContext result_context);
 /* Returns whether one connector row was updated under caller privileges. */
 extern bool synchdb_connector_store_set_active(const char *name, bool active);
 

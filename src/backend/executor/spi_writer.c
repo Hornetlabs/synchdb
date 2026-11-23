@@ -181,38 +181,6 @@ execute_identity_guarded(const char *query, SpiRowParameters *parameters,
 	return status;
 }
 
-/* Validate the exact identity selected while the event was bound. */
-static SynchdbRowIdentity *
-validate_identity(Relation relation, const SynchdbTargetChange *change)
-{
-	SynchdbRowIdentity *identity = synchdb_resolve_row_identity(relation);
-	Bitmapset *provided = NULL;
-	ListCell *cell;
-
-	if (change->identity_index_oid != identity->index_oid)
-		ereport(ERROR,
-				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-				 errmsg("target row identity changed after binding")));
-	foreach(cell, change->columnValuesBefore)
-	{
-		const SynchdbTargetColumn *column = lfirst(cell);
-		int member = column->position - FirstLowInvalidHeapAttributeNumber;
-
-		if (column->is_null || !bms_is_member(member, identity->attributes))
-			ereport(ERROR,
-					(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
-					 errmsg("target identity must contain only nonnull key fields")));
-		provided = bms_add_member(provided, member);
-	}
-	if (bms_is_empty(identity->attributes) ||
-		!bms_equal(identity->attributes, provided))
-		ereport(ERROR,
-				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
-				 errmsg("source row does not provide the complete target identity")));
-	bms_free(provided);
-	return identity;
-}
-
 static void
 append_parameter(StringInfo query, SpiRowParameters *parameters,
 				 const SynchdbTargetColumn *column)
@@ -297,7 +265,7 @@ synchdb_spi_writer_apply(const SynchdbTargetChange *change)
 	relation = table_open(change->tableoid, RowExclusiveLock);
 	synchdb_target_validate_change(relation, change);
 	if (change->op == 'u' || change->op == 'd')
-		identity = validate_identity(relation, change);
+		identity = synchdb_validate_row_identity(relation, change);
 	parameters.capacity = list_length(change->columnValuesAfter) +
 		(identity ? identity->nkeys : 0);
 	if (parameters.capacity > 0)

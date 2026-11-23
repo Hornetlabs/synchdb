@@ -22,8 +22,12 @@
 #include "converter/value_codec.h"
 
 int64
-fc_value_int64_from_bytes(const unsigned char *bytes, int len)
+fc_value_int64_from_base64(const char *input)
 {
+	int length = strlen(input);
+	int capacity = pg_b64_dec_len(length);
+	unsigned char *bytes = palloc(capacity);
+	int len = synchdb_pg_base64_decode(input, length, bytes, capacity);
 	uint64 bits;
 	int64 result;
 	int i;
@@ -36,6 +40,7 @@ fc_value_int64_from_bytes(const unsigned char *bytes, int len)
 	bits = (bytes[0] & 0x80) ? UINT64_MAX : 0;
 	for (i = 0; i < len; i++)
 		bits = (bits << 8) | bytes[i];
+	pfree(bytes);
 	memcpy(&result, &bits, sizeof(result));
 	return result;
 }
@@ -227,14 +232,8 @@ epoch_microseconds(int64 input, SynchdbValueTimeUnit unit)
 	return result;
 }
 
-static char *
-finish_value(const char *value, bool quote)
-{
-	return quote ? quote_literal_cstr(value) : pstrdup(value);
-}
-
 char *
-fc_value_date(int64 input, SynchdbValueTimeUnit unit, bool quote)
+fc_value_date(int64 input, SynchdbValueTimeUnit unit)
 {
 	int64 days;
 	int64 pg_days;
@@ -254,12 +253,12 @@ fc_value_date(int64 input, SynchdbValueTimeUnit unit, bool quote)
 	j2date((int) (days + UNIX_EPOCH_JDATE),
 		   &tm.tm_year, &tm.tm_mon, &tm.tm_mday);
 	EncodeDateOnly(&tm, USE_ISO_DATES, buf);
-	return finish_value(buf, quote);
+	return pstrdup(buf);
 }
 
 char *
 fc_value_timestamp(int64 input, SynchdbValueTimeUnit unit,
-				   int32 typmod, bool quote)
+				   int32 typmod)
 {
 	Timestamp ts = epoch_microseconds(input, unit);
 	const int64 epoch_offset =
@@ -283,11 +282,11 @@ fc_value_timestamp(int64 input, SynchdbValueTimeUnit unit,
 				(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
 				 errmsg("timestamp value is out of range")));
 	EncodeDateTime(&tm, fsec, false, 0, NULL, USE_ISO_DATES, buf);
-	return finish_value(buf, quote);
+	return pstrdup(buf);
 }
 
 char *
-fc_value_time(int64 input, SynchdbValueTimeUnit unit, int32 typmod, bool quote)
+fc_value_time(int64 input, SynchdbValueTimeUnit unit, int32 typmod)
 {
 	TimeADT time;
 	struct pg_tm tm;
@@ -313,5 +312,5 @@ fc_value_time(int64 input, SynchdbValueTimeUnit unit, int32 typmod, bool quote)
 	tm.tm_sec = seconds % SECS_PER_MINUTE;
 	fsec = time % USECS_PER_SEC;
 	EncodeTimeOnly(&tm, fsec, false, 0, USE_ISO_DATES, buf);
-	return finish_value(buf, quote);
+	return pstrdup(buf);
 }

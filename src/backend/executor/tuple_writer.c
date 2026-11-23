@@ -45,42 +45,6 @@ typedef struct TupleStatement
 } TupleStatement;
 
 /*
- * Use the same selected identity as binding and SPI. PostgreSQL's index lookup
- * compares the entire row when passed an index other than its chosen identity,
- * so a sparse search slot must always use the resolver's selected index.
- */
-static Oid
-tuple_identity_index(Relation relation, const SynchdbTargetChange *change)
-{
-	SynchdbRowIdentity *identity = synchdb_resolve_row_identity(relation);
-	Bitmapset *provided = NULL;
-	ListCell *cell;
-
-	if (change->identity_index_oid != identity->index_oid)
-		ereport(ERROR,
-				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-				 errmsg("target row identity changed after binding")));
-	foreach(cell, change->columnValuesBefore)
-	{
-		const SynchdbTargetColumn *column = lfirst(cell);
-		int member = column->position - FirstLowInvalidHeapAttributeNumber;
-
-		if (column->is_null || !bms_is_member(member, identity->attributes))
-			ereport(ERROR,
-					(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
-					 errmsg("target identity must contain only nonnull key fields")));
-		provided = bms_add_member(provided, member);
-	}
-	if (bms_is_empty(identity->attributes) ||
-		!bms_equal(identity->attributes, provided))
-		ereport(ERROR,
-				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
-				 errmsg("source row does not provide the complete target identity")));
-	bms_free(provided);
-	return identity->index_oid;
-}
-
-/*
  * Apply only provided fields. SQL NULL is a separate bit, independent of the
  * Datum bits; non-null Datums already passed target input and typmod checks.
  * The returned bitmap also distinguishes an explicit NULL from an omitted
@@ -89,48 +53,13 @@ tuple_identity_index(Relation relation, const SynchdbTargetChange *change)
 static Bitmapset *
 store_tuple_columns(TupleTableSlot *slot, List *columns)
 {
-	TupleDesc descriptor = slot->tts_tupleDescriptor;
 	Bitmapset *provided = NULL;
 	ListCell *cell;
 
 	foreach(cell, columns)
 	{
 		SynchdbTargetColumn *column = lfirst(cell);
-		Form_pg_attribute attribute;
-		int index;
-
-		if (column == NULL || column->position <= 0 ||
-			column->position > descriptor->natts)
-			ereport(ERROR,
-					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					 errmsg("invalid bound target column position")));
-		index = column->position - 1;
-		attribute = TupleDescAttr(descriptor, index);
-		if (bms_is_member(index, provided))
-			ereport(ERROR,
-					(errcode(ERRCODE_DUPLICATE_COLUMN),
-					 errmsg("target column \"%s\" is provided more than once",
-							NameStr(attribute->attname))));
-		if (attribute->attisdropped || attribute->attgenerated ||
-			attribute->attidentity == ATTRIBUTE_IDENTITY_ALWAYS)
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("cannot provide a dropped, generated or identity-always target column")));
-		if (!OidIsValid(column->datatype) ||
-			column->datatype != attribute->atttypid ||
-			column->typmod != attribute->atttypmod ||
-			column->typbyval != attribute->attbyval ||
-			column->name == NULL ||
-			strcmp(column->name, NameStr(attribute->attname)) != 0)
-			ereport(ERROR,
-					(errcode(ERRCODE_DATATYPE_MISMATCH),
-					 errmsg("bound type for target column \"%s\" does not match its current type",
-							NameStr(attribute->attname))));
-		if (!column->is_null && !column->typbyval &&
-			DatumGetPointer(column->value) == NULL)
-			ereport(ERROR,
-					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					 errmsg("non-null target value has no Datum storage")));
+		int index = column->position - 1;
 
 		provided = bms_add_member(provided, index);
 		slot->tts_isnull[index] = column->is_null;
@@ -443,7 +372,7 @@ run_tuple_statement(TupleStatement *statement, const SynchdbTargetChange *change
 	ExecOpenIndices(statement->result, false);
 	if (operation != CMD_INSERT)
 	{
-		identity = tuple_identity_index(statement->relation, change);
+		identity = synchdb_validate_row_identity(statement->relation, change)->index_oid;
 		found = RelationFindReplTupleByIndex(statement->relation, identity,
 										   LockTupleExclusive, statement->searchslot,
 										   statement->oldslot);

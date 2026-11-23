@@ -171,7 +171,7 @@ bind_array_text(const SynchdbDbzField *field, Oid element_type, int32 typmod,
 {
 	JsonbContainer *array = field->value.raw.val.binary.data;
 	JsonbIterator *iterator = JsonbIteratorInit(array);
-	SynchdbDbzField *item = synchdb_dbz_array_element_field(field);
+	SynchdbDbzField item;
 	JsonbValue raw;
 	JsonbIteratorToken token;
 	StringInfoData output;
@@ -184,6 +184,10 @@ bind_array_text(const SynchdbDbzField *field, Oid element_type, int32 typmod,
 	bool first = true;
 
 	check_stack_depth();
+	if (field->item_schema == NULL)
+		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						errmsg("source array column \"%s\" requires an element schema", field->name)));
+	item = *field->item_schema;
 	get_type_io_data(element_type, IOFunc_input, &length, &by_value,
 					 &alignment, &delimiter, &input_parameter, &input_function);
 	initStringInfo(&output);
@@ -200,29 +204,29 @@ bind_array_text(const SynchdbDbzField *field, Oid element_type, int32 typmod,
 		if (!first)
 			appendStringInfoChar(&output, delimiter);
 		first = false;
-		synchdb_dbz_decode_element_value(item, &raw);
-		if (item->value.kind == SYNCHDB_DBZ_VALUE_NULL)
+		synchdb_dbz_decode_element_value(&item, &raw);
+		if (item.value.kind == SYNCHDB_DBZ_VALUE_NULL)
 		{
 			appendStringInfoString(&output, "NULL");
 			continue;
 		}
-		if (item->value.kind == SYNCHDB_DBZ_VALUE_ARRAY)
+		if (item.value.kind == SYNCHDB_DBZ_VALUE_ARRAY)
 		{
-			converted = bind_array_text(item, element_type, typmod, type);
+			converted = bind_array_text(&item, element_type, typmod, type);
 			appendStringInfoString(&output, converted);
 			pfree(converted);
 			continue;
 		}
-		scalar.name = item->name;
+		scalar.name = item.name;
 		scalar.datatype = element_type;
 		scalar.typemod = typmod;
 		scalar.typname = format_type_be(element_type);
 		get_type_category_preferred(element_type, &scalar.typcategory,
 								   &scalar.typispreferred);
-		scalar.dbztype = bind_wire_type(item->wire_type);
-		scalar.timerep = bind_logical_type(item->logical_name);
-		scalar.scale = bind_scale(item);
-		scalar.value = bind_value(item);
+		scalar.dbztype = bind_wire_type(item.wire_type);
+		scalar.timerep = bind_logical_type(item.logical_name);
+		scalar.scale = bind_scale(&item);
+		scalar.value = bind_value(&item);
 		converted = fc_convert_value_text(&scalar, type);
 		appendStringInfoChar(&output, '"');
 		for (at = converted; *at; at++)

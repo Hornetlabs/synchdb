@@ -385,55 +385,6 @@ synchdb_connector_store_set_active_identity(const SynchdbConnectorKey *key,
 	return found;
 }
 
-void
-synchdb_connector_store_list_active(char ***out, int *numout,
-									MemoryContext result_context)
-{
-	StringInfoData query;
-	char **names = NULL;
-	char *relation;
-	int count;
-	int i;
-
-	if (!out || !numout || !result_context)
-		elog(ERROR, "invalid connector store list arguments");
-	*out = NULL;
-	*numout = 0;
-	synchdb_store_connect();
-	relation = synchdb_store_relation(SYNCHDB_CONNINFO_TABLE, AccessShareLock);
-	initStringInfo(&query);
-	appendStringInfo(&query, "SELECT name FROM %s WHERE isactive", relation);
-	if (SPI_execute(query.data, true, 0) != SPI_OK_SELECT)
-		elog(ERROR, "could not list active connector configurations");
-	if (SPI_processed > INT_MAX || SPI_processed > MaxAllocSize / sizeof(char *))
-		elog(ERROR, "too many active connector names");
-	count = (int) SPI_processed;
-	if (count > 0)
-	{
-		char **checked_names = palloc(count * sizeof(char *));
-
-		/* Invalid later rows must not strand partial results in a long-lived
-		 * caller context.  Validate the complete SPI-owned list first. */
-		for (i = 0; i < count; i++)
-		{
-			char *name = connector_store_text(SPI_tuptable->vals[i],
-												 SPI_tuptable->tupdesc, 1, "name", true);
-
-			if (strlen(name) >= SYNCHDB_CONNINFO_NAME_SIZE)
-				ereport(ERROR,
-						(errcode(ERRCODE_STRING_DATA_RIGHT_TRUNCATION),
-						 errmsg("connector name exceeds its supported length")));
-			checked_names[i] = name;
-		}
-		names = MemoryContextAllocZero(result_context, count * sizeof(char *));
-		for (i = 0; i < count; i++)
-			names[i] = MemoryContextStrdup(result_context, checked_names[i]);
-	}
-	synchdb_store_finish();
-	*out = names;
-	*numout = count;
-}
-
 bool
 synchdb_connector_store_set_active(const char *name, bool active)
 {

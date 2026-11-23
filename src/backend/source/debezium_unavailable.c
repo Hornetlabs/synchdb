@@ -21,19 +21,14 @@ static bool
 array_item_is(const SynchdbDbzField *field, const char *wire_type,
 			  const char *logical_name)
 {
-	JsonbValue buffer;
-	JsonbValue *member;
+	const SynchdbDbzField *item = field->item_schema;
 
-	/* Old generic JSON array schemas did not retain items. Do not let that
-	 * ambiguity turn a known placeholder representation into target data. */
-	if (field->item_schema == NULL)
+	/* Older generic JSON array schemas can omit items. */
+	if (item == NULL)
 		return true;
-	member = getKeyJsonValueFromContainer(&field->item_schema->root, "type", 4, &buffer);
-	if (!placeholder_string(member, wire_type))
-		return false;
-	member = getKeyJsonValueFromContainer(&field->item_schema->root, "name", 4, &buffer);
-	return logical_name ? member && placeholder_string(member, logical_name) :
-		member == NULL || member->type == jbvNull;
+	return strcmp(item->wire_type, wire_type) == 0 &&
+		(logical_name ? item->logical_name && strcmp(item->logical_name, logical_name) == 0 :
+		 item->logical_name == NULL);
 }
 
 static bool

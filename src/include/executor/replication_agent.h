@@ -54,10 +54,6 @@ int ra_executePGDML(PG_DML * pgdml, ConnectorType type, SynchdbStatistics * myBa
 		bool isInSnapshot);
 int ra_getConninfoByName(const char * name, ConnectionInfo * conninfo, char ** connector);
 int ra_executeCommand(const char * query);
-/* Returned names and their array belong to the caller's memory context. */
-int ra_listConnInfoNames(char *** out, int * numout);
-/* Caller-context array; success includes an empty list. */
-int ra_listObjmaps(const char * name, ObjectMap ** out, int * numout);
 
 void destroyPGDDL(PG_DDL * ddlinfo);
 void destroyPGDML(PG_DML * dmlinfo);

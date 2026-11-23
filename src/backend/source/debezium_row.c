@@ -128,25 +128,13 @@ row_decode_field(JsonbContainer *schema, const char *element_name)
 	if (strcmp(field->wire_type, "array") == 0)
 	{
 		member = row_member(schema, "items", &buffer);
+		/* Validate nested schemas even for absent/null row images. */
 		if (member != NULL && member->type != jbvNull)
-		{
-			(void) row_object(member, "column schema.items");
-			field->item_schema = JsonbValueToJsonb(member);
-			/* Validate nested schemas even for absent/null row images. */
-			(void) row_decode_field(&field->item_schema->root, field->name);
-		}
+			field->item_schema = row_decode_field(row_object(member, "column schema.items"),
+												 field->name);
 	}
 	synchdb_dbz_validate_logical_schema(field, schema);
 	return field;
-}
-
-SynchdbDbzField *
-synchdb_dbz_array_element_field(const SynchdbDbzField *array)
-{
-	if (strcmp(array->wire_type, "array") != 0 || array->item_schema == NULL)
-		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						errmsg("source array column \"%s\" requires an element schema", array->name)));
-	return row_decode_field(&array->item_schema->root, array->name);
 }
 
 static void
@@ -280,7 +268,7 @@ row_decode_value(SynchdbDbzField *field, const JsonbValue *raw,
 		if (value->kind == SYNCHDB_DBZ_VALUE_ARRAY &&
 			strcmp(type, "array") == 0 && field->item_schema != NULL)
 		{
-			SynchdbDbzField *item = synchdb_dbz_array_element_field(field);
+			SynchdbDbzField item = *field->item_schema;
 			JsonbIterator *iterator = JsonbIteratorInit(raw->val.binary.data);
 			JsonbValue element;
 			JsonbIteratorToken token;
@@ -291,7 +279,7 @@ row_decode_value(SynchdbDbzField *field, const JsonbValue *raw,
 					CHECK_FOR_INTERRUPTS();
 					/* Top-level placeholder detection must not reinterpret
 					 * ordinary strings inside an available source array. */
-					row_decode_value(item, &element, "", '\0');
+					row_decode_value(&item, &element, "", '\0');
 				}
 		}
 	}

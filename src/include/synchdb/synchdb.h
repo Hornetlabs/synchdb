@@ -483,7 +483,6 @@ const char * get_shm_connector_state(int connectorId);
 void set_shm_dbz_offset(int connectorId);
 const char * get_shm_dbz_offset(int connectorId);
 const char * get_shm_connector_name_by_id(int connectorId);
-const char * get_shm_connector_user_by_id(int connectorId);
 ConnectorState get_shm_connector_state_enum(int connectorId);
 const char* connectorTypeToString(ConnectorType type);
 void set_shm_connector_stage(int connectorId, ConnectorStage stage);

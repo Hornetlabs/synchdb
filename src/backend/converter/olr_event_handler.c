@@ -1377,6 +1377,98 @@ end:
 	return olrddl;
 }
 
+/* Read each top-level field once. Nested objects remain one column value. */
+static List *
+olr_row_image(Jsonb *payload, const char *image_name, const char *table_id,
+			  const DataCacheEntry *cache)
+{
+	JsonbValue buffer;
+	JsonbValue *image = getKeyJsonValueFromContainer(&payload->root, image_name,
+													strlen(image_name), &buffer);
+	JsonbIterator *it;
+	JsonbIteratorToken token;
+	JsonbValue key;
+	List *columns = NIL;
+
+	if (!image || image->type != jbvBinary || !JsonContainerIsObject(image->val.binary.data))
+		return NIL;
+	it = JsonbIteratorInit(image->val.binary.data);
+	while ((token = JsonbIteratorNext(&it, &key, true)) != WJB_DONE)
+	{
+		DBZ_DML_COLUMN_VALUE *column;
+		NameOidEntry *target;
+		NameJsonposEntry *source;
+		JsonbValue value;
+		char *column_id;
+
+		if (token != WJB_KEY)
+			continue;
+		token = JsonbIteratorNext(&it, &value, true);
+		Assert(token == WJB_VALUE);
+		/* Native OLR has no array column codec. */
+		if (value.type == jbvBinary && JsonContainerIsArray(value.val.binary.data))
+			continue;
+
+		column = palloc0(sizeof(*column));
+		column->remoteColumnName = pnstrdup(key.val.string.val, key.val.string.len);
+		column_id = psprintf("%s.%s", table_id, column->remoteColumnName);
+		column->name = transform_object_name(column_id, "column");
+		pfree(column_id);
+		if (!column->name)
+		{
+			column->name = pstrdup(column->remoteColumnName);
+			fc_normalize_name(synchdb_letter_casing_strategy, column->name, strlen(column->name));
+		}
+		if (strlen(column->name) >= NAMEDATALEN)
+			ereport(ERROR, (errcode(ERRCODE_NAME_TOO_LONG),
+							errmsg("target column name exceeds PostgreSQL's identifier limit")));
+		target = hash_search(cache->typeidhash, column->name, HASH_FIND, NULL);
+		if (!target)
+			elog(ERROR, "cannot find data type for column %s. Non-existent column?", column->name);
+		source = fc_source_column_lookup(cache->namejsonposhash, column->remoteColumnName);
+		if (!source)
+		{
+			fc_invalidate_data_cache(&cache->key);
+			elog(ERROR, "cannot find olr json column schema data for column %s(%s). invalid json event?",
+				 column->name, column->remoteColumnName);
+		}
+		column->datatype = target->oid;
+		column->position = target->position;
+		column->typemod = target->typemod;
+		column->ispk = target->ispk;
+		column->typcategory = target->typcategory;
+		column->typispreferred = target->typispreferred;
+		column->typname = pstrdup(target->typname);
+		column->dbztype = source->dbztype;
+		column->timerep = source->timerep;
+		column->scale = source->scale;
+		switch (value.type)
+		{
+			case jbvNull:
+				column->is_null = true;
+				break;
+			case jbvString:
+				column->value = pnstrdup(value.val.string.val, value.val.string.len);
+				break;
+			case jbvNumeric:
+				column->value = DatumGetCString(DirectFunctionCall1(numeric_out,
+													 NumericGetDatum(value.val.numeric)));
+				break;
+			case jbvBool:
+				column->value = pstrdup(value.val.boolean ? "true" : "false");
+				break;
+			case jbvBinary:
+				column->value = JsonbToCString(NULL, value.val.binary.data, value.val.binary.len);
+				break;
+			default:
+				elog(ERROR, "unexpected OLR row value type: %d", value.type);
+		}
+		columns = lappend(columns, column);
+	}
+	list_sort(columns, list_sort_cmp);
+	return columns;
+}
+
 /*
  * parseOLRDML
  */
@@ -1387,13 +1479,11 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 	JsonbValue vbuf;
 	Jsonb * jbschema;
 	OLR_DML * olrdml = NULL;
-	StringInfoData strinfo, objid;
+	StringInfoData objid;
 	bool found;
 	HTAB * typeidhash;
-	SourceColumnCache * namejsonposhash;
 	HASHCTL hash_ctl;
 	NameOidEntry * entry;
-	NameJsonposEntry * entry2;
 	Relation rel;
 	TupleDesc tupdesc;
 	int attnum;
@@ -1444,7 +1534,6 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 	olrdml->op = op;
 
 	initStringInfo(&objid);
-	initStringInfo(&strinfo);
 	appendStringInfo(&objid, "%s.", db);
 
 	/* tm - only at first and last record within a batch */
@@ -1527,9 +1616,7 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 	if (found)
 	{
 		/* use the cached data type hash for lookup later */
-		typeidhash = cacheentry->typeidhash;
 		olrdml->tableoid = cacheentry->tableoid;
-		namejsonposhash = cacheentry->namejsonposhash;
 		olrdml->natts = cacheentry->natts;
 	}
 	else
@@ -1613,8 +1700,7 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 			PG_RE_THROW();
 		}
 		PG_END_TRY();
-		namejsonposhash = cacheentry->namejsonposhash;
-		if (!namejsonposhash)
+		if (!cacheentry->namejsonposhash)
 		{
 			/* dump the JSON change event as additional detail if available */
 			if (synchdb_log_event_on_error && g_eventStr != NULL)
@@ -1623,547 +1709,13 @@ parseOLRDML(Jsonb * jb, char op, Jsonb * payload, orascn * scn, orascn * c_scn, 
 			elog(ERROR, "cannot parse columns section of OLR change event JSON. Abort");
 		}
 	}
-	switch (olrdml->op)
-	{
-		case 'c':
-		{
-			/* parse after */
-			Jsonb * dmldata = NULL;
-			JsonbIterator *it;
-			JsonbValue v;
-			JsonbIteratorToken r;
-			char * key = NULL;
-			char * value = NULL;
-			bool value_is_null = false;
-			DBZ_DML_COLUMN_VALUE * colval = NULL;
-			Datum datum_elems[1] = {CStringGetTextDatum("after")};
-
-			dmldata = GET_JSONB_ELEM(payload, &datum_elems[0], 1);
-			if (dmldata)
-			{
-				int pause = 0;
-				it = JsonbIteratorInit(&dmldata->root);
-				while ((r = JsonbIteratorNext(&it, &v, false)) != WJB_DONE)
-				{
-					switch (r)
-					{
-						case WJB_BEGIN_OBJECT:
-							if (key != NULL)
-							{
-								pause = 1;
-							}
-							break;
-						case WJB_END_OBJECT:
-							if (pause)
-							{
-								pause = 0;
-								if (key)
-								{
-									int pathsize = strlen("after.") + strlen(key) + 1;
-									char * tmpPath = (char *) palloc0 (pathsize);
-									snprintf(tmpPath, pathsize, "after.%s", key);
-									if (getPathElementString(payload, tmpPath, &strinfo, false) == 0)
-										value = pstrdup(strinfo.data);
-									if(tmpPath)
-										pfree(tmpPath);
-								}
-							}
-							break;
-						case WJB_BEGIN_ARRAY:
-							if (key)
-							{
-								pfree(key);
-								key = NULL;
-							}
-							break;
-						case WJB_END_ARRAY:
-							break;
-						case WJB_KEY:
-							if (pause)
-								break;
-
-							key = pnstrdup(v.val.string.val, v.val.string.len);
-							value_is_null = false;
-							break;
-						case WJB_VALUE:
-						case WJB_ELEM:
-							if (pause)
-								break;
-							value_is_null = v.type == jbvNull;
-							switch (v.type)
-							{
-								case jbvNull:
-									value = pstrdup("NULL");
-									break;
-								case jbvString:
-									value = pnstrdup(v.val.string.val, v.val.string.len);
-									break;
-								case jbvNumeric:
-									value = DatumGetCString(DirectFunctionCall1(numeric_out, PointerGetDatum(v.val.numeric)));
-									break;
-								case jbvBool:
-									if (v.val.boolean)
-										value = pstrdup("true");
-									else
-										value = pstrdup("false");
-									break;
-								case jbvBinary:
-									value = pstrdup("NULL");
-									break;
-								default:
-									value = pstrdup("NULL");
-									break;
-							}
-						break;
-						default:
-							break;
-					}
-
-					/* check if we have a key - value pair */
-					if (key != NULL && value != NULL)
-					{
-						char * mappedColumnName = NULL;
-
-						StringInfoData colNameObjId;
-
-						colval = (DBZ_DML_COLUMN_VALUE *) palloc0(sizeof(DBZ_DML_COLUMN_VALUE));
-						colval->name = pstrdup(key);
-
-						/* a copy of original column name for expression rule lookup at later stage */
-						colval->remoteColumnName = pstrdup(colval->name);
-
-						fc_normalize_name(synchdb_letter_casing_strategy, colval->name, strlen(colval->name));
-						colval->is_null = value_is_null;
-						colval->value = value_is_null ? NULL : pstrdup(value);
-
-						/* transform the column name if needed */
-						initStringInfo(&colNameObjId);
-						appendStringInfo(&colNameObjId, "%s.%s", objid.data, colval->remoteColumnName);
-						mappedColumnName = transform_object_name(colNameObjId.data, "column");
-						if (mappedColumnName)
-						{
-							/* replace the column name with looked up value here */
-							pfree(colval->name);
-							colval->name = pstrdup(mappedColumnName);
-						}
-						if (colNameObjId.data)
-							pfree(colNameObjId.data);
-
-						/* look up its data type */
-						if (strlen(colval->name) >= NAMEDATALEN)
-							ereport(ERROR, (errcode(ERRCODE_NAME_TOO_LONG),
-										errmsg("target column name exceeds PostgreSQL's identifier limit")));
-						entry = (NameOidEntry *) hash_search(typeidhash, colval->name, HASH_FIND, &found);
-						if (found)
-						{
-							colval->datatype = entry->oid;
-							colval->position = entry->position;
-							colval->typemod = entry->typemod;
-							colval->ispk = entry->ispk;
-							colval->typcategory = entry->typcategory;
-							colval->typispreferred = entry->typispreferred;
-							colval->typname = pstrdup(entry->typname);
-						}
-						else
-							elog(ERROR, "cannot find data type for column %s. Non-existent column?", colval->name);
-
-						entry2 = fc_source_column_lookup(namejsonposhash, colval->remoteColumnName);
-
-						if (entry2)
-						{
-							colval->dbztype = entry2->dbztype;
-							colval->timerep = entry2->timerep;
-							colval->scale = entry2->scale;
-						}
-						else
-						{
-							fc_invalidate_data_cache(&cachekey);
-							elog(ERROR, "cannot find olr json column schema data for column %s(%s). invalid json event?",
-									colval->name, colval->remoteColumnName);
-						}
-
-
-						olrdml->columnValuesAfter = lappend(olrdml->columnValuesAfter, colval);
-						pfree(key);
-						pfree(value);
-						key = NULL;
-						value = NULL;
-					}
-				}
-			}
-			break;
-		}
-		case 'u':
-		{
-			/* parse before + after */
-			Jsonb * dmldata = NULL;
-			JsonbIterator *it;
-			JsonbValue v;
-			JsonbIteratorToken r;
-			char * key = NULL;
-			char * value = NULL;
-			bool value_is_null = false;
-			DBZ_DML_COLUMN_VALUE * colval = NULL;
-			Datum datum_elems_before[1] = {CStringGetTextDatum("before")};
-			Datum datum_elems_after[1] = {CStringGetTextDatum("after")};
-			int i = 0;
-
-			for (i = 0; i < 2; i++)
-			{
-				if (i == 0)
-					dmldata = GET_JSONB_ELEM(payload, &datum_elems_before[0], 1);
-				else
-					dmldata = GET_JSONB_ELEM(payload, &datum_elems_after[0], 1);
-				if (dmldata)
-				{
-					int pause = 0;
-					it = JsonbIteratorInit(&dmldata->root);
-					while ((r = JsonbIteratorNext(&it, &v, false)) != WJB_DONE)
-					{
-						switch (r)
-						{
-							case WJB_BEGIN_OBJECT:
-								if (key != NULL)
-								{
-									pause = 1;
-								}
-								break;
-							case WJB_END_OBJECT:
-								if (pause)
-								{
-									pause = 0;
-									if (key)
-									{
-										int pathsize = (i == 0 ? strlen("before.") + strlen(key) + 1 :
-												strlen("after.") + strlen(key) + 1 );
-										char * tmpPath = (char *) palloc0 (pathsize);
-										if (i == 0)
-											snprintf(tmpPath, pathsize, "before.%s", key);
-										else
-											snprintf(tmpPath, pathsize, "after.%s", key);
-										if (getPathElementString(payload, tmpPath, &strinfo, false) == 0)
-											value = pstrdup(strinfo.data);
-										if(tmpPath)
-											pfree(tmpPath);
-									}
-								}
-								break;
-							case WJB_BEGIN_ARRAY:
-								if (key)
-								{
-									pfree(key);
-									key = NULL;
-								}
-								break;
-							case WJB_END_ARRAY:
-								break;
-							case WJB_KEY:
-								if (pause)
-									break;
-
-								key = pnstrdup(v.val.string.val, v.val.string.len);
-							value_is_null = false;
-								break;
-							case WJB_VALUE:
-							case WJB_ELEM:
-								if (pause)
-									break;
-								value_is_null = v.type == jbvNull;
-							switch (v.type)
-								{
-									case jbvNull:
-										value = pstrdup("NULL");
-										break;
-									case jbvString:
-										value = pnstrdup(v.val.string.val, v.val.string.len);
-										break;
-									case jbvNumeric:
-										value = DatumGetCString(DirectFunctionCall1(numeric_out, PointerGetDatum(v.val.numeric)));
-										break;
-									case jbvBool:
-										if (v.val.boolean)
-											value = pstrdup("true");
-										else
-											value = pstrdup("false");
-										break;
-									case jbvBinary:
-										value = pstrdup("NULL");
-										break;
-									default:
-										value = pstrdup("NULL");
-										break;
-								}
-							break;
-							default:
-								break;
-						}
-
-						/* check if we have a key - value pair */
-						if (key != NULL && value != NULL)
-						{
-							char * mappedColumnName = NULL;
-
-							StringInfoData colNameObjId;
-
-							colval = (DBZ_DML_COLUMN_VALUE *) palloc0(sizeof(DBZ_DML_COLUMN_VALUE));
-							colval->name = pstrdup(key);
-
-							/* a copy of original column name for expression rule lookup at later stage */
-							colval->remoteColumnName = pstrdup(colval->name);
-
-							fc_normalize_name(synchdb_letter_casing_strategy, colval->name, strlen(colval->name));
-							colval->is_null = value_is_null;
-							colval->value = value_is_null ? NULL : pstrdup(value);
-
-							/* transform the column name if needed */
-							initStringInfo(&colNameObjId);
-							appendStringInfo(&colNameObjId, "%s.%s", objid.data, colval->remoteColumnName);
-							mappedColumnName = transform_object_name(colNameObjId.data, "column");
-							if (mappedColumnName)
-							{
-								/* replace the column name with looked up value here */
-								pfree(colval->name);
-								colval->name = pstrdup(mappedColumnName);
-							}
-							if (colNameObjId.data)
-								pfree(colNameObjId.data);
-
-							/* look up its data type */
-							if (strlen(colval->name) >= NAMEDATALEN)
-							ereport(ERROR, (errcode(ERRCODE_NAME_TOO_LONG),
-										errmsg("target column name exceeds PostgreSQL's identifier limit")));
-						entry = (NameOidEntry *) hash_search(typeidhash, colval->name, HASH_FIND, &found);
-							if (found)
-							{
-								colval->datatype = entry->oid;
-								colval->position = entry->position;
-								colval->typemod = entry->typemod;
-								colval->ispk = entry->ispk;
-								colval->typcategory = entry->typcategory;
-								colval->typispreferred = entry->typispreferred;
-								colval->typname = pstrdup(entry->typname);
-							}
-							else
-								elog(ERROR, "cannot find data type for column %s. Non-existent column?", colval->name);
-
-							entry2 = fc_source_column_lookup(namejsonposhash, colval->remoteColumnName);
-
-							if (entry2)
-							{
-								colval->dbztype = entry2->dbztype;
-								colval->timerep = entry2->timerep;
-								colval->scale = entry2->scale;
-							}
-							else
-							{
-								fc_invalidate_data_cache(&cachekey);
-								elog(ERROR, "cannot find olr json column schema data for column %s(%s). invalid json event?",
-										colval->name, colval->remoteColumnName);
-							}
-
-
-							if (i == 0)
-								olrdml->columnValuesBefore = lappend(olrdml->columnValuesBefore, colval);
-							else
-								olrdml->columnValuesAfter = lappend(olrdml->columnValuesAfter, colval);
-
-							pfree(key);
-							pfree(value);
-							key = NULL;
-							value = NULL;
-						}
-					}
-				}
-			}
-			break;
-		}
-		case 'd':
-		{
-			/* parse after */
-			Jsonb * dmldata = NULL;
-			JsonbIterator *it;
-			JsonbValue v;
-			JsonbIteratorToken r;
-			char * key = NULL;
-			char * value = NULL;
-			bool value_is_null = false;
-			DBZ_DML_COLUMN_VALUE * colval = NULL;
-			Datum datum_elems[1] = {CStringGetTextDatum("before")};
-
-			dmldata = GET_JSONB_ELEM(payload, &datum_elems[0], 1);
-			if (dmldata)
-			{
-				int pause = 0;
-				it = JsonbIteratorInit(&dmldata->root);
-				while ((r = JsonbIteratorNext(&it, &v, false)) != WJB_DONE)
-				{
-					switch (r)
-					{
-						case WJB_BEGIN_OBJECT:
-							if (key != NULL)
-							{
-								pause = 1;
-							}
-							break;
-						case WJB_END_OBJECT:
-							if (pause)
-							{
-								pause = 0;
-								if (key)
-								{
-									int pathsize = strlen("before.") + strlen(key) + 1;
-									char * tmpPath = (char *) palloc0 (pathsize);
-									snprintf(tmpPath, pathsize, "before.%s", key);
-									if (getPathElementString(payload, tmpPath, &strinfo, false))
-										value = pstrdup(strinfo.data);
-									if(tmpPath)
-										pfree(tmpPath);
-								}
-							}
-							break;
-						case WJB_BEGIN_ARRAY:
-							if (key)
-							{
-								pfree(key);
-								key = NULL;
-							}
-							break;
-						case WJB_END_ARRAY:
-							break;
-						case WJB_KEY:
-							if (pause)
-								break;
-
-							key = pnstrdup(v.val.string.val, v.val.string.len);
-							value_is_null = false;
-							break;
-						case WJB_VALUE:
-						case WJB_ELEM:
-							if (pause)
-								break;
-							value_is_null = v.type == jbvNull;
-							switch (v.type)
-							{
-								case jbvNull:
-									value = pstrdup("NULL");
-									break;
-								case jbvString:
-									value = pnstrdup(v.val.string.val, v.val.string.len);
-									break;
-								case jbvNumeric:
-									value = DatumGetCString(DirectFunctionCall1(numeric_out, PointerGetDatum(v.val.numeric)));
-									break;
-								case jbvBool:
-									if (v.val.boolean)
-										value = pstrdup("true");
-									else
-										value = pstrdup("false");
-									break;
-								case jbvBinary:
-									value = pstrdup("NULL");
-									break;
-								default:
-									value = pstrdup("NULL");
-									break;
-							}
-						break;
-						default:
-							break;
-					}
-
-					/* check if we have a key - value pair */
-					if (key != NULL && value != NULL)
-					{
-						char * mappedColumnName = NULL;
-
-						StringInfoData colNameObjId;
-
-						colval = (DBZ_DML_COLUMN_VALUE *) palloc0(sizeof(DBZ_DML_COLUMN_VALUE));
-						colval->name = pstrdup(key);
-
-						/* a copy of original column name for expression rule lookup at later stage */
-						colval->remoteColumnName = pstrdup(colval->name);
-
-						fc_normalize_name(synchdb_letter_casing_strategy, colval->name, strlen(colval->name));
-						colval->is_null = value_is_null;
-						colval->value = value_is_null ? NULL : pstrdup(value);
-
-						/* transform the column name if needed */
-						initStringInfo(&colNameObjId);
-						appendStringInfo(&colNameObjId, "%s.%s", objid.data, colval->remoteColumnName);
-						mappedColumnName = transform_object_name(colNameObjId.data, "column");
-						if (mappedColumnName)
-						{
-							/* replace the column name with looked up value here */
-							pfree(colval->name);
-							colval->name = pstrdup(mappedColumnName);
-						}
-						if (colNameObjId.data)
-							pfree(colNameObjId.data);
-
-						/* look up its data type */
-						if (strlen(colval->name) >= NAMEDATALEN)
-							ereport(ERROR, (errcode(ERRCODE_NAME_TOO_LONG),
-										errmsg("target column name exceeds PostgreSQL's identifier limit")));
-						entry = (NameOidEntry *) hash_search(typeidhash, colval->name, HASH_FIND, &found);
-						if (found)
-						{
-							colval->datatype = entry->oid;
-							colval->position = entry->position;
-							colval->typemod = entry->typemod;
-							colval->ispk = entry->ispk;
-							colval->typcategory = entry->typcategory;
-							colval->typispreferred = entry->typispreferred;
-							colval->typname = pstrdup(entry->typname);
-						}
-						else
-							elog(ERROR, "cannot find data type for column %s. Non-existent column?", colval->name);
-
-						entry2 = fc_source_column_lookup(namejsonposhash, colval->remoteColumnName);
-
-						if (entry2)
-						{
-							colval->dbztype = entry2->dbztype;
-							colval->timerep = entry2->timerep;
-							colval->scale = entry2->scale;
-						}
-						else
-						{
-							fc_invalidate_data_cache(&cachekey);
-							elog(ERROR, "cannot find olr json column schema data for column %s(%s). invalid json event?",
-									colval->name, colval->remoteColumnName);
-						}
-
-
-						olrdml->columnValuesBefore = lappend(olrdml->columnValuesBefore, colval);
-						pfree(key);
-						pfree(value);
-						key = NULL;
-						value = NULL;
-					}
-				}
-			}
-			break;
-		}
-		default:
-			break;
-	}
-	/*
-	 * finally, we need to sort dbzdml->columnValuesBefore and dbzdml->columnValuesAfter
-	 * based on position to align with PostgreSQL's attnum
-	 */
-	if (olrdml->columnValuesBefore != NULL)
-		list_sort(olrdml->columnValuesBefore, list_sort_cmp);
-
-	if (olrdml->columnValuesAfter != NULL)
-		list_sort(olrdml->columnValuesAfter, list_sort_cmp);
+	if (op == 'u' || op == 'd')
+		olrdml->columnValuesBefore = olr_row_image(payload, "before", objid.data, cacheentry);
+	if (op == 'c' || op == 'u')
+		olrdml->columnValuesAfter = olr_row_image(payload, "after", objid.data, cacheentry);
 
 end:
-	if (strinfo.data)
-		pfree(strinfo.data);
-
-	if (objid.data)
-		pfree(objid.data);
+	pfree(objid.data);
 
 	return olrdml;
 }
@@ -2463,7 +2015,7 @@ fc_processOLRChangeEvent(void * event, SynchdbStatistics * myBatchStats,
 			increment_connector_statistics(myBatchStats, STATS_TRUNCATE, 1);
 			goto ddl_applied;
 		}
-		pgddl = convert2PGDDL(olrddl, TYPE_OLR);
+		pgddl = fc_convert_olr_ddl(olrddl);
     	if (!pgddl)
     	{
     		set_shm_connector_state(myConnectorId, STATE_SYNCING);

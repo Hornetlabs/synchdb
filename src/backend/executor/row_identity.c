@@ -156,3 +156,35 @@ synchdb_resolve_row_identity(Relation relation)
 	index_close(index, NoLock);
 	return identity;
 }
+
+/* Validate the exact identity selected while the event was bound. */
+SynchdbRowIdentity *
+synchdb_validate_row_identity(Relation relation, const SynchdbTargetChange *change)
+{
+	SynchdbRowIdentity *identity = synchdb_resolve_row_identity(relation);
+	Bitmapset *provided = NULL;
+	ListCell *cell;
+
+	if (change->identity_index_oid != identity->index_oid)
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("target row identity changed after binding")));
+	foreach(cell, change->columnValuesBefore)
+	{
+		const SynchdbTargetColumn *column = lfirst(cell);
+		int member = column->position - FirstLowInvalidHeapAttributeNumber;
+
+		if (column->is_null || !bms_is_member(member, identity->attributes))
+			ereport(ERROR,
+					(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+					 errmsg("target identity must contain only nonnull key fields")));
+		provided = bms_add_member(provided, member);
+	}
+	if (bms_is_empty(identity->attributes) ||
+		!bms_equal(identity->attributes, provided))
+		ereport(ERROR,
+				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+				 errmsg("source row does not provide the complete target identity")));
+	bms_free(provided);
+	return identity;
+}

@@ -585,23 +585,6 @@ synchdb_registry_run_active(SynchdbSharedState *state, const SynchdbRunHandle *r
 }
 
 bool
-synchdb_registry_run_unchanged(SynchdbSharedState *state, const SynchdbRunHandle *run,
-							 const SynchdbConnectorKey *key)
-{
-	bool unchanged;
-
-	if (!state || !synchdb_registry_entries(state) || !run || !synchdb_connector_key_is_valid(key))
-		return false;
-	LWLockAcquire(&state->lock, LW_SHARED);
-	unchanged = synchdb_registry_valid_slot(state, run->slot) &&
-		state->incarnation == run->incarnation && run->generation != 0 &&
-		synchdb_registry_entries(state)[run->slot].generation == run->generation &&
-		synchdb_connector_key_equal(&synchdb_registry_entries(state)[run->slot].conninfo.key, key);
-	LWLockRelease(&state->lock);
-	return unchanged;
-}
-
-bool
 synchdb_registry_owned(SynchdbSharedState *state, const SynchdbWorkerOwner *owner)
 {
 	bool owned;

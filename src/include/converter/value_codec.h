@@ -14,12 +14,12 @@ typedef enum SynchdbValueTimeUnit
 	SYNCHDB_VALUE_NANOSECONDS
 } SynchdbValueTimeUnit;
 
-extern int64 fc_value_int64_from_bytes(const unsigned char *bytes, int len);
+extern int64 fc_value_int64_from_base64(const char *input);
 extern char *fc_value_decimal_from_base64(const char *input, int scale);
-extern char *fc_value_date(int64 input, SynchdbValueTimeUnit unit, bool quote);
+extern char *fc_value_date(int64 input, SynchdbValueTimeUnit unit);
 extern char *fc_value_timestamp(int64 input, SynchdbValueTimeUnit unit,
-								int32 typmod, bool quote);
+								int32 typmod);
 extern char *fc_value_time(int64 input, SynchdbValueTimeUnit unit,
-						   int32 typmod, bool quote);
+						   int32 typmod);
 
 #endif

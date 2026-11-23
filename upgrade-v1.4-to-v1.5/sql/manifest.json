@@ -15,7 +15,7 @@
     "sha256": "46e4a01e9135adc0700a6aae80eeece06286b7e679a046626b868958a21a8329"
   },
   "target_version": "1.1",
-  "target_commit": "0baf4e0539b71ee97c4e0d2ff6aec29fffc28f16",
+  "target_commit": "f95e00f84c893833efc4e8696d780caf0fdede0d",
   "target_worktree_dirty": true,
   "runtime_build_requirement": "Build matching C/JAR artifacts from these runtime_sources; target_commit alone does not identify uncommitted changes",
   "runtime_sources": [
@@ -37,7 +37,7 @@
     },
     {
       "path": "src/backend/synchdb/synchdb.c",
-      "sha256": "078b351b1aede07c996d529ac132213c70ac910274fb9b38636413e3aa7050da"
+      "sha256": "76d657659856bc611ed79eea485f021c2672ec076c1907e6c5fbf162fe5d1038"
     },
     {
       "path": "src/backend/debezium/src/main/java/com/example/OlrHandoff.java",
@@ -45,7 +45,7 @@
     },
     {
       "path": "src/backend/debezium/src/main/java/com/example/DebeziumRunner.java",
-      "sha256": "f006da75eb38d8d58911370ce4a5a23bc2992ae48347cb3a05d4dad914b5627b"
+      "sha256": "86c5aa40786bcc940e8d9422c7cec2b4a079c87d210cfc61756538bdbe1c1765"
     },
     {
       "path": "src/backend/debezium/src/main/java/com/example/InfinispanBuffers.java",
@@ -62,6 +62,90 @@
     {
       "path": "src/include/snapshot/artifact_store.h",
       "sha256": "7df9ec2c2198a22536a935f907be6810aeb28ef8474a48a97e60c3cd0a541306"
+    },
+    {
+      "path": "src/backend/catalog/connector_store.c",
+      "sha256": "f1dd0db9da007cacad111181076b7cee173f23f2e43c731498a7dfbf51ab8668"
+    },
+    {
+      "path": "src/backend/converter/debezium_bind.c",
+      "sha256": "ac37c7ca48a15ae321dec6b3d4ffce806708591c6425b0ba65b03b51dce22077"
+    },
+    {
+      "path": "src/backend/converter/format_converter.c",
+      "sha256": "6bcd01dc2a6a87d45db973d786449edbba5afd410cbfb5a244d8a21651d89524"
+    },
+    {
+      "path": "src/backend/converter/olr_event_handler.c",
+      "sha256": "04db74290d6bce51e235257b686cda641a7c348407986d22a8c024ce643f0d47"
+    },
+    {
+      "path": "src/backend/converter/value_codec.c",
+      "sha256": "0b4e0ac51749ab9f6582fb7a43e66d2ee21eecffcdaa23f42944206e3f6b7e71"
+    },
+    {
+      "path": "src/backend/executor/replication_agent.c",
+      "sha256": "1469ee9e69d8601a4929f39dc7036630a1eb0d553cb26676c2d91365ad298c98"
+    },
+    {
+      "path": "src/backend/executor/row_identity.c",
+      "sha256": "9544d6f56f94f118bd7378bd45153fb3aaf30641ed88f8c37cde9785b77b608a"
+    },
+    {
+      "path": "src/backend/executor/spi_writer.c",
+      "sha256": "5b375ae6f8f883807e51bba8dcb4875ce081b89df86fe59b0c93fdd57d95aca7"
+    },
+    {
+      "path": "src/backend/executor/tuple_writer.c",
+      "sha256": "f5ecf170a1aba5770733b2cb31b5b506fb0e31d7f13c6b4cdae01c008423248b"
+    },
+    {
+      "path": "src/backend/runtime/run_registry.c",
+      "sha256": "2c7fdf46a3750164f6819f87a7f916a268f3cd30f2deb5e5424d4c15259417ce"
+    },
+    {
+      "path": "src/backend/runtime/run_registry_worker.c",
+      "sha256": "e68cb9b55f166afbc391fb8f399d5a0d40d27156e5bcecfdb1c2181f000afdbf"
+    },
+    {
+      "path": "src/backend/source/debezium_row.c",
+      "sha256": "e6a9cbc22e1288d8b5f46d08e2d98461201d553b00f69979838307f576776679"
+    },
+    {
+      "path": "src/backend/source/debezium_unavailable.c",
+      "sha256": "de38f1bd5f4863cf5cb03a80b7fc1d1a31823443470a4f565b650b7f0b467ba5"
+    },
+    {
+      "path": "src/include/catalog/connector_store.h",
+      "sha256": "0e846d69e13afc495c81c740d0b28234e79e6357acb84a2bc86ee0b978403131"
+    },
+    {
+      "path": "src/include/converter/format_converter.h",
+      "sha256": "3fccde23fe379ecf116d4837cc520b435259ccbc6bac2f9f67256afbc3ed70d0"
+    },
+    {
+      "path": "src/include/converter/value_codec.h",
+      "sha256": "0623d43244eebb5177be235e070685da031fc29bbdfd3bd8020274364ddbc617"
+    },
+    {
+      "path": "src/include/executor/replication_agent.h",
+      "sha256": "f28593a62fdcacefc6e2b0326317395f333d3ad967dfa98c91692814ca5de1c9"
+    },
+    {
+      "path": "src/include/executor/row_identity.h",
+      "sha256": "cb13b54f7ba369cabb462de264b67f7083e63531acbcb600806b4e91597943a2"
+    },
+    {
+      "path": "src/include/runtime/run_registry.h",
+      "sha256": "0d9f833be411fc969ead749bf40e4e83ecde7be2cb8d621222f2b7b18de3edec"
+    },
+    {
+      "path": "src/include/source/debezium_row.h",
+      "sha256": "2944596b2e27a58279d40657a1cae9c6e9f23f34f849ad1d811bbdf961262a72"
+    },
+    {
+      "path": "src/include/synchdb/synchdb.h",
+      "sha256": "17b548e5577f713a17b182e1bf11ec0badfc495e20a794377af77b691397a00c"
     }
   ],
   "sql_file": "synchdb--1.0--1.1.sql",

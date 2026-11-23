@@ -17,7 +17,7 @@
  * Key functions:
  * - parseDBZDDL(): Parses Debezium DDL events
  * - parseDBZDML(): Parses Debezium DML events
- * - convert2PGDDL(): Converts DBZ DDL to PostgreSQL DDL
+ * - fc_convert_olr_ddl(): Converts DBZ DDL to PostgreSQL DDL
  * - convert2PGDML(): Converts DBZ DML to PostgreSQL DML
  * - processDataByType(): Handles data type conversions
  *
@@ -151,109 +151,29 @@ fc_destroy_source_column_cache(SourceColumnCache *cache)
 		MemoryContextDelete(cache->context);
 }
 
-static void remove_precision(char * str, bool * removed);
-static int count_active_columns(TupleDesc tupdesc);
-static long long derive_value_from_byte(const unsigned char * bytes, int len);
-static void reverse_byte_array(unsigned char * array, int length);
-static void trim_leading_zeros(char *str);
-static void byte_to_binary(unsigned char byte, char * binary_str);
-static void bytes_to_binary_string(const unsigned char * bytes,
-		size_t len, char * binary_str, bool trim);
-static char * transform_data_expression(const char * remoteObjid, const char * colname);
-static void populate_primary_keys(StringInfoData * strinfo, const char * id,
-		const char * jsonin, bool alter, bool isinline);
-static void transformDDLColumns(const char * id, DBZ_DDL_COLUMN * col,
-		ConnectorType conntype, bool datatypeonly, StringInfoData * strinfo,
-		PG_DDL_COLUMN * pgcol);
-static char * composeAlterColumnClauses(const char * objid, ConnectorType type,
-		List * dbzcols, TupleDesc tupdesc, Relation rel, PG_DDL * pgddl);
-static void expand_struct_value(char *in, DBZ_DML_COLUMN_VALUE *colval);
-static char * handle_base64_to_numeric_with_scale(const char * in, int scale);
-static char * handle_string_to_numeric(const char * in, bool addquote);
-static char * handle_base64_to_bit(const char * in, bool addquote, int typemod, bool padzero);
-static char * handle_string_to_bit(const char * in, bool addquote);
-static char * handle_numeric_to_bit(const char * in, bool addquote);
-static char * construct_datestr(long long input, bool addquote, int timerep);
-static char * handle_base64_to_date(const char * in, bool addquote, int timerep);
-static char * handle_numeric_to_date(const char * in, bool addquote, int timerep);
-static char * handle_string_to_date(const char * in, bool addquote);
-static char * construct_timestampstr(long long input, bool addquote, int timerep, int typemod);
-static char * handle_base64_to_timestamp(const char * in, bool addquote, int timerep, int typemod);
-static char * handle_numeric_to_timestamp(const char * in, bool addquote, int timerep, int typemod);
-static char * handle_string_to_timestamp(const char * in, bool addquote, ConnectorType type);
-static char * construct_timetr(long long input, bool addquote, int timerep, int typemod);
-static char * handle_base64_to_time(const char * in, bool addquote, int timerep, int typemod);
-static char * handle_numeric_to_time(const char * in, bool addquote, int timerep, int typemod);
-static char * handle_string_to_time(const char * in, bool addquote);
-static char * handle_base64_to_byte(const char * in, bool addquote);
-static char * handle_string_to_byte(const char * in, bool addquote);
-static char * handle_numeric_to_byte(const char * in, bool addquote);
-static char * construct_intervalstr(long long input, bool addquote, int timerep, int typemod);
-static char * handle_base64_to_interval(const char * in, bool addquote, int timerep, int typemod);
-static char * handle_numeric_to_interval(const char * in, bool addquote, int timerep, int typemod);
-static char * handle_string_to_interval(const char * in, bool addquote);
-static char * handle_data_by_type_category(char * in, DBZ_DML_COLUMN_VALUE * colval,
-		ConnectorType conntype, bool addquote);
-static char * processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote,
-		const char * remoteObjectId, ConnectorType type);
-
 /*
  * remove_precision
  *
  * this helper function removes precision parameters enclosed in () from the input string
  */
-static void
-remove_precision(char * str, bool * removed) {
-	char *openParen = strchr(str, '(');
-	char *closeParen;
+static bool
+remove_precision(char *str)
+{
+	char *open = strchr(str, '(');
+	bool removed = false;
 
-	if (removed == NULL)
-		return;
-
-	while (openParen != NULL)
+	while (open)
 	{
-		closeParen = strchr(openParen, ')');
-		if (closeParen != NULL)
-		{
-			memmove(openParen, closeParen + 1, strlen(closeParen));
-			*removed = true;
-		}
-		else
+		char *close = strchr(open, ')');
+
+		if (!close)
 			break;
-		openParen = strchr(openParen, '(');
+		memmove(open, close + 1, strlen(close));
+		removed = true;
+		open = strchr(open, '(');
 	}
+	return removed;
 }
-
-/*
- * count_active_columns
- *
- * this helper function counts the number of active (not dropped) columns from given tupdesc
- */
-static int
-count_active_columns(TupleDesc tupdesc)
-{
-	int count = 0, i = 0;
-	for (i = 0; i < tupdesc->natts; i++)
-	{
-		Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
-		if (!attr->attisdropped)
-			count++;
-	}
-	return count;
-}
-
-/*
- * derive_value_from_byte
- *
- * Decodes a signed, big-endian integer and validates its width.
- */
-static long long
-derive_value_from_byte(const unsigned char * bytes, int len)
-{
-	return fc_value_int64_from_bytes(bytes, len);
-}
-
-
 
 /*
  * reverse_byte_array
@@ -363,6 +283,7 @@ transform_data_expression(const char *remote_object, const char *column)
 }
 
 
+#ifdef WITH_OLR
 /*
  * populate_primary_keys
  *
@@ -526,214 +447,49 @@ populate_primary_keys(StringInfoData * strinfo, const char * id, const char * js
  * Function to transform DDL columns, strinfo and pgcol will be filled according to transformation rules
  */
 static void
-transformDDLColumns(const char *id, DBZ_DDL_COLUMN *col, ConnectorType type,
-                    bool datatypeonly, StringInfoData *sql, PG_DDL_COLUMN *target)
+transformDDLColumns(const char *id, DBZ_DDL_COLUMN *col, bool datatypeonly,
+					StringInfoData *sql, PG_DDL_COLUMN *target)
 {
- const SynchdbRuleTypeMapping *mapping;
- char *source = synchdb_source_column_key(id, col->name);
- char *mapped = transform_object_name(source, "column");
- char *lookup = col->typeName;
- bool removed = false;
+	const SynchdbRuleTypeMapping *mapping;
+	char *source = synchdb_source_column_key(id, col->name);
+	char *mapped = transform_object_name(source, "column");
+	char *lookup = col->typeName;
+	bool removed = remove_precision(col->typeName);
 
- target->attname = mapped ? mapped : pstrdup(col->name);
- if (!mapped)
-  fc_normalize_name(synchdb_letter_casing_strategy, target->attname, strlen(target->attname));
- if (type == TYPE_ORACLE || type == TYPE_OLR)
- {
-  remove_precision(col->typeName, &removed);
-  if ((!pg_strcasecmp(col->typeName, "interval day to second") && col->scale > 0) || removed)
-  {
-   col->length = col->scale;
-   col->scale = 0;
-  }
-  if (!pg_strcasecmp(col->typeName, "number") && col->scale == 0)
-   lookup = psprintf("%s(%d,0)", col->typeName, col->length);
- }
- else if ((type == TYPE_MYSQL || type == TYPE_SQLSERVER) && col->length == 1 &&
-          !pg_strcasecmp(col->typeName, "bit"))
-  lookup = psprintf("%s(1)", col->typeName);
- mapping = synchdb_rule_type(synchdb_rule_snapshot_current(), type, source,
-                            lookup, col->autoIncremented);
- if (!mapping && lookup != col->typeName)
-  mapping = synchdb_rule_type(synchdb_rule_snapshot_current(), type, source,
-                             col->typeName, col->autoIncremented);
- target->atttype = pstrdup(mapping ? mapping->name : col->typeName);
- if (mapping && mapping->length != -1)
-  col->length = mapping->length;
- if (datatypeonly)
-  appendStringInfo(sql, " %s ", target->atttype);
- else
-  appendStringInfo(sql, " %s %s ", quote_identifier(target->attname), target->atttype);
- /* The explicit-delta OLR adapter retains its established size conventions.
-  * Full Debezium images use ddl_plan.c's typed target diff instead. */
- if (type == TYPE_SQLSERVER && col->scale > 0 &&
-     (find_exact_string_match(target->atttype, "timestamp") ||
-      find_exact_string_match(target->atttype, "time") ||
-      find_exact_string_match(target->atttype, "timestamptz")))
-  appendStringInfo(sql, "(%d) ", Min(col->scale, 6));
- if (lookup != col->typeName)
-  pfree(lookup);
- pfree(source);
-}
-
-/*
- * composeAlterColumnClauses
- *
- * This functions build the ALTER COLUM SQL clauses based on given inputs
- */
-static char *
-composeAlterColumnClauses(const char * objid, ConnectorType type, List * dbzcols, TupleDesc tupdesc, Relation rel, PG_DDL * pgddl)
-{
-	ListCell * cell;
-	int attnum = 1;
-	StringInfoData colNameObjId;
-	StringInfoData strinfo;
-	char * mappedColumnName = NULL;
-	char * ret = NULL;
-	bool found = false;
-	Bitmapset * pkattrs;
-	bool atleastone = false;
-	PG_DDL_COLUMN * pgcol = NULL;
-
-	initStringInfo(&colNameObjId);
-	initStringInfo(&strinfo);
-	pkattrs = RelationGetIndexAttrBitmap(rel, INDEX_ATTR_BITMAP_PRIMARY_KEY);
-
-	foreach(cell, dbzcols)
+	target->attname = mapped ? mapped : pstrdup(col->name);
+	if (!mapped)
+		fc_normalize_name(synchdb_letter_casing_strategy, target->attname, strlen(target->attname));
+	if (removed || (!pg_strcasecmp(col->typeName, "interval day to second") && col->scale > 0))
 	{
-		DBZ_DDL_COLUMN * col = (DBZ_DDL_COLUMN *) lfirst(cell);
-		pgcol = (PG_DDL_COLUMN *) palloc0(sizeof(PG_DDL_COLUMN));
-
-		resetStringInfo(&colNameObjId);
-		appendStringInfo(&colNameObjId, "%s.%s", objid, col->name);
-		mappedColumnName = transform_object_name(colNameObjId.data, "column");
-
-		/* use the name as it came if no column name mapping found */
-		if (!mappedColumnName)
-		{
-			mappedColumnName = pstrdup(col->name);
-
-			/* we want to normalize according to letter casing strategy here */
-			fc_normalize_name(synchdb_letter_casing_strategy, mappedColumnName, strlen(mappedColumnName));
-		}
-
-		found = false;
-		for (attnum = 1; attnum <= tupdesc->natts; attnum++)
-		{
-			Form_pg_attribute attr = TupleDescAttr(tupdesc, attnum - 1);
-
-			/* skip dropped columns */
-			if (attr->attisdropped)
-				continue;
-
-			/* found a matching column, build the alter column clauses */
-			if (!strcmp(mappedColumnName, NameStr(attr->attname)))
-			{
-				found = true;
-
-				/* skip ALTER on primary key columns */
-				if (pkattrs != NULL && bms_is_member(attnum - FirstLowInvalidHeapAttributeNumber, pkattrs))
-					continue;
-
-				/* check data type */
-				appendStringInfo(&strinfo, "ALTER COLUMN \"%s\" SET DATA TYPE",
-						mappedColumnName);
-				transformDDLColumns(objid, col, type, true, &strinfo, pgcol);
-				if (col->length > 0 && col->scale > 0)
-				{
-					appendStringInfo(&strinfo, "(%d, %d) ", col->length, col->scale);
-				}
-
-				/* if a only length if specified, add it. For example VARCHAR(30)*/
-				if (col->length > 0 && col->scale == 0)
-				{
-					/* make sure it does not exceed postgresql allowed maximum */
-					if (col->length > MaxAttrSize)
-						col->length = MaxAttrSize;
-					appendStringInfo(&strinfo, "(%d) ", col->length);
-				}
-
-				/*
-				 * todo: for complex data type transformation, postgresql requires
-				 * the user to specify a function to cast existing values to the new
-				 * data type via the USING clause. This is needed for INT -> TEXT,
-				 * INT -> DATE or NUMERIC -> VARCHAR. We do not support USING now as
-				 * we do not know what function the user wants to use for casting the
-				 * values. Perhaps we can include these cast functions in the rule file
-				 * as well, but for now this is not supported and PostgreSQL may complain
-				 * if we attempt to do complex data type changes.
-				 */
-				appendStringInfo(&strinfo, ", ");
-
-				if (col->defaultValueExpression)
-				{
-					/*
-					 * synchdb can receive a default expression not supported in postgresql.
-					 * so for now, we always set to default null. todo
-					 */
-					appendStringInfo(&strinfo, "ALTER COLUMN \"%s\" SET DEFAULT %s",
-							mappedColumnName, "NULL");
-				}
-				else
-				{
-					/* remove default value */
-					appendStringInfo(&strinfo, "ALTER COLUMN \"%s\" DROP DEFAULT",
-							mappedColumnName);
-				}
-
-				appendStringInfo(&strinfo, ", ");
-
-				/* check if nullable or not nullable */
-				if (!col->optional)
-				{
-					appendStringInfo(&strinfo, "ALTER COLUMN \"%s\" SET NOT NULL",
-							mappedColumnName);
-				}
-				else
-				{
-					appendStringInfo(&strinfo, "ALTER COLUMN \"%s\" DROP NOT NULL",
-							mappedColumnName);
-				}
-				appendStringInfo(&strinfo, ",");
-				atleastone = true;
-
-				pgcol->position = attnum;
-			}
-		}
-		if (!found)
-		{
-			/*
-			 * todo: support renamed columns? The challenge is to find out which column
-			 * got renamed on remote site because dbz did not tell us the old column name
-			 * that was renamed. Only the new name is given to us to figure it out :(
-			 */
-			elog(WARNING, "column %s missing in PostgreSQL, indicating a renamed column?! -"
-					"Not supported now",
-					mappedColumnName);
-		}
-		pgddl->columns = lappend(pgddl->columns, pgcol);
+		col->length = col->scale;
+		col->scale = 0;
 	}
-
-	if (atleastone)
+	if (!pg_strcasecmp(col->typeName, "number") && col->scale == 0)
+		lookup = psprintf("%s(%d,0)", col->typeName, col->length);
+	mapping = synchdb_rule_type(synchdb_rule_snapshot_current(), TYPE_OLR, source,
+							   lookup, col->autoIncremented);
+	if (!mapping && lookup != col->typeName)
+		mapping = synchdb_rule_type(synchdb_rule_snapshot_current(), TYPE_OLR, source,
+								   col->typeName, col->autoIncremented);
+	target->atttype = pstrdup(mapping ? mapping->name : col->typeName);
+	if (mapping && mapping->length != -1)
+		col->length = mapping->length;
+	if (datatypeonly)
+		appendStringInfo(sql, " %s ", target->atttype);
+	else
+		appendStringInfo(sql, " %s %s ", quote_identifier(target->attname), target->atttype);
+	if (col->length > 0 && col->scale > 0)
+		appendStringInfo(sql, "(%d, %d) ", col->length, col->scale);
+	else if (col->length > 0 && col->scale == 0)
 	{
-		/* No clause means an empty buffer, with no trailing comma to remove. */
-		strinfo.data[strinfo.len - 1] = '\0';
-		strinfo.len--;
-		ret = pstrdup(strinfo.data);
+		col->length = Min(col->length, MaxAttrSize);
+		appendStringInfo(sql, "(%d) ", col->length);
 	}
-
-	if(strinfo.data)
-		pfree(strinfo.data);
-
-	if (pkattrs != NULL)
-		bms_free(pkattrs);
-
-	/* no column altered, return null */
-	if (!atleastone)
-		return NULL;
-
-	return ret;
+	if (lookup != col->typeName)
+		pfree(lookup);
+	pfree(source);
 }
+#endif
 
 /* Source logical schemas are checked before binding. Read typed members again
  * here so a legacy/internal caller cannot turn missing values into real data. */
@@ -801,23 +557,7 @@ expand_struct_value(char *in, DBZ_DML_COLUMN_VALUE *colval)
 	colval->value = replacement;
 }
 static char *
-handle_base64_to_numeric_with_scale(const char * in, int scale)
-{
-	return fc_value_decimal_from_base64(in, scale);
-}
-
-static char *
-handle_string_to_numeric(const char * in, bool addquote)
-{
-	/*
-	 * no special handling to convert string to numeric. May fail to apply
-	 * if it contains non-numeric characters
-	 */
-	return (addquote ? escapeSingleQuote(in, addquote) : pstrdup(in));
-}
-
-static char *
-handle_base64_to_bit(const char * in, bool addquote, int typemod, bool padzero)
+handle_base64_to_bit(const char * in, int typemod, bool padzero)
 {
 	Size input_length = strlen(in);
 	int capacity;
@@ -864,38 +604,11 @@ handle_base64_to_bit(const char * in, bool addquote, int typemod, bool padzero)
 		pfree(out);
 		out = padded;
 	}
-	if (addquote)
-	{
-		char *quoted = quote_literal_cstr(out);
-
-		pfree(out);
-		out = quoted;
-	}
 	return out;
 }
 
 static char *
-handle_string_to_bit(const char * in, bool addquote)
-{
-	/*
-	 * no special handling to convert string to bit. May fail to apply
-	 * if it contains non-bit characters
-	 */
-	return (addquote ? escapeSingleQuote(in, addquote) : pstrdup(in));
-}
-
-static char *
-handle_numeric_to_bit(const char * in, bool addquote)
-{
-	/*
-	 * no special handling to convert numeric to bit. May fail to apply
-	 * if it contains non-bit numerics
-	 */
-	return (addquote ? escapeSingleQuote(in, addquote) : pstrdup(in));
-}
-
-static char *
-construct_datestr(long long input, bool addquote, int timerep)
+construct_datestr(long long input, int timerep)
 {
 	SynchdbValueTimeUnit unit;
 
@@ -907,45 +620,11 @@ construct_datestr(long long input, bool addquote, int timerep)
 		case TIME_NANOTIMESTAMP: unit = SYNCHDB_VALUE_NANOSECONDS; break;
 		default: elog(ERROR, "unsupported date representation: %d", timerep);
 	}
-	return fc_value_date(input, unit, addquote);
+	return fc_value_date(input, unit);
 }
 
 static char *
-handle_base64_to_date(const char * in, bool addquote, int timerep)
-{
-	long long input = 0;
-	int tmpoutlen = pg_b64_dec_len(strlen(in));
-	unsigned char * tmpout = (unsigned char *) palloc0(tmpoutlen + 1);
-
-#if SYNCHDB_PG_MAJOR_VERSION >= 1800
-	tmpoutlen = pg_b64_decode(in, strlen(in), tmpout, tmpoutlen);
-#else
-	tmpoutlen = pg_b64_decode(in, strlen(in), (char *)tmpout, tmpoutlen);
-#endif
-	input = derive_value_from_byte(tmpout, tmpoutlen);
-	return construct_datestr(input, addquote, timerep);
-}
-
-static char *
-handle_numeric_to_date(const char * in, bool addquote, int timerep)
-{
-	int64 input = pg_strtoint64(in);
-
-	return construct_datestr(input, addquote, timerep);
-}
-
-static char *
-handle_string_to_date(const char * in, bool addquote)
-{
-	/*
-	 * no special handling to convert string to date. May fail to apply
-	 * if it contains unsupported date format
-	 */
-	return (addquote ? escapeSingleQuote(in, addquote) : pstrdup(in));
-}
-
-static char *
-construct_timestampstr(long long input, bool addquote, int timerep, int typemod)
+construct_timestampstr(long long input, int timerep, int typemod)
 {
 	SynchdbValueTimeUnit unit;
 
@@ -956,35 +635,11 @@ construct_timestampstr(long long input, bool addquote, int timerep, int typemod)
 		case TIME_NANOTIMESTAMP: unit = SYNCHDB_VALUE_NANOSECONDS; break;
 		default: elog(ERROR, "unsupported timestamp representation: %d", timerep);
 	}
-	return fc_value_timestamp(input, unit, typemod, addquote);
+	return fc_value_timestamp(input, unit, typemod);
 }
 
 static char *
-handle_base64_to_timestamp(const char * in, bool addquote, int timerep, int typemod)
-{
-	long long input = 0;
-	int tmpoutlen = pg_b64_dec_len(strlen(in));
-	unsigned char * tmpout = (unsigned char *) palloc0(tmpoutlen + 1);
-
-#if SYNCHDB_PG_MAJOR_VERSION >= 1800
-	tmpoutlen = pg_b64_decode(in, strlen(in), tmpout, tmpoutlen);
-#else
-	tmpoutlen = pg_b64_decode(in, strlen(in), (char *)tmpout, tmpoutlen);
-#endif
-	input = derive_value_from_byte(tmpout, tmpoutlen);
-	return construct_timestampstr(input, addquote, timerep, typemod);
-}
-
-static char *
-handle_numeric_to_timestamp(const char * in, bool addquote, int timerep, int typemod)
-{
-	int64 input = pg_strtoint64(in);
-
-	return construct_timestampstr(input, addquote, timerep, typemod);
-}
-
-static char *
-handle_string_to_timestamp(const char * in, bool addquote, ConnectorType type)
+handle_string_to_timestamp(const char * in, ConnectorType type)
 {
     char * out = NULL;
 
@@ -1048,36 +703,21 @@ handle_string_to_timestamp(const char * in, bool addquote, ConnectorType type)
         /* todo: we assume input is already in correct timestamp format.
          * We may need to check that is true prior to processing
          */
-        if (addquote)
-        {
-            out = (char *) palloc0(new_len + 2 + 1);
-            out[0] = '\'';
-            strcpy(&out[1], in);
-            t = strchr(out, 'T');
-            if (t)
-                *t = ' ';
+        out = (char *) palloc0(new_len + 1);
+        strcpy(out, in);
+        t = strchr(out, 'T');
+        if (t)
+            *t = ' ';
 
-            if (add_tz)
-                strcpy(&out[len], "+00:00");
-        }
-        else
-        {
-            out = (char *) palloc0(new_len + 1);
-            strcpy(out, in);
-            t = strchr(out, 'T');
-            if (t)
-                *t = ' ';
-
-            if (add_tz)
-                strcpy(&out[len - 1], "+00:00");
-        }
+        if (add_tz)
+            strcpy(&out[len - 1], "+00:00");
     }
 
     return out;
 }
 
 static char *
-construct_timetr(long long input, bool addquote, int timerep, int typemod)
+construct_timetr(long long input, int timerep, int typemod)
 {
 	SynchdbValueTimeUnit unit;
 
@@ -1088,52 +728,17 @@ construct_timetr(long long input, bool addquote, int timerep, int typemod)
 		case TIME_NANOTIME: unit = SYNCHDB_VALUE_NANOSECONDS; break;
 		default: elog(ERROR, "unsupported time representation: %d", timerep);
 	}
-	return fc_value_time(input, unit, typemod, addquote);
+	return fc_value_time(input, unit, typemod);
 }
 
 static char *
-handle_base64_to_time(const char * in, bool addquote, int timerep, int typemod)
-{
-	long long input = 0;
-	int tmpoutlen = pg_b64_dec_len(strlen(in));
-	unsigned char * tmpout = (unsigned char *) palloc0(tmpoutlen + 1);
-
-#if SYNCHDB_PG_MAJOR_VERSION >= 1800
-	tmpoutlen = pg_b64_decode(in, strlen(in), tmpout, tmpoutlen);
-#else
-	tmpoutlen = pg_b64_decode(in, strlen(in), (char *)tmpout, tmpoutlen);
-#endif
-	input = derive_value_from_byte(tmpout, tmpoutlen);
-	return construct_timetr(input, addquote, timerep, typemod);
-}
-
-static char *
-handle_numeric_to_time(const char * in, bool addquote, int timerep, int typemod)
-{
-	int64 input = pg_strtoint64(in);
-
-	return construct_timetr(input, addquote, timerep, typemod);
-}
-
-static char *
-handle_string_to_time(const char * in, bool addquote)
-{
-	/*
-	 * no special handling to convert string to time. May fail to apply
-	 * if it contains non-time characters
-	 */
-	return (addquote ? escapeSingleQuote(in, addquote) : pstrdup(in));
-}
-
-static char *
-handle_base64_to_byte(const char *in, bool addquote)
+handle_base64_to_byte(const char *in)
 {
 	int length = strlen(in);
 	int capacity = pg_b64_dec_len(length);
 	unsigned char *bytes = palloc(capacity > 0 ? capacity : 1);
 	int decoded;
 	char *text;
-	char *result;
 
 	decoded = synchdb_pg_base64_decode(in, length, bytes, capacity);
 	if (decoded < 0)
@@ -1147,40 +752,16 @@ handle_base64_to_byte(const char *in, bool addquote)
 	text[1] = 'x';
 	hex_encode((const char *) bytes, decoded, text + 2);
 	text[(Size) decoded * 2 + 2] = '\0';
-	result = addquote ? quote_literal_cstr(text) : text;
-	if (addquote)
-		pfree(text);
 	pfree(bytes);
-	return result;
+	return text;
 }
 
 static char *
-handle_string_to_byte(const char * in, bool addquote)
-{
-	/*
-	 * no special handling to convert string to byte. May fail to apply
-	 * if it contains non-byte characters
-	 */
-	return (addquote ? escapeSingleQuote(in, addquote) : pstrdup(in));
-}
-
-static char *
-handle_numeric_to_byte(const char * in, bool addquote)
-{
-	/*
-	 * no special handling to convert numeric to byte. May fail to apply
-	 * if it contains non-byte numerics
-	 */
-	return (addquote ? escapeSingleQuote(in, addquote) : pstrdup(in));
-}
-
-static char *
-construct_intervalstr(long long input, bool addquote, int timerep, int typemod)
+construct_intervalstr(long long input, int timerep, int typemod)
 {
 	time_t seconds = 0, remains = 0;
 	char inter[64 + 1] = {0};
 	int fields;
-	char * out = NULL;
 
 	switch (timerep)
 	{
@@ -1287,263 +868,93 @@ construct_intervalstr(long long input, bool addquote, int timerep, int typemod)
 			break;
 		}
 	}
-	if (addquote)
-	{
-		out = escapeSingleQuote(inter, addquote);
-	}
-	else
-	{
-		out = (char *) palloc0(strlen(inter) + 1);
-		memcpy(out, inter, strlen(inter));
-	}
-	return out;
+	return pstrdup(inter);
 }
 
+/* Built-in temporal targets use their OID. For an extension-defined datetime
+ * type, retain the existing type-name conventions for selecting a codec. */
 static char *
-handle_base64_to_interval(const char * in, bool addquote, int timerep, int typemod)
+convert_temporal_value(DBZ_DML_COLUMN_VALUE *column, ConnectorType connector, Oid target)
 {
-	int tmpoutlen = pg_b64_dec_len(strlen(in));
-	unsigned char * tmpout = (unsigned char *) palloc0(tmpoutlen);
-	long long input = 0;
+	int timerep = column->timerep;
+	int64 input;
 
-#if SYNCHDB_PG_MAJOR_VERSION >= 1800
-	tmpoutlen = pg_b64_decode(in, strlen(in), tmpout, tmpoutlen);
-#else
-	tmpoutlen = pg_b64_decode(in, strlen(in), (char *)tmpout, tmpoutlen);
+	switch (column->dbztype)
+	{
+		case DBZTYPE_STRING:
+#ifdef WITH_OLR
+		case OLRTYPE_STRING:
 #endif
-	input = derive_value_from_byte(tmpout, tmpoutlen);
-	return construct_intervalstr(input, addquote, timerep, typemod);
+			if (target == TIMESTAMPOID || target == TIMESTAMPTZOID || target == TIMETZOID ||
+				(target == InvalidOid && (strstr(column->typname, "timestamp") ||
+										  strstr(column->typname, "timetz"))))
+				return handle_string_to_timestamp(column->value, connector);
+			return pstrdup(column->value);
+		case DBZTYPE_STRUCT:
+			expand_struct_value(column->value, column);
+			/* FALLTHROUGH */
+		case DBZTYPE_BYTES:
+			input = fc_value_int64_from_base64(column->value);
+			break;
+#ifdef WITH_OLR
+		case OLRTYPE_NUMBER:
+			timerep = TIME_NANOTIMESTAMP;
+			/* FALLTHROUGH */
+#endif
+		default:
+			input = target == INTERVALOID ? atoll(column->value) : pg_strtoint64(column->value);
+			break;
+	}
+
+	if (target == InvalidOid)
+	{
+		if (strstr(column->typname, "date"))
+			target = DATEOID;
+		else if (strstr(column->typname, "timestamp"))
+			target = TIMESTAMPOID;
+		else
+			target = TIMEOID;
+	}
+	switch (target)
+	{
+		case DATEOID:
+			return construct_datestr(input, timerep);
+		case TIMEOID:
+			return construct_timetr(input, timerep, column->typemod);
+		case INTERVALOID:
+			return construct_intervalstr(input, timerep, column->typemod);
+		default:
+			return construct_timestampstr(input, timerep, column->typemod);
+	}
 }
 
 static char *
-handle_numeric_to_interval(const char * in, bool addquote, int timerep, int typemod)
+handle_data_by_type_category(DBZ_DML_COLUMN_VALUE *column, ConnectorType connector)
 {
-	long long input = atoll(in);
-
-	return construct_intervalstr(input, addquote, timerep, typemod);
-}
-
-static char *
-handle_string_to_interval(const char * in, bool addquote)
-{
-	/*
-	 * no special handling to convert string to interval. May fail to apply
-	 * if it contains incorrect interval format
-	 */
-	return (addquote ? escapeSingleQuote(in, addquote) : pstrdup(in));
-}
-
-static char *
-handle_data_by_type_category(char * in, DBZ_DML_COLUMN_VALUE * colval, ConnectorType conntype, bool addquote)
-{
-	char * out = NULL;
-	elog(DEBUG1, "%s: col %s timerep %d dbztype %d category %c typname %s",__FUNCTION__,
-			colval->name, colval->timerep, colval->dbztype, colval->typcategory, colval->typname);
-	switch (colval->typcategory)
+	switch (column->typcategory)
 	{
 		case TYPCATEGORY_BOOLEAN:
 		case TYPCATEGORY_NUMERIC:
-		{
-			switch (colval->dbztype)
-			{
-				case DBZTYPE_STRUCT:
-				{
-					expand_struct_value(in, colval);
-					out = handle_base64_to_numeric_with_scale(colval->value, colval->scale);
-					break;
-				}
-				case DBZTYPE_BYTES:
-				{
-					out = handle_base64_to_numeric_with_scale(in, colval->scale);
-					break;
-				}
-#ifdef WITH_OLR
-				case OLRTYPE_STRING:
-#endif
-				case DBZTYPE_STRING:
-				{
-					/* no special handling for now. todo */
-					out = pstrdup(in);
-					break;
-				}
-				default:
-				{
-					out = pstrdup(in);
-					break;
-				}
-			}
-			break;
-		}
-		case TYPCATEGORY_DATETIME:
-		{
-			/*
-			 * DATE, TIME or IMESTAMP, we cannot possibly know at this point, so we assume the
-			 * type name would contain descriptive words to help us identify. It may not be 100%
-			 * accurate, so it is best to define a transform function after this stage to
-			 * correctly process it. todo: we can expose a new GUC to allow user to configure
-			 * non-native data type and tell synchdb how to process them
-			 */
-			switch (colval->dbztype)
-			{
-				case DBZTYPE_STRUCT:
-				{
-					expand_struct_value(in, colval);
-					if (strstr(colval->typname, "date"))
-						out = handle_base64_to_date(colval->value, addquote, colval->timerep);
-					else if (strstr(colval->typname, "timestamp"))
-						out = handle_base64_to_timestamp(colval->value, addquote, colval->timerep, colval->typemod);
-					else
-						out = handle_base64_to_time(colval->value, addquote, colval->timerep, colval->typemod);
-					break;
-				}
-				case DBZTYPE_BYTES:
-				{
-					if (strstr(colval->typname, "date"))
-						out = handle_base64_to_date(in, addquote, colval->timerep);
-					else if (strstr(colval->typname, "timestamp"))
-						out = handle_base64_to_timestamp(in, addquote, colval->timerep, colval->typemod);
-					else
-						out = handle_base64_to_time(in, addquote, colval->timerep, colval->typemod);
-					break;
-				}
-				case DBZTYPE_STRING:
-#ifdef WITH_OLR
-				case OLRTYPE_STRING:
-#endif
-				{
-					if (strstr(colval->typname, "timestamp") || strstr(colval->typname, "timetz"))
-					{
-						out = handle_string_to_timestamp(in, addquote, conntype);
-					}
-					else
-					{
-						if (addquote)
-							out = escapeSingleQuote(in, addquote);
-						else
-							out = pstrdup(in);
-					}
-					break;
-				}
-#ifdef WITH_OLR
-				case OLRTYPE_NUMBER:
-				{
-					/* OLR represents date as nanoseconds since epoch*/
-					if (strstr(colval->typname, "date"))
-						out = handle_numeric_to_date(in, addquote, TIME_NANOTIMESTAMP);
-					else if (strstr(colval->typname, "timestamp"))
-						out = handle_numeric_to_timestamp(in, addquote, TIME_NANOTIMESTAMP, colval->typemod);
-					else
-						out = handle_numeric_to_time(in, addquote, TIME_NANOTIMESTAMP, colval->typemod);
-					break;
-				}
-#endif
-				default:
-				{
-					if (strstr(colval->typname, "date"))
-						out = handle_numeric_to_date(in, addquote, colval->timerep);
-					else if (strstr(colval->typname, "timestamp"))
-						out = handle_numeric_to_timestamp(in, addquote, colval->timerep, colval->typemod);
-					else
-						out = handle_numeric_to_time(in, addquote, colval->timerep, colval->typemod);
-					break;
-				}
-			}
-			break;
-		}
+			if (column->datatype == MONEYOID && connector != TYPE_POSTGRES)
+				column->scale = 4;
+			if (column->dbztype == DBZTYPE_STRUCT)
+				expand_struct_value(column->value, column);
+			else if (column->dbztype != DBZTYPE_BYTES)
+				return pstrdup(column->value);
+			return fc_value_decimal_from_base64(column->value, column->scale);
 		case TYPCATEGORY_BITSTRING:
-		{
-			switch (colval->dbztype)
-			{
-				case DBZTYPE_STRUCT:
-				{
-					expand_struct_value(in, colval);
-					out = handle_base64_to_bit(colval->value, addquote, colval->typemod,
-							conntype == TYPE_MYSQL ? true : false);
-					break;
-				}
-				case DBZTYPE_BYTES:
-				{
-					out = handle_base64_to_bit(in, addquote, colval->typemod,
-							conntype == TYPE_MYSQL ? true : false);
-					break;
-				}
-				case DBZTYPE_STRING:
-#ifdef WITH_OLR
-				case OLRTYPE_STRING:
-#endif
-				default:
-				{
-					if (addquote)
-						out = escapeSingleQuote(in, addquote);
-					else
-						out = pstrdup(in);
-					break;
-				}
-			}
-			break;
-		}
+			if (column->dbztype == DBZTYPE_STRUCT)
+				expand_struct_value(column->value, column);
+			else if (column->dbztype != DBZTYPE_BYTES)
+				return pstrdup(column->value);
+			return handle_base64_to_bit(column->value, column->typemod, connector == TYPE_MYSQL);
+		case TYPCATEGORY_DATETIME:
+			return convert_temporal_value(column, connector, InvalidOid);
 		case TYPCATEGORY_TIMESPAN:
-		{
-			switch (colval->dbztype)
-			{
-				case DBZTYPE_STRUCT:
-				{
-					expand_struct_value(in, colval);
-					out = handle_base64_to_interval(colval->value, addquote, colval->timerep, colval->typemod);
-					break;
-				}
-				case DBZTYPE_BYTES:
-				{
-					out = handle_base64_to_interval(in, addquote, colval->timerep, colval->typemod);
-					break;
-				}
-				case DBZTYPE_STRING:
-#ifdef WITH_OLR
-				case OLRTYPE_STRING:
-#endif
-				{
-					if (addquote)
-						out = escapeSingleQuote(in, addquote);
-					else
-						out = pstrdup(in);
-					break;
-				}
-#ifdef WITH_OLR
-				case OLRTYPE_NUMBER:
-				{
-					/* oracle number represented as interval - usd nanoseconds */
-					out = handle_numeric_to_interval(in, addquote, TIME_NANOTIMESTAMP, colval->typemod);
-					break;
-				}
-#endif
-				default:
-				{
-					out = handle_numeric_to_interval(in, addquote, colval->timerep, colval->typemod);
-					break;
-				}
-			}
-			break;
-		}
-		case TYPCATEGORY_USER:
-		case TYPCATEGORY_ENUM:
-		case TYPCATEGORY_GEOMETRIC:
-		case TYPCATEGORY_STRING:
+			return convert_temporal_value(column, connector, INTERVALOID);
 		default:
-		{
-			/* todo */
-			elog(DEBUG1, "no special handling for category %c", colval->typcategory);
-			if (addquote)
-			{
-				out = escapeSingleQuote(in, addquote);
-			}
-			else
-			{
-				out = pstrdup(in);
-			}
-			break;
-		}
+			return pstrdup(column->value);
 	}
-	return out;
 }
 
 /*
@@ -1553,7 +964,7 @@ handle_data_by_type_category(char * in, DBZ_DML_COLUMN_VALUE * colval, Connector
  * as string and output a processed string based on type
  */
 static char *
-processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, const char * remoteObjectId, ConnectorType type)
+processDataByType(DBZ_DML_COLUMN_VALUE * colval, const char * remoteObjectId, ConnectorType type)
 {
 	char * out = NULL;
 	char * in = colval->value;
@@ -1597,297 +1008,25 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, const char * rem
 		spatial = DatumGetJsonbP(DirectFunctionCall1(jsonb_in, CStringGetDatum(in)));
 
 	if (colval->dbztype == DBZTYPE_ARRAY_TEXT)
-		out = addquote ? escapeSingleQuote(in, true) : pstrdup(in);
+		out = pstrdup(in);
 	else switch(colval->datatype)
 	{
-		case BOOLOID:
-		case INT8OID:
-		case INT2OID:
-		case INT4OID:
-		case FLOAT8OID:
-		case FLOAT4OID:
-		case NUMERICOID:
-		case MONEYOID:
-		{
-			/* special handling for MONEYOID to use scale 4 to account for cents */
-			if (colval->datatype == MONEYOID && type != TYPE_POSTGRES)
-				colval->scale = 4;
-
-			switch (colval->dbztype)
-			{
-				case DBZTYPE_STRUCT:
-				{
-					expand_struct_value(in, colval);
-					out = handle_base64_to_numeric_with_scale(colval->value, colval->scale);
-					break;
-				}
-				case DBZTYPE_BYTES:
-				{
-					out = handle_base64_to_numeric_with_scale(in, colval->scale);
-					break;
-				}
-				case DBZTYPE_STRING:
-#ifdef WITH_OLR
-				case OLRTYPE_STRING:
-#endif
-				{
-					out = handle_string_to_numeric(in, addquote);
-					break;
-				}
-				default:
-				{
-					/* numeric to numeric, just use as is */
-					out = pstrdup(in);
-					break;
-				}
-			}
-			break;
-		}
-		case BPCHAROID:
-		case TEXTOID:
-		case VARCHAROID:
-		case CSTRINGOID:
-		case JSONBOID:
-		case UUIDOID:
-		case INETOID:
-		case CIDROID:
-		case MACADDROID:
-		case MACADDR8OID:
-		case INT4RANGEOID:
-		case INT8RANGEOID:
-		case NUMRANGEOID:
-		case DATERANGEOID:
-		case TSRANGEOID:
-		case TSTZRANGEOID:
-		{
-			if (addquote)
-				out = escapeSingleQuote(in, addquote);
-			else
-				out = pstrdup(in);
-			break;
-		}
-		case VARBITOID:
-		case BITOID:
-		{
-			switch (colval->dbztype)
-			{
-				case DBZTYPE_STRUCT:
-				{
-					expand_struct_value(in, colval);
-					out = handle_base64_to_bit(colval->value, addquote, colval->typemod,
-							type == TYPE_MYSQL ? true : false);
-					break;
-				}
-				case DBZTYPE_BYTES:
-				{
-					out = handle_base64_to_bit(in, addquote, colval->typemod,
-							type == TYPE_MYSQL ? true : false);
-					break;
-				}
-				case DBZTYPE_STRING:
-#ifdef WITH_OLR
-				case OLRTYPE_STRING:
-#endif
-				{
-					out = handle_string_to_bit(in, addquote);
-					break;
-				}
-				default:
-				{
-					out = handle_numeric_to_bit(in, addquote);
-					break;
-				}
-			}
-			break;
-		}
 		case DATEOID:
-		{
-			switch (colval->dbztype)
-			{
-				case DBZTYPE_STRUCT:
-				{
-					expand_struct_value(in, colval);
-					out = handle_base64_to_date(colval->value, addquote, colval->timerep);
-					break;
-				}
-				case DBZTYPE_BYTES:
-				{
-					out = handle_base64_to_date(in, addquote, colval->timerep);
-					break;
-				}
-				case DBZTYPE_STRING:
-#ifdef WITH_OLR
-				case OLRTYPE_STRING:
-#endif
-				{
-					out = handle_string_to_date(in, addquote);
-					break;
-				}
-#ifdef WITH_OLR
-				case OLRTYPE_NUMBER:
-				{
-					out = handle_numeric_to_date(in, addquote, TIME_NANOTIMESTAMP);
-					break;
-				}
-#endif
-				default:
-				{
-					out = handle_numeric_to_date(in, addquote, colval->timerep);
-					break;
-				}
-			}
-			break;
-		}
 		case TIMESTAMPTZOID:
 		case TIMESTAMPOID:
 		case TIMETZOID:
-		{
-			switch (colval->dbztype)
-			{
-				case DBZTYPE_STRUCT:
-				{
-					expand_struct_value(in, colval);
-					out = handle_base64_to_timestamp(colval->value, addquote, colval->timerep, colval->typemod);
-					break;
-				}
-				case DBZTYPE_BYTES:
-				{
-					out = handle_base64_to_timestamp(in, addquote, colval->timerep,  colval->typemod);
-					break;
-				}
-				case DBZTYPE_STRING:
-#ifdef WITH_OLR
-				case OLRTYPE_STRING:
-#endif
-				{
-					out = handle_string_to_timestamp(in, addquote, type);
-					break;
-				}
-#ifdef WITH_OLR
-				case OLRTYPE_NUMBER:
-
-				{
-					/* OLR represents date as nanoseconds since epoch*/
-					out = handle_numeric_to_timestamp(in, addquote, TIME_NANOTIMESTAMP, colval->typemod);
-					break;
-				}
-#endif
-				default:
-				{
-					out = handle_numeric_to_timestamp(in, addquote, colval->timerep, colval->typemod);
-					break;
-				}
-			}
-			break;
-		}
 		case TIMEOID:
-		{
-			switch (colval->dbztype)
-			{
-				case DBZTYPE_STRUCT:
-				{
-					expand_struct_value(in, colval);
-					out = handle_base64_to_time(colval->value, addquote, colval->timerep, colval->typemod);
-					break;
-				}
-				case DBZTYPE_BYTES:
-				{
-					out = handle_base64_to_time(in, addquote, colval->timerep, colval->typemod);
-					break;
-				}
-				case DBZTYPE_STRING:
-#ifdef WITH_OLR
-				case OLRTYPE_STRING:
-#endif
-				{
-					out = handle_string_to_time(in, addquote);
-					break;
-				}
-#ifdef WITH_OLR
-				case OLRTYPE_NUMBER:
-				{
-					out = handle_numeric_to_time(in, addquote, TIME_NANOTIMESTAMP, colval->typemod);
-					break;
-				}
-#endif
-				default:
-				{
-					out = handle_numeric_to_time(in, addquote, colval->timerep, colval->typemod);
-					break;
-				}
-			}
-			break;
-		}
-		case BYTEAOID:
-		{
-			switch (colval->dbztype)
-			{
-				case DBZTYPE_STRUCT:
-				{
-					expand_struct_value(in, colval);
-					out = handle_base64_to_byte(colval->value, addquote);
-					break;
-				}
-				case DBZTYPE_BYTES:
-				{
-					out = handle_base64_to_byte(in, addquote);
-					break;
-				}
-				case DBZTYPE_STRING:
-#ifdef WITH_OLR
-				case OLRTYPE_STRING:
-#endif
-				{
-					out = handle_string_to_byte(in, addquote);
-					break;
-				}
-				default:
-				{
-					out = handle_numeric_to_byte(in, addquote);
-					break;
-				}
-			}
-			break;
-		}
 		case INTERVALOID:
-		{
-			switch (colval->dbztype)
-			{
-				case DBZTYPE_STRUCT:
-				{
-					expand_struct_value(in, colval);
-					out = handle_base64_to_interval(colval->value, addquote, colval->timerep, colval->typemod);
-					break;
-				}
-				case DBZTYPE_BYTES:
-				{
-					out = handle_base64_to_interval(in, addquote, colval->timerep, colval->typemod);
-					break;
-				}
-				case DBZTYPE_STRING:
-#ifdef WITH_OLR
-				case OLRTYPE_STRING:
-#endif
-				{
-					out = handle_string_to_interval(in, addquote);
-					break;
-				}
-#ifdef WITH_OLR
-				case OLRTYPE_NUMBER:
-				{
-					/* oracle number represented as interval - usd nanoseconds */
-					out = handle_numeric_to_interval(in, addquote, TIME_NANOTIMESTAMP, colval->typemod);
-					break;
-				}
-#endif
-				default:
-				{
-					out = handle_numeric_to_interval(in, addquote, colval->timerep, colval->typemod);
-					break;
-				}
-			}
+			out = convert_temporal_value(colval, type, colval->datatype);
 			break;
-		}
+		case BYTEAOID:
+			if (structured)
+				expand_struct_value(in, colval);
+			if (structured || colval->dbztype == DBZTYPE_BYTES)
+				out = handle_base64_to_byte(colval->value);
+			else
+				out = pstrdup(in);
+			break;
 		case POINTOID:
 		{
 			switch (colval->dbztype)
@@ -1927,7 +1066,7 @@ processDataByType(DBZ_DML_COLUMN_VALUE * colval, bool addquote, const char * rem
 			 * if this column data type does not fall in the cases above, then we will try
 			 * to process it based on its type category.
 			 */
-			out = handle_data_by_type_category(in, colval, type, addquote);
+			out = handle_data_by_type_category(colval, type);
 			break;
 		}
 	}
@@ -2021,7 +1160,7 @@ list_sort_cmp(const ListCell *a, const ListCell *b)
 char *
 fc_convert_value_text(DBZ_DML_COLUMN_VALUE *source, ConnectorType type)
 {
-	return processDataByType(source, false, NULL, type);
+	return processDataByType(source, NULL, type);
 }
 
 SynchdbTargetColumn *
@@ -2056,7 +1195,7 @@ fc_convert_target_column(DBZ_DML_COLUMN_VALUE *source, const char *remote_object
 	target->typmod = attribute->atttypmod;
 	target->typbyval = get_typbyval(attribute->atttypid);
 	target->position = attribute->attnum;
-	input = processDataByType(source, false, remote_object_id, type);
+	input = processDataByType(source, remote_object_id, type);
 	target->is_null = input == NULL;
 	getTypeInputInfo(target->datatype, &input_function, &input_parameter);
 	/* domain_in is non-strict: NULL still has to satisfy domain constraints. */
@@ -2539,101 +1678,6 @@ fc_ensureDataCache(void)
 
 
 /*
- * find_exact_string_match
- *
- * Function to find exact match from given line
- */
-bool
-find_exact_string_match(const char * line, const char * wordtofind)
-{
-	const char *p = strstr(line, wordtofind);
-	if ((p == line) || (p != NULL && !isalnum((unsigned char)p[-1])))
-	{
-		p += strlen(wordtofind);
-		if (!isalnum((unsigned char)*p))
-			return true;
-		else
-			return false;
-	}
-	return false;
-}
-
-/*
- * remove_double_quotes
- *
- * Function to remove double quotes from a string
- */
-void
-remove_double_quotes(StringInfoData * str)
-{
-	char *src = str->data, *dst = str->data;
-	int newlen = 0;
-
-	while (*src)
-	{
-		if (*src != '"' && *src != '\\')
-		{
-			*dst++ = *src;
-			newlen++;
-		}
-		src++;
-	}
-	*dst = '\0';
-	str->len = newlen;
-}
-
-/*
- * escapeSingleQuote
- *
- * escape the single quotes in the given input and returns a palloc-ed string
- */
-char *
-escapeSingleQuote(const char * in, bool addquote)
-{
-	int i = 0, j = 0, outlen = 0;
-	char * out = NULL;
-
-	/* escape possible single quotes */
-	for (i = 0; i < strlen(in); i++)
-	{
-		if (in[i] == '\'')
-		{
-			/* single quote will be escaped so +2 in size */
-			outlen += 2;
-		}
-		else
-		{
-			outlen++;
-		}
-	}
-
-	if (addquote)
-		/* 2 more to account for open and closing quotes */
-		out = (char *) palloc0(outlen + 1 + 2);
-	else
-		out = (char *) palloc0(outlen + 1);
-
-	if (addquote)
-		out[j++] = '\'';
-	for (i = 0; i < strlen(in); i++)
-	{
-		if (in[i] == '\'')
-		{
-			out[j++] = '\'';
-			out[j++] = '\'';
-		}
-		else
-		{
-			out[j++] = in[i];
-		}
-	}
-	if (addquote)
-		out[j++] = '\'';
-
-	return out;
-}
-
-/*
  * transform_object_name
  *
  * transform the remote object name based on the object name rule file definitions
@@ -2656,99 +1700,6 @@ transform_object_name(const char *source, const char *kind)
  return destination ? pstrdup(destination) : NULL;
 }
 
-
-/*
- * getPathElementString
- *
- * Function to get a string element from a JSONB path
- */
-int
-getPathElementString(Jsonb * jb, char * path, StringInfoData * strinfoout, bool removequotes)
-{
-	Datum * datum_elems = NULL;
-	char * str_elems = NULL, * p = path;
-	int numPaths = 0, curr = 0;
-	char * pathcopy = path;
-	Datum res;
-	bool isnull;
-
-	if (!strinfoout)
-		return -1;
-
-    /* Count the number of elements in the path */
-	if (strchr(pathcopy, '.'))
-	{
-		while (*p != '\0')
-		{
-			if (*p == '.')
-			{
-				numPaths++;
-			}
-			p++;
-		}
-		numPaths++; /* Add the last one */
-		pathcopy = pstrdup(path);
-	}
-	else
-	{
-		numPaths = 1;
-	}
-
-	datum_elems = palloc0(sizeof(Datum) * numPaths);
-
-    /* Parse the path into elements */
-	if (numPaths > 1)
-	{
-		str_elems= strtok(pathcopy, ".");
-		if (str_elems)
-		{
-			datum_elems[curr] = CStringGetTextDatum(str_elems);
-			curr++;
-			while ((str_elems = strtok(NULL, ".")))
-			{
-				datum_elems[curr] = CStringGetTextDatum(str_elems);
-				curr++;
-			}
-		}
-	}
-	else
-	{
-		/* only one level, just use pathcopy*/
-		datum_elems[curr] = CStringGetTextDatum(pathcopy);
-	}
-
-    /* Get the element from JSONB */
-    res = jsonb_get_element(jb, datum_elems, numPaths, &isnull, false);
-    if (isnull)
-    {
-    	resetStringInfo(strinfoout);
-    	pfree(datum_elems);
-    	if (pathcopy != path)
-    		pfree(pathcopy);
-    	return -1;
-    }
-    else
-    {
-    	Jsonb *resjb = DatumGetJsonbP(res);
-    	resetStringInfo(strinfoout);
-		JsonbToCString(strinfoout, &resjb->root, VARSIZE(resjb));
-
-		/*
-		 * note: buf.data includes double quotes and escape char \.
-		 * We need to remove them
-		 */
-		if (removequotes)
-			remove_double_quotes(strinfoout);
-
-		if (resjb)
-			pfree(resjb);
-    }
-
-	pfree(datum_elems);
-	if (pathcopy != path)
-		pfree(pathcopy);
-	return 0;
-}
 
 /*
  * splitIdString
@@ -2811,13 +1762,14 @@ splitIdString(char * id, char ** db, char ** schema, char ** table, bool usedb)
 	}
 }
 
+#ifdef WITH_OLR
 /*
- * convert2PGDDL
+ * fc_convert_olr_ddl
  *
- * This functions converts DBZ_DDL to PG_DDL structure
+ * Convert the DDL decoded by the OLR parser to target SQL.
  */
 PG_DDL *
-convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
+fc_convert_olr_ddl(DBZ_DDL *dbzddl)
 {
 	PG_DDL * pgddl = (PG_DDL*) palloc0(sizeof(PG_DDL));
 	ListCell * cell;
@@ -2825,7 +1777,6 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 	char * mappedObjName = NULL;
 	char * db = NULL, * schema = NULL, * table = NULL;
 	PG_DDL_COLUMN * pgcol = NULL;
-	Relation rel = NULL;
 
 	initStringInfo(&strinfo);
 
@@ -2859,7 +1810,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 				elog(ERROR, "%s", msg);
 			}
 
-			if (schema && table)
+			if (schema)
 			{
 				/* include create schema clause */
 				appendStringInfo(&strinfo, "CREATE SCHEMA IF NOT EXISTS \"%s\"; ", schema);
@@ -2869,7 +1820,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 				pgddl->schema = pstrdup(schema);
 				pgddl->tbname = pstrdup(table);
 			}
-			else if (!schema && table)
+			else
 			{
 				/* table stays as table but no schema */
 				appendStringInfo(&strinfo, "CREATE TABLE IF NOT EXISTS \"%s\" (", table);
@@ -2927,22 +1878,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 			DBZ_DDL_COLUMN * col = (DBZ_DDL_COLUMN *) lfirst(cell);
 			pgcol = (PG_DDL_COLUMN *) palloc0(sizeof(PG_DDL_COLUMN));
 
-			transformDDLColumns(dbzddl->id, col, type, false, &strinfo, pgcol);
-
-			/* if both length and scale are specified, add them. For example DECIMAL(10,2) */
-			if (col->length > 0 && col->scale > 0)
-			{
-				appendStringInfo(&strinfo, "(%d, %d) ", col->length, col->scale);
-			}
-
-			/* if a only length if specified, add it. For example VARCHAR(30)*/
-			if (col->length > 0 && col->scale == 0)
-			{
-				/* make sure it does not exceed postgresql allowed maximum */
-				if (col->length > MaxAttrSize)
-					col->length = MaxAttrSize;
-				appendStringInfo(&strinfo, "(%d) ", col->length);
-			}
+			transformDDLColumns(dbzddl->id, col, false, &strinfo, pgcol);
 
 			/* if there is UNSIGNED operator found in col->typeName, add CHECK constraint */
 			if (strstr(col->typeName, "unsigned"))
@@ -3014,14 +1950,14 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 				elog(ERROR, "%s", msg);
 			}
 
-			if (schema && table)
+			if (schema)
 			{
 				/* table stays as table under the schema */
 				appendStringInfo(&strinfo, "DROP TABLE IF EXISTS \"%s\".\"%s\";", schema, table);
 				pgddl->schema = pstrdup(schema);
 				pgddl->tbname = pstrdup(table);
 			}
-			else if (!schema && table)
+			else
 			{
 				/* table stays as table but no schema */
 				schema = pstrdup("public");
@@ -3073,7 +2009,7 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 		Oid schemaoid = 0;
 		Oid tableoid = 0;
 		Oid pkoid = 0;
-		bool found = false, altered = false;
+		Relation rel;
 		TupleDesc tupdesc;
 		DataCacheKey cachekey = {0};
 		StringInfoData colNameObjId;
@@ -3102,14 +2038,14 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 				elog(ERROR, "%s", msg);
 			}
 
-			if (schema && table)
+			if (schema)
 			{
 				/* table stays as table under the schema */
 				appendStringInfo(&strinfo, "ALTER TABLE \"%s\".\"%s\" ", schema, table);
 				pgddl->schema = pstrdup(schema);
 				pgddl->tbname = pstrdup(table);
 			}
-			else if (!schema && table)
+			else
 			{
 				/* table stays as table but no schema */
 				schema = pstrdup("public");
@@ -3160,15 +2096,6 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 		 * with the new column list.
 		 */
 		schemaoid = get_namespace_oid(schema, false);
-		if (!OidIsValid(schemaoid))
-		{
-			char * msg = palloc0(SYNCHDB_ERRMSG_SIZE);
-			snprintf(msg, SYNCHDB_ERRMSG_SIZE, "no valid OID found for schema '%s'", schema);
-			set_shm_connector_errmsg(myConnectorId, msg);
-
-			/* trigger pg's error shutdown routine */
-			elog(ERROR, "%s", msg);
-		}
 
 		tableoid = get_relname_relid(table, schemaoid);
 		if (!OidIsValid(tableoid))
@@ -3192,263 +2119,233 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 #endif
 		/* Keep the relation and descriptor valid while composing the ALTER. */
 
-		if (type != TYPE_OLR)
+		/* pass the subtype to pgddl */
+		pgddl->subtype = dbzddl->subtype;
+
+		/*
+		 * OLR connector gives the added and dropped columns directly so there is no
+		 * need to figure out that information
+		 */
+		if (dbzddl->subtype == SUBTYPE_ADD_COLUMN)
 		{
-			/*
-			 * DBZ supplies more columns than what PostreSQL have. This means ALTER
-			 * TABLE ADD COLUMN operation. Let's find which one is to be added.
-			 */
-			if (list_length(dbzddl->columns) > count_active_columns(tupdesc))
+			/* ADD COLUMN */
+			if (dbzddl->columns == NIL)
 			{
-				altered = false;
+				elog(WARNING, "no columns to add");
+				destroyPGDDL(pgddl);
+				table_close(rel, NoLock);
+				return NULL;
+			}
 
-				/* indicate pgddl that this is alter add column */
-				pgddl->subtype = SUBTYPE_ADD_COLUMN;
+			foreach(cell, dbzddl->columns)
+			{
+				OLR_DDL_COLUMN * col = (OLR_DDL_COLUMN *) lfirst(cell);
+				pgcol = (PG_DDL_COLUMN *) palloc0(sizeof(PG_DDL_COLUMN));
+				appendStringInfo(&strinfo, "ADD COLUMN IF NOT EXISTS ");
 
-				foreach(cell, dbzddl->columns)
+				transformDDLColumns(dbzddl->id, col, false, &strinfo, pgcol);
+				elog(DEBUG1, "adding new column %s", pgcol->attname);
+
+				/* if there is UNSIGNED operator found in col->typeName, add CHECK constraint */
+				if (strstr(col->typeName, "unsigned"))
 				{
-					DBZ_DDL_COLUMN * col = (DBZ_DDL_COLUMN *) lfirst(cell);
-					char * mappedColumnName = NULL;
-
-					pgcol = (PG_DDL_COLUMN *) palloc0(sizeof(PG_DDL_COLUMN));
-
-					/* express a column name in fully qualified id */
-					resetStringInfo(&colNameObjId);
-					appendStringInfo(&colNameObjId, "%s.%s", dbzddl->id, col->name);
-					mappedColumnName = transform_object_name(colNameObjId.data, "column");
-					if (mappedColumnName)
-					{
-						elog(DEBUG1, "transformed column object ID '%s'to '%s'",
-								colNameObjId.data, mappedColumnName);
-					}
-					else
-					{
-						mappedColumnName = pstrdup(col->name);
-
-						/* we want to normalize according to letter casing strategy here */
-						fc_normalize_name(synchdb_letter_casing_strategy, mappedColumnName, strlen(mappedColumnName));
-					}
-
-					found = false;
-					for (attnum = 1; attnum <= tupdesc->natts; attnum++)
-					{
-						Form_pg_attribute attr = TupleDescAttr(tupdesc, attnum - 1);
-
-						/* skip special attname indicated a dropped column */
-						if (strstr(NameStr(attr->attname), "pg.dropped"))
-							continue;
-
-						if (!strcmp(mappedColumnName, NameStr(attr->attname)))
-						{
-							found = true;
-							break;
-						}
-					}
-					if (!found)
-					{
-						elog(DEBUG1, "adding new column %s", mappedColumnName);
-						altered = true;
-						appendStringInfo(&strinfo, "ADD COLUMN IF NOT EXISTS ");
-
-						transformDDLColumns(dbzddl->id, col, type, false, &strinfo, pgcol);
-
-						/* if both length and scale are specified, add them. For example DECIMAL(10,2) */
-						if (col->length > 0 && col->scale > 0)
-						{
-							appendStringInfo(&strinfo, "(%d, %d) ", col->length, col->scale);
-						}
-
-						/* if a only length if specified, add it. For example VARCHAR(30)*/
-						if (col->length > 0 && col->scale == 0)
-						{
-							/* make sure it does not exceed postgresql allowed maximum */
-							if (col->length > MaxAttrSize)
-								col->length = MaxAttrSize;
-							appendStringInfo(&strinfo, "(%d) ", col->length);
-						}
-
-						/* if there is UNSIGNED operator found in col->typeName, add CHECK constraint */
-						if (strstr(col->typeName, "unsigned"))
-						{
-							appendStringInfo(&strinfo, "CHECK (%s >= 0) ", pgcol->attname);
-						}
-
-						/* is it optional? */
-						if (!col->optional)
-						{
-							appendStringInfo(&strinfo, "NOT NULL ");
-						}
-
-						/* does it have defaults? */
-						if (col->defaultValueExpression && strlen(col->defaultValueExpression) > 0
-								&& !col->autoIncremented)
-						{
-							/* use DEFAULT NULL regardless of the value of col->defaultValueExpression
-							 * because it may contain expressions not recognized by PostgreSQL. We could
-							 * make this part more intelligent by checking if the given expression can
-							 * be applied by PostgreSQL and use it only when it can. But for now, we will
-							 * just put default null here. Todo
-							 */
-							appendStringInfo(&strinfo, "DEFAULT %s ", "NULL");
-						}
-						appendStringInfo(&strinfo, ",");
-
-						/* assign new attnum for this newly added column */
-						pgcol->position = attnum + newcol;
-						newcol++;
-					}
-					else
-					{
-						/* not a column to add, point data to null and act as a placeholder in the list */
-						pgcol->attname = NULL;
-						pgcol->atttype = NULL;
-					}
-
-					/*
-					 * add to list regardless if this column is to be added or not so we keep both ddl->columns
-					 * and pgddl->columns the same size
-					 */
-					pgddl->columns = lappend(pgddl->columns, pgcol);
-
-					if(mappedColumnName)
-						pfree(mappedColumnName);
+					appendStringInfo(&strinfo, "CHECK (%s >= 0) ", pgcol->attname);
 				}
 
-				if (altered)
+				/* is it optional? */
+				if (!col->optional)
 				{
-					/* something has been altered, continue to wrap up... */
-					/* remove the last extra comma */
-					strinfo.data[strinfo.len - 1] = '\0';
-					strinfo.len = strinfo.len - 1;
+					appendStringInfo(&strinfo, "NOT NULL ");
+				}
 
-					/*
-					 * finally, declare primary keys if current table has no primary key index.
-					 * Iterate dbzddl->primaryKeyColumnNames and build into primary key(x, y, z)
-					 * clauses. We will not add new primary key if current table already has pk.
-					 *
-					 * If a primary key is added in the same clause as alter table add column, debezium
-					 * may not be able to include the list of primary keys properly (observed in oracle
-					 * connector). We need to ensure that it is done in 2 qureies; first to add a new
-					 * column and second to add a new primary on the new column.
+				/* does it have defaults? */
+				if (col->defaultValueExpression && strlen(col->defaultValueExpression) > 0
+						&& !col->autoIncremented)
+				{
+					/* use DEFAULT NULL regardless of the value of col->defaultValueExpression
+					 * because it may contain expressions not recognized by PostgreSQL. We could
+					 * make this part more intelligent by checking if the given expression can
+					 * be applied by PostgreSQL and use it only when it can. But for now, we will
+					 * just put default null here. Todo
 					 */
-					if (pkoid == InvalidOid)
-						populate_primary_keys(&strinfo, dbzddl->id, dbzddl->primaryKeyColumnNames, true, true);
+					appendStringInfo(&strinfo, "DEFAULT %s ", "NULL");
+				}
+				appendStringInfo(&strinfo, ",");
+
+				newcol++;
+				pgcol->position = tupdesc->natts + newcol;
+				pgddl->columns = lappend(pgddl->columns, pgcol);
+			}
+
+			strinfo.data[--strinfo.len] = '\0';
+			if (pkoid == InvalidOid)
+				populate_primary_keys(&strinfo, dbzddl->id, dbzddl->primaryKeyColumnNames, true, true);
+		}
+		else if (dbzddl->subtype == SUBTYPE_DROP_COLUMN)
+		{
+			/* DROP COLUMN */
+			if (dbzddl->columns == NIL)
+			{
+				elog(WARNING, "no columns to drop");
+				destroyPGDDL(pgddl);
+				table_close(rel, NoLock);
+				return NULL;
+			}
+
+			foreach(cell, dbzddl->columns)
+			{
+				OLR_DDL_COLUMN * col = (OLR_DDL_COLUMN *) lfirst(cell);
+				char * mappedColumnName = NULL;
+
+				/* express a column name in fully qualified id */
+				resetStringInfo(&colNameObjId);
+				appendStringInfo(&colNameObjId, "%s.%s", dbzddl->id, col->name);
+				mappedColumnName = transform_object_name(colNameObjId.data, "column");
+				if (mappedColumnName)
+				{
+					elog(DEBUG1, "transformed column object ID '%s'to '%s'",
+							colNameObjId.data, mappedColumnName);
 				}
 				else
 				{
-					elog(DEBUG1, "no column altered");
-					destroyPGDDL(pgddl);
-					if (rel)
-						table_close(rel, NoLock);
-					return NULL;
+					mappedColumnName = pstrdup(col->name);
+
+					/* we want to normalize according to letter casing strategy here */
+					fc_normalize_name(synchdb_letter_casing_strategy, mappedColumnName, strlen(mappedColumnName));
 				}
-			}
-			else if (list_length(dbzddl->columns) < count_active_columns(tupdesc))
-			{
+
 				/*
-				 * DBZ supplies less columns than what PostreSQL have. This means ALTER
-				 * TABLE DROP COLUMN operation. Let's find which one is to be dropped.
+				 * in order to update synchdb_attribute table correctly, we need to find
+				 * this dropped column's attribute id from postgres
 				 */
-				altered = false;
-
-				/* indicate pgddl that this is alter drop column */
-				pgddl->subtype = SUBTYPE_DROP_COLUMN;
-
 				for (attnum = 1; attnum <= tupdesc->natts; attnum++)
 				{
 					Form_pg_attribute attr = TupleDescAttr(tupdesc, attnum - 1);
-					found = false;
 
 					/* skip special attname indicated a dropped column */
 					if (strstr(NameStr(attr->attname), "pg.dropped"))
 						continue;
 
-					foreach(cell, dbzddl->columns)
-					{
-						DBZ_DDL_COLUMN * col = (DBZ_DDL_COLUMN *) lfirst(cell);
-						char * mappedColumnName = NULL;
-
-						/* express a column name in fully qualified id */
-						resetStringInfo(&colNameObjId);
-						appendStringInfo(&colNameObjId, "%s.%s", dbzddl->id, col->name);
-						mappedColumnName = transform_object_name(colNameObjId.data, "column");
-						if (mappedColumnName)
-						{
-							elog(DEBUG1, "transformed column object ID '%s'to '%s'",
-									colNameObjId.data, mappedColumnName);
-						}
-						else
-						{
-							mappedColumnName = pstrdup(col->name);
-
-							/* we want to normalize according to letter casing strategy here */
-							fc_normalize_name(synchdb_letter_casing_strategy, mappedColumnName, strlen(mappedColumnName));
-						}
-
-						if (!strcmp(mappedColumnName, NameStr(attr->attname)))
-						{
-							found = true;
-							if (mappedColumnName)
-								pfree(mappedColumnName);
-							break;
-						}
-						if (mappedColumnName)
-							pfree(mappedColumnName);
-					}
-					if (!found)
-					{
-						elog(DEBUG1, "dropping old column %s", NameStr(attr->attname));
-
-						pgcol = (PG_DDL_COLUMN *) palloc0(sizeof(PG_DDL_COLUMN));
-						altered = true;
-						appendStringInfo(&strinfo, "DROP COLUMN IF EXISTS \"%s\",", NameStr(attr->attname));
-						pgcol->attname = pstrdup(NameStr(attr->attname));
-						pgcol->position = attnum;
-						pgddl->columns = lappend(pgddl->columns, pgcol);
-					}
+					if (!strcmp(mappedColumnName, NameStr(attr->attname)))
+						break;
 				}
-				if(altered)
-				{
-					/* something has been altered, continue to wrap up... */
-					/* remove the last extra comma */
-					strinfo.data[strinfo.len - 1] = '\0';
-					strinfo.len = strinfo.len - 1;
-				}
-				else
-				{
-					elog(DEBUG1, "no column altered");
-					destroyPGDDL(pgddl);
-					if (rel)
-						table_close(rel, NoLock);
-					return NULL;
-				}
+
+				appendStringInfo(&strinfo, "DROP COLUMN IF EXISTS \"%s\",", mappedColumnName);
+
+				elog(DEBUG1, "dropping old column %s", mappedColumnName);
+
+				pgcol = (PG_DDL_COLUMN *) palloc0(sizeof(PG_DDL_COLUMN));
+
+				pgcol->attname = pstrdup(mappedColumnName);
+				pgcol->position = attnum;
+				pgddl->columns = lappend(pgddl->columns, pgcol);
+
+				if (mappedColumnName)
+					pfree(mappedColumnName);
 			}
-			else
+			strinfo.data[--strinfo.len] = '\0';
+		}
+		else if (dbzddl->subtype == SUBTYPE_ALTER_COLUMN)
+		{
+			/* ALTER COLUMN */
+			if (dbzddl->columns == NIL)
 			{
-				/*
-				 * DBZ supplies the same number of columns as what PostreSQL have. This means
-				 * general ALTER TABLE operation.
-				 */
-				char * alterclause = NULL;
+				elog(WARNING, "no columns to alter");
+				destroyPGDDL(pgddl);
+				table_close(rel, NoLock);
+				return NULL;
+			}
 
-				/* indicate pgddl that this is alter column ddl*/
-				pgddl->subtype = SUBTYPE_ALTER_COLUMN;
+			foreach(cell, dbzddl->columns)
+			{
+				char * mappedColumnName = NULL;
+				OLR_DDL_COLUMN * col = (OLR_DDL_COLUMN *) lfirst(cell);
+				pgcol = (PG_DDL_COLUMN *) palloc0(sizeof(PG_DDL_COLUMN));
 
-				alterclause = composeAlterColumnClauses(dbzddl->id, type, dbzddl->columns, tupdesc, rel, pgddl);
-				if (alterclause)
+				/* express a column name in fully qualified id */
+				resetStringInfo(&colNameObjId);
+				appendStringInfo(&colNameObjId, "%s.%s", dbzddl->id, col->name);
+				mappedColumnName = transform_object_name(colNameObjId.data, "column");
+				if (mappedColumnName)
 				{
-					appendStringInfo(&strinfo, "%s", alterclause);
-					elog(DEBUG1, "alter clause: %s", strinfo.data);
-					pfree(alterclause);
+					elog(DEBUG1, "transformed column object ID '%s'to '%s'",
+							colNameObjId.data, mappedColumnName);
 				}
 				else
 				{
-					elog(DEBUG1, "no column altered");
-					destroyPGDDL(pgddl);
-					if (rel)
-						table_close(rel, NoLock);
-					return NULL;
+					mappedColumnName = pstrdup(col->name);
+
+					/* we want to normalize according to letter casing strategy here */
+					fc_normalize_name(synchdb_letter_casing_strategy, mappedColumnName, strlen(mappedColumnName));
 				}
+
+				/*
+				 * in order to update synchdb_attribute table correctly, we need to find
+				 * this dropped column's attribute id from postgres
+				 */
+				for (attnum = 1; attnum <= tupdesc->natts; attnum++)
+				{
+					Form_pg_attribute attr = TupleDescAttr(tupdesc, attnum - 1);
+
+					/* skip special attname indicated a dropped column */
+					if (strstr(NameStr(attr->attname), "pg.dropped"))
+						continue;
+
+					if (!strcmp(mappedColumnName, NameStr(attr->attname)))
+						break;
+				}
+
+				/* check data type */
+				elog(DEBUG1, "altering column %s", col->name);
+				appendStringInfo(&strinfo, "ALTER COLUMN \"%s\" SET DATA TYPE",
+						mappedColumnName);
+
+				transformDDLColumns(dbzddl->id, col, true, &strinfo, pgcol);
+
+				/*
+				 * todo: for complex data type transformation, postgresql requires
+				 * the user to specify a function to cast existing values to the new
+				 * data type via the USING clause. This is needed for INT -> TEXT,
+				 * INT -> DATE or NUMERIC -> VARCHAR. We do not support USING now as
+				 * we do not know what function the user wants to use for casting the
+				 * values. Perhaps we can include these cast functions in the rule file
+				 * as well, but for now this is not supported and PostgreSQL may complain
+				 * if we attempt to do complex data type changes.
+				 */
+				appendStringInfo(&strinfo, ", ");
+
+				if (col->defaultValueExpression)
+				{
+					/*
+					 * synchdb can receive a default expression not supported in postgresql.
+					 * so for now, we always set to default null. todo
+					 */
+					appendStringInfo(&strinfo, "ALTER COLUMN \"%s\" SET DEFAULT %s",
+							mappedColumnName, "NULL");
+				}
+				else
+				{
+					/* remove default value */
+					appendStringInfo(&strinfo, "ALTER COLUMN \"%s\" DROP DEFAULT",
+							mappedColumnName);
+				}
+
+				appendStringInfo(&strinfo, ", ");
+
+				/* check if nullable or not nullable */
+				if (!col->optional)
+				{
+					appendStringInfo(&strinfo, "ALTER COLUMN \"%s\" SET NOT NULL",
+							mappedColumnName);
+				}
+				else
+				{
+					appendStringInfo(&strinfo, "ALTER COLUMN \"%s\" DROP NOT NULL",
+							mappedColumnName);
+				}
+
+				appendStringInfo(&strinfo, ",");
+
 				/*
 				 * finally, declare primary keys if current table has no primary key index.
 				 * Iterate dbzddl->primaryKeyColumnNames and build into primary key(x, y, z)
@@ -3456,409 +2353,64 @@ convert2PGDDL(DBZ_DDL * dbzddl, ConnectorType type)
 				 */
 				if (pkoid == InvalidOid)
 					populate_primary_keys(&strinfo, dbzddl->id, dbzddl->primaryKeyColumnNames, true, true);
+
+				pgcol->position = attnum;
+				pgddl->columns = lappend(pgddl->columns, pgcol);
 			}
+
+			/* remove extra "," */
+			strinfo.data[strinfo.len - 1] = '\0';
+			strinfo.len = strinfo.len - 1;
 		}
-#ifdef WITH_OLR
-		else
+		else if (dbzddl->subtype == SUBTYPE_ADD_CONSTRAINT)
 		{
-			/* pass the subtype to pgddl */
-			pgddl->subtype = dbzddl->subtype;
-
-			/*
-			 * OLR connector gives the added and dropped columns directly so there is no
-			 * need to figure out that information
-			 */
-			if (dbzddl->subtype == SUBTYPE_ADD_COLUMN)
+			if (pkoid == InvalidOid)
 			{
-				/* ADD COLUMN */
-				if (list_length(dbzddl->columns) <= 0)
-				{
-					elog(WARNING, "no columns to add");
-					destroyPGDDL(pgddl);
-					if (rel)
-						table_close(rel, NoLock);
-					return NULL;
-				}
-
-				altered = false;
-				foreach(cell, dbzddl->columns)
-				{
-					OLR_DDL_COLUMN * col = (OLR_DDL_COLUMN *) lfirst(cell);
-					char * mappedColumnName = NULL;
-
-					pgcol = (PG_DDL_COLUMN *) palloc0(sizeof(PG_DDL_COLUMN));
-
-					/* express a column name in fully qualified id */
-					resetStringInfo(&colNameObjId);
-					appendStringInfo(&colNameObjId, "%s.%s", dbzddl->id, col->name);
-					mappedColumnName = transform_object_name(colNameObjId.data, "column");
-					if (mappedColumnName)
-					{
-						elog(DEBUG1, "transformed column object ID '%s'to '%s'",
-								colNameObjId.data, mappedColumnName);
-					}
-					else
-					{
-						mappedColumnName = pstrdup(col->name);
-
-						/* we want to normalize according to letter casing strategy here */
-						fc_normalize_name(synchdb_letter_casing_strategy, mappedColumnName, strlen(mappedColumnName));
-					}
-
-					elog(DEBUG1, "adding new column %s", mappedColumnName);
-					altered = true;
-					appendStringInfo(&strinfo, "ADD COLUMN IF NOT EXISTS ");
-
-					transformDDLColumns(dbzddl->id, col, type, false, &strinfo, pgcol);
-
-					/* if both length and scale are specified, add them. For example DECIMAL(10,2) */
-					if (col->length > 0 && col->scale > 0)
-					{
-						appendStringInfo(&strinfo, "(%d, %d) ", col->length, col->scale);
-					}
-
-					/* if a only length if specified, add it. For example VARCHAR(30)*/
-					if (col->length > 0 && col->scale == 0)
-					{
-						/* make sure it does not exceed postgresql allowed maximum */
-						if (col->length > MaxAttrSize)
-							col->length = MaxAttrSize;
-						appendStringInfo(&strinfo, "(%d) ", col->length);
-					}
-
-					/* if there is UNSIGNED operator found in col->typeName, add CHECK constraint */
-					if (strstr(col->typeName, "unsigned"))
-					{
-						appendStringInfo(&strinfo, "CHECK (%s >= 0) ", pgcol->attname);
-					}
-
-					/* is it optional? */
-					if (!col->optional)
-					{
-						appendStringInfo(&strinfo, "NOT NULL ");
-					}
-
-					/* does it have defaults? */
-					if (col->defaultValueExpression && strlen(col->defaultValueExpression) > 0
-							&& !col->autoIncremented)
-					{
-						/* use DEFAULT NULL regardless of the value of col->defaultValueExpression
-						 * because it may contain expressions not recognized by PostgreSQL. We could
-						 * make this part more intelligent by checking if the given expression can
-						 * be applied by PostgreSQL and use it only when it can. But for now, we will
-						 * just put default null here. Todo
-						 */
-						appendStringInfo(&strinfo, "DEFAULT %s ", "NULL");
-					}
-					appendStringInfo(&strinfo, ",");
-
-					newcol++;
-					pgcol->position = tupdesc->natts + newcol;
-					pgddl->columns = lappend(pgddl->columns, pgcol);
-
-					if(mappedColumnName)
-						pfree(mappedColumnName);
-				}
-
-				if (altered)
-				{
-					/* something has been altered, continue to wrap up... */
-					/* remove the last extra comma */
-					strinfo.data[strinfo.len - 1] = '\0';
-					strinfo.len = strinfo.len - 1;
-
-					/*
-					 * finally, declare primary keys if current table has no primary key index.
-					 * Iterate dbzddl->primaryKeyColumnNames and build into primary key(x, y, z)
-					 * clauses. We will not add new primary key if current table already has pk.
-					 *
-					 * If a primary key is added in the same clause as alter table add column, debezium
-					 * may not be able to include the list of primary keys properly (observed in oracle
-					 * connector). We need to ensure that it is done in 2 qureies; first to add a new
-					 * column and second to add a new primary on the new column.
-					 */
-					if (pkoid == InvalidOid)
-						populate_primary_keys(&strinfo, dbzddl->id, dbzddl->primaryKeyColumnNames, true, true);
-				}
-				else
-				{
-					elog(DEBUG1, "no column altered");
-					destroyPGDDL(pgddl);
-					if (rel)
-						table_close(rel, NoLock);
-					return NULL;
-				}
-			}
-			else if (dbzddl->subtype == SUBTYPE_DROP_COLUMN)
-			{
-				/* DROP COLUMN */
-				if (list_length(dbzddl->columns) <= 0)
-				{
-					elog(WARNING, "no columns to drop");
-					destroyPGDDL(pgddl);
-					if (rel)
-						table_close(rel, NoLock);
-					return NULL;
-				}
-
-				altered = false;
-				foreach(cell, dbzddl->columns)
-				{
-					OLR_DDL_COLUMN * col = (OLR_DDL_COLUMN *) lfirst(cell);
-					char * mappedColumnName = NULL;
-
-					/* express a column name in fully qualified id */
-					resetStringInfo(&colNameObjId);
-					appendStringInfo(&colNameObjId, "%s.%s", dbzddl->id, col->name);
-					mappedColumnName = transform_object_name(colNameObjId.data, "column");
-					if (mappedColumnName)
-					{
-						elog(DEBUG1, "transformed column object ID '%s'to '%s'",
-								colNameObjId.data, mappedColumnName);
-					}
-					else
-					{
-						mappedColumnName = pstrdup(col->name);
-
-						/* we want to normalize according to letter casing strategy here */
-						fc_normalize_name(synchdb_letter_casing_strategy, mappedColumnName, strlen(mappedColumnName));
-					}
-
-					/*
-					 * in order to update synchdb_attribute table correctly, we need to find
-					 * this dropped column's attribute id from postgres
-					 */
-					for (attnum = 1; attnum <= tupdesc->natts; attnum++)
-					{
-						Form_pg_attribute attr = TupleDescAttr(tupdesc, attnum - 1);
-
-						/* skip special attname indicated a dropped column */
-						if (strstr(NameStr(attr->attname), "pg.dropped"))
-							continue;
-
-						if (!strcmp(mappedColumnName, NameStr(attr->attname)))
-							break;
-					}
-
-					appendStringInfo(&strinfo, "DROP COLUMN IF EXISTS \"%s\",", mappedColumnName);
-
-					elog(DEBUG1, "dropping old column %s", mappedColumnName);
-
-					pgcol = (PG_DDL_COLUMN *) palloc0(sizeof(PG_DDL_COLUMN));
-					altered = true;
-
-					pgcol->attname = pstrdup(mappedColumnName);
-					pgcol->position = attnum;
-					pgddl->columns = lappend(pgddl->columns, pgcol);
-
-					if (mappedColumnName)
-						pfree(mappedColumnName);
-				}
-				if(altered)
-				{
-					/* something has been altered, continue to wrap up... */
-					/* remove the last extra comma */
-					strinfo.data[strinfo.len - 1] = '\0';
-					strinfo.len = strinfo.len - 1;
-				}
-			}
-			else if (dbzddl->subtype == SUBTYPE_ALTER_COLUMN)
-			{
-				/* ALTER COLUMN */
-				if (list_length(dbzddl->columns) <= 0)
-				{
-					elog(WARNING, "no columns to alter");
-					destroyPGDDL(pgddl);
-					if (rel)
-						table_close(rel, NoLock);
-					return NULL;
-				}
-
-				altered = false;
-				foreach(cell, dbzddl->columns)
-				{
-					char * mappedColumnName = NULL;
-					OLR_DDL_COLUMN * col = (OLR_DDL_COLUMN *) lfirst(cell);
-					pgcol = (PG_DDL_COLUMN *) palloc0(sizeof(PG_DDL_COLUMN));
-
-					/* express a column name in fully qualified id */
-					resetStringInfo(&colNameObjId);
-					appendStringInfo(&colNameObjId, "%s.%s", dbzddl->id, col->name);
-					mappedColumnName = transform_object_name(colNameObjId.data, "column");
-					if (mappedColumnName)
-					{
-						elog(DEBUG1, "transformed column object ID '%s'to '%s'",
-								colNameObjId.data, mappedColumnName);
-					}
-					else
-					{
-						mappedColumnName = pstrdup(col->name);
-
-						/* we want to normalize according to letter casing strategy here */
-						fc_normalize_name(synchdb_letter_casing_strategy, mappedColumnName, strlen(mappedColumnName));
-					}
-
-					/*
-					 * in order to update synchdb_attribute table correctly, we need to find
-					 * this dropped column's attribute id from postgres
-					 */
-					for (attnum = 1; attnum <= tupdesc->natts; attnum++)
-					{
-						Form_pg_attribute attr = TupleDescAttr(tupdesc, attnum - 1);
-
-						/* skip special attname indicated a dropped column */
-						if (strstr(NameStr(attr->attname), "pg.dropped"))
-							continue;
-
-						if (!strcmp(mappedColumnName, NameStr(attr->attname)))
-							break;
-					}
-
-					/* check data type */
-					elog(DEBUG1, "altering column %s", col->name);
-					appendStringInfo(&strinfo, "ALTER COLUMN \"%s\" SET DATA TYPE",
-							mappedColumnName);
-
-					transformDDLColumns(dbzddl->id, col, type, true, &strinfo, pgcol);
-					if (col->length > 0 && col->scale > 0)
-					{
-						appendStringInfo(&strinfo, "(%d, %d) ", col->length, col->scale);
-					}
-
-					/* if a only length if specified, add it. For example VARCHAR(30)*/
-					if (col->length > 0 && col->scale == 0)
-					{
-						/* make sure it does not exceed postgresql allowed maximum */
-						if (col->length > MaxAttrSize)
-							col->length = MaxAttrSize;
-						appendStringInfo(&strinfo, "(%d) ", col->length);
-					}
-
-					/*
-					 * todo: for complex data type transformation, postgresql requires
-					 * the user to specify a function to cast existing values to the new
-					 * data type via the USING clause. This is needed for INT -> TEXT,
-					 * INT -> DATE or NUMERIC -> VARCHAR. We do not support USING now as
-					 * we do not know what function the user wants to use for casting the
-					 * values. Perhaps we can include these cast functions in the rule file
-					 * as well, but for now this is not supported and PostgreSQL may complain
-					 * if we attempt to do complex data type changes.
-					 */
-					appendStringInfo(&strinfo, ", ");
-
-					if (col->defaultValueExpression)
-					{
-						/*
-						 * synchdb can receive a default expression not supported in postgresql.
-						 * so for now, we always set to default null. todo
-						 */
-						appendStringInfo(&strinfo, "ALTER COLUMN \"%s\" SET DEFAULT %s",
-								mappedColumnName, "NULL");
-					}
-					else
-					{
-						/* remove default value */
-						appendStringInfo(&strinfo, "ALTER COLUMN \"%s\" DROP DEFAULT",
-								mappedColumnName);
-					}
-
-					appendStringInfo(&strinfo, ", ");
-
-					/* check if nullable or not nullable */
-					if (!col->optional)
-					{
-						appendStringInfo(&strinfo, "ALTER COLUMN \"%s\" SET NOT NULL",
-								mappedColumnName);
-					}
-					else
-					{
-						appendStringInfo(&strinfo, "ALTER COLUMN \"%s\" DROP NOT NULL",
-								mappedColumnName);
-					}
-
-					appendStringInfo(&strinfo, ",");
-
-					/*
-					 * finally, declare primary keys if current table has no primary key index.
-					 * Iterate dbzddl->primaryKeyColumnNames and build into primary key(x, y, z)
-					 * clauses. We will not add new primary key if current table already has pk.
-					 */
-					if (pkoid == InvalidOid)
-						populate_primary_keys(&strinfo, dbzddl->id, dbzddl->primaryKeyColumnNames, true, true);
-
-					pgcol->position = attnum;
-					pgddl->columns = lappend(pgddl->columns, pgcol);
-				}
-
-				/* remove extra "," */
-				strinfo.data[strinfo.len - 1] = '\0';
-				strinfo.len = strinfo.len - 1;
-			}
-			else if (dbzddl->subtype == SUBTYPE_ADD_CONSTRAINT)
-			{
-				if (pkoid == InvalidOid)
-				{
-					appendStringInfo(&strinfo, "ADD CONSTRAINT \"%s\" ", dbzddl->constraintName);
-					populate_primary_keys(&strinfo, dbzddl->id, dbzddl->primaryKeyColumnNames, true, false);
-				}
-				else
-				{
-					elog(WARNING, "relation already has primary key, skip adding...");
-					destroyPGDDL(pgddl);
-					if (rel)
-						table_close(rel, NoLock);
-					return NULL;
-				}
-			}
-			else if (dbzddl->subtype == SUBTYPE_DROP_CONSTRAINT)
-			{
-				if (dbzddl->constraintName)
-					appendStringInfo(&strinfo, "DROP CONSTRAINT \"%s\" ", dbzddl->constraintName);
-				else
-				{
-					elog(WARNING, "constaint name to drop is NULL. Skipping...");
-					destroyPGDDL(pgddl);
-					if (rel)
-						table_close(rel, NoLock);
-					return NULL;
-				}
+				appendStringInfo(&strinfo, "ADD CONSTRAINT \"%s\" ", dbzddl->constraintName);
+				populate_primary_keys(&strinfo, dbzddl->id, dbzddl->primaryKeyColumnNames, true, false);
 			}
 			else
 			{
-				elog(WARNING, "unsupported ALTER TABLE sub type %d", dbzddl->subtype);
+				elog(WARNING, "relation already has primary key, skip adding...");
 				destroyPGDDL(pgddl);
-				if (rel)
-					table_close(rel, NoLock);
+				table_close(rel, NoLock);
 				return NULL;
 			}
 		}
-#else
+		else if (dbzddl->subtype == SUBTYPE_DROP_CONSTRAINT)
+		{
+			if (dbzddl->constraintName)
+				appendStringInfo(&strinfo, "DROP CONSTRAINT \"%s\" ", dbzddl->constraintName);
+			else
+			{
+				elog(WARNING, "constaint name to drop is NULL. Skipping...");
+				destroyPGDDL(pgddl);
+				table_close(rel, NoLock);
+				return NULL;
+			}
+		}
 		else
 		{
-			set_shm_connector_errmsg(myConnectorId, "OLR connector is not enabled in this synchdb build");
-			elog(ERROR, "OLR connector is not enabled in this synchdb build");
+			elog(WARNING, "unsupported ALTER TABLE sub type %d", dbzddl->subtype);
+			destroyPGDDL(pgddl);
+			table_close(rel, NoLock);
+			return NULL;
 		}
-#endif
+		table_close(rel, NoLock);
 	}
 	else
 	{
 		elog(WARNING, "unsupported conversion for DDL type %d", dbzddl->type);
 		destroyPGDDL(pgddl);
-		if (rel)
-			table_close(rel, NoLock);
 		return NULL;
 	}
 
-	pgddl->ddlquery = pstrdup(strinfo.data);
-
-	/* free the data inside strinfo as we no longer needs it */
-	pfree(strinfo.data);
+	pgddl->ddlquery = strinfo.data;
 
 	elog(DEBUG1, "pgsql: %s ", pgddl->ddlquery);
-	if (rel)
-		table_close(rel, NoLock);
 	return pgddl;
 }
+#endif
 
 bool
 fc_translate_datatype_rules(const SynchdbRuleSnapshot *rules, ConnectorType type,
@@ -3877,7 +2429,7 @@ fc_translate_datatype_rules(const SynchdbRuleSnapshot *rules, ConnectorType type
  }
  else if (type == TYPE_ORACLE || type == TYPE_OLR)
  {
-  remove_precision(lookup, &removed);
+  removed = remove_precision(lookup);
   if ((!pg_strcasecmp(lookup, "interval day to second") && *scale > 0) || removed)
   {
    *length = *scale;
