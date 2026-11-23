@@ -34,6 +34,12 @@ Triggered automatically upon `synchdb_start_engine_bgw()` with a snapshot mode t
 * Triggered automatically upon `synchdb_start_engine_bgw()` with a snapshot mode that requires doing a snapshot and will not repeat again if completed.
 * Corresponding FDWs must be available.
 
+### MySQL and SQL Server source table locks
+
+Set `synchdb.fdw_snapshot_lock_tables = on` in `postgresql.conf` and reload the configuration to enable read locks for subsequent FDW data snapshots. The default is `off`. With locks enabled, reads can continue and writes to selected tables wait until copying finishes or fails. MySQL requires `SELECT` and `LOCK TABLES` privileges. SQL Server uses shared table locks in a transaction. Pause DDL on the selected tables during the snapshot.
+
+With locks disabled, a successful full snapshot can proceed to CDC even when different tables were read at different times. Both settings use the existing CDC offset handling. With locking enabled, SynchDB uses the client library already loaded by the source FDW. Building SynchDB requires no additional MySQL or FreeTDS development packages.
+
 ## **FDW Snapshot for Oracle and OLR Connectors**
 
 It is possible to use oracle_fdw to perform initial snapshot for Oracle and OLR connectors which is significantly faster than Debezium counterpart. SynchDB integrates with [oracle_fdw](https://github.com/laurenz/oracle_fdw) version 2.8.0 with OCI v23.9.0 as its underlying driver. This is just the version tested, older or newer versions may still work.

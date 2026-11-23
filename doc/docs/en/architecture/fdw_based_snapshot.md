@@ -15,12 +15,7 @@ FDW based snapshot is supported for:
 
 ### **MySQL Connector**
 
-* Begin a transaction in repeatable read isolation level.
-* Temporarily put a table read lock on all desired tables.
-* Read `binlog_log_file`, `binlog_pos` and `server_id` from global configuration. These are served as "cut-off" point for the snapshot.
-* Release the table locks.
-* In the same repeatable read transaction, migrate all desired tables schema and data with proper type translations
-* Once done, the CDC can resume from the cut-off point, which will handle the data changes that happened during the snapshot.
+When `synchdb.fdw_snapshot_lock_tables` is enabled, SynchDB locks the selected tables before reading the binlog position and releases them once copying finishes or fails. The default is off. Successful snapshots can continue to CDC in either mode. [Configure the snapshot engine](../user-guide/configure_snapshot_engine.md)
 
 WARNING: **BACKUP_ADMIN permission is required to obtain the "cut-point" parameters.**
 
@@ -50,7 +45,7 @@ WARNING: **BACKUP_ADMIN permission is required to obtain the "cut-point" paramet
 ### **Microsoft SQL Server Connector**
 
 * Before the snapshot begins, read `sys.fn_cdc_get_max_lsn()`, which serves as the snapshot cut-off point. SQL Server Change Data Capture (CDC) must already be enabled on the source database and desired tables, as required by the Debezium SQL Server connector.
-* Migrate all desired tables' schema and data through ordinary (autocommit) `tds_fdw` foreign-table reads. No table locks or special transaction isolation level is used.
+* Migrate all desired tables' schema and data through ordinary (autocommit) `tds_fdw` foreign-table reads. With `synchdb.fdw_snapshot_lock_tables` enabled, a separate connection holds shared table locks during the copy.
 * Once done, Debezium recovery mode rebuilds SQL Server schema history without taking another data snapshot, then CDC resumes from the cut-off `commit_lsn`.
 
 <**NOTE**> Unlike Oracle's Flashback query or a held-open repeatable-read transaction, `tds_fdw` does not manage one remote transaction across all foreign-table reads. Changes committed after the cut-off can therefore appear in both the FDW copy and CDC replay. SynchDB makes replayed SQL Server create events idempotent by checking the destination primary key (or replica identity) and skipping rows already copied. Tables used with FDW snapshot plus CDC should therefore have a primary key; without one, overlap cannot be de-duplicated reliably.

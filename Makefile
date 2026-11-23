@@ -63,6 +63,7 @@ OBJS = src/backend/synchdb/synchdb.o \
        src/backend/runtime/java_operations.o \
        src/backend/runtime/java_batch.o \
        src/backend/runtime/worker_runtime.o \
+       src/backend/snapshot/source_lock.o \
        src/backend/snapshot/bootstrap.o \
        src/backend/snapshot/bootstrap_type.o \
        src/backend/snapshot/artifact_store.o \

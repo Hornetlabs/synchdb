@@ -506,7 +506,7 @@ BEGIN
 		EXECUTE format(
 			'CREATE FOREIGN TABLE %I.%I (%s) SERVER %I OPTIONS (dbname %L, table_name %L)',
 			p_stage_schema, v_tbl_pg, v_cols_sql, p_server_name,
-			lower(p_desired_schema::text), r.table_name
+			r.ora_owner, r.table_name
 		);
 
 		RAISE NOTICE 'Created MySQL FT %.% -> %.% on %',

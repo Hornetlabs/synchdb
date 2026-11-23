@@ -504,6 +504,10 @@ def _fdw_snapshot_and_cdc(cursor, vendor, casing, mode):
         assert operation_id > 0
         result = common.get_bootstrap_result(cursor, name)
         assert result["status"] == "COMPLETE", result
+        if vendor in ("mysql", "sqlserver") and mode == "initial":
+            cursor.execute("SHOW synchdb.fdw_snapshot_lock_tables")
+            locked = result["source_read_boundary"]["kind"] == "SOURCE_TABLE_READ_LOCKS"
+            assert locked == (cursor.fetchone()[0] == "on")
         assert result["cdc_eligible"] is True, result
         assert result["handoff_verified"] is False, result
         assert len(result["tables"]) == 1, result
@@ -581,6 +585,19 @@ def _fdw_snapshot_and_cdc(cursor, vendor, casing, mode):
 
 def test_InitialSnapshotFDW(pg_cursor, dbvendor, fdw_engine):
     _fdw_snapshot_and_cdc(pg_cursor, dbvendor, "lowercase", "initial")
+
+
+def test_InitialSnapshotFDW_source_locks(pg_cursor, dbvendor, fdw_engine):
+    if dbvendor not in ("mysql", "sqlserver"):
+        pytest.skip("source table locks apply only to MySQL and SQL Server")
+    key = "synchdb.fdw_snapshot_lock_tables"
+    pg_cursor.execute("SHOW synchdb.fdw_snapshot_lock_tables")
+    previous = pg_cursor.fetchone()[0]
+    try:
+        update_guc_conf(pg_cursor, key, "on", True)
+        _fdw_snapshot_and_cdc(pg_cursor, dbvendor, "lowercase", "initial")
+    finally:
+        update_guc_conf(pg_cursor, key, previous, True)
 
 
 def test_InitialSnapshotFDW_uppercase(pg_cursor, dbvendor, fdw_engine):

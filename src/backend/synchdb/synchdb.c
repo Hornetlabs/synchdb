@@ -147,6 +147,7 @@ int olr_read_timeout_ms = 5000;
 static int synchdb_snapshot_engine = ENGINE_DEBEZIUM;
 static int cdc_start_delay_ms = 0;
 static bool synchdb_fdw_use_subtx = true;
+static bool fdw_snapshot_lock_tables;
 int synchdb_letter_casing_strategy = LCS_NORMALIZE_LOWERCASE;
 
 static const struct config_enum_entry letter_casing_strategies[] =
@@ -3060,6 +3061,10 @@ _PG_init(void)
 							PGC_SIGHUP,
 							0,
 							NULL, NULL, NULL);
+
+	DefineCustomBoolVariable("synchdb.fdw_snapshot_lock_tables",
+							 "Hold read locks on MySQL and SQL Server source tables during FDW data snapshots.",
+							 NULL, &fdw_snapshot_lock_tables, false, PGC_SUSET, 0, NULL, NULL, NULL);
 
 	DefineCustomBoolVariable("synchdb.fdw_migrate_with_subtx",
 							 "whether or not to use subtransaction for per table migration",

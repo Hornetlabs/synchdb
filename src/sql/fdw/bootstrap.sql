@@ -189,6 +189,12 @@ BEGIN
 END;
 $fn$;
 
+CREATE OR REPLACE FUNCTION synchdb_fdw_lock_tables(oid, text, text[])
+RETURNS void AS 'MODULE_PATHNAME', 'synchdb_fdw_lock_tables' LANGUAGE C STRICT VOLATILE;
+
+CREATE OR REPLACE FUNCTION synchdb_fdw_unlock_tables()
+RETURNS void AS 'MODULE_PATHNAME', 'synchdb_fdw_unlock_tables' LANGUAGE C VOLATILE;
+
 CREATE OR REPLACE FUNCTION synchdb_bootstrap(p_request jsonb)
 RETURNS jsonb LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $fn$
 DECLARE
@@ -473,6 +479,12 @@ BEGIN
                 v_selected := v_selected || jsonb_build_array(v_source_id);
             END IF;
         END LOOP;
+    END IF;
+    IF v_copy AND v_connector IN ('mysql', 'sqlserver') AND jsonb_array_length(v_selected) > 0
+       AND current_setting('synchdb.fdw_snapshot_lock_tables')::boolean THEN
+        PERFORM synchdb_fdw_lock_tables(v_server_oid, v_owner,
+            ARRAY(SELECT t->>'table' FROM jsonb_array_elements(v_selected) t ORDER BY t->>'table'));
+        v_boundary := 'SOURCE_TABLE_READ_LOCKS';
     END IF;
     -- TODO: coordinate this candidate with the FDW remote read view and
     -- in-flight transactions. This restores the legacy runnable handoff only;
@@ -779,6 +791,9 @@ BEGIN
                 'status','FAILED','stage',v_stage_name,'rows',0,'sqlstate',v_state,'message',v_message,'detail',v_detail));
         END;
     END LOOP;
+    IF v_boundary = 'SOURCE_TABLE_READ_LOCKS' THEN
+        PERFORM synchdb_fdw_unlock_tables();
+    END IF;
     PERFORM synchdb_bootstrap_cleanup(v_resources);
     IF v_handoff AND v_failed = 0 THEN
         v_resume := jsonb_build_object('offset',v_offset,'history',v_history);

@@ -15,12 +15,7 @@
 
 ### **MySQL 連接器**
 
-* 以 repeatable read 隔離等級啟動事务。
-* 暫時對所有目標表上锁。
-* 讀取 `binlog_log_file`、`binlog_pos` 和 `server_id`。這些參數將作為快照的「截止點」。
-* 釋放表鎖。
-* 在同一個 repeatable read 事务中，使用正確的類型轉換遷移所有目標表的模式和資料。
-* 完成後，CDC 可以從截止點恢復，處理快照期間發生的資料變更。
+啟用 `synchdb.fdw_snapshot_lock_tables` 時，SynchDB 在讀取 binlog 位置前一次鎖住入選來源表，並在整批資料讀完或失敗時釋放。預設為關閉，成功的快照仍可接續 CDC。[設定快照引擎](../user-guide/configure_snapshot_engine.md)
 
 警告：**需要 BACKUP_ADMIN 權限才能取得「截止點」參數**
 
@@ -50,7 +45,7 @@
 ### **Microsoft SQL Server 連接器**
 
 * 快照開始前，讀取 `sys.fn_cdc_get_max_lsn()` 作為快照截止點。來源資料庫及目標表必須已啟用 SQL Server Change Data Capture (CDC)，這也是 Debezium SQL Server 連接器的既有前提。
-* 透過一般（自動提交）的 `tds_fdw` 外部表讀取遷移所有目標表的架構與資料，不使用表鎖或特殊的交易隔離等級。
+* 透過一般（自動提交）的 `tds_fdw` 外部表讀取遷移所有目標表的架構與資料，啟用 `synchdb.fdw_snapshot_lock_tables` 時，另一條連線會持有共用表鎖直到資料複製結束。
 * 完成後，Debezium recovery 模式只重建 SQL Server schema history，不再擷取一次資料快照；之後 CDC 從截止點 `commit_lsn` 恢復。
 
 <**注意**> 與 Oracle 的 Flashback 查詢或維持開啟的 repeatable read 交易不同，`tds_fdw` 不會讓所有外部表讀取共用同一個遠端交易。因此，截止點之後提交的變更可能同時出現在 FDW 複製與 CDC 重播中。SynchDB 會依目的端主鍵（或 replica identity）檢查 SQL Server 的 create 事件，略過已由快照複製的資料列。使用 FDW 快照加 CDC 的資料表應具有主鍵；缺少主鍵時，無法可靠地消除重疊資料。
