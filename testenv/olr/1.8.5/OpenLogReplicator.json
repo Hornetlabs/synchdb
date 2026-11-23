@@ -20,7 +20,7 @@
       	"rid": 1,
       	"schema": 7,
       	"timestamp-all": 1,
-		"scn-type": 1
+		"scn-type": 3
       },
       "memory": {
         "min-mb": 512,
@@ -32,7 +32,7 @@
           {"owner": "DBZUSER", "table": ".*"}
         ]
       },
-	  "flags": 32
+	  "flags": 4128
     }
   ],
   "target": [

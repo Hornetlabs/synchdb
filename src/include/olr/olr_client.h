@@ -13,6 +13,7 @@
 #include "postgres.h"
 #include "synchdb/synchdb.h"
 #include "utils/netio_utils.h"
+#include "utils/jsonb.h"
 
 /**
  * RedoResponseCode - Enum representing response code from OLR
@@ -29,7 +30,7 @@ typedef enum _ResponseCode
 	RES_INVALID_COMMAND
 } ResponseCode;
 
-int olr_client_start_or_cont_replication(char * source, bool which);
+int olr_client_start_or_cont_replication(const char * source, bool which);
 int olr_client_init(const char * hostname, unsigned int port);
 void olr_client_shutdown(void);
 int olr_client_get_change(int myConnectorId, bool * dbzExitSignal,
@@ -39,10 +40,8 @@ orascn olr_client_get_c_scn(void);
 orascn olr_client_get_scn(void);
 orascn olr_client_get_c_idx(void);
 int olr_client_confirm_scn(char * source);
-bool olr_client_write_scn_state(ConnectorType type, const char * name, const char * srcdb, bool force);
-bool olr_client_init_scn_state(ConnectorType type, const char * name, const char * srcdb);
 bool olr_client_get_connect_status(void);
-bool olr_client_write_snapshot_state(ConnectorType type, const char * name, const char * dstdb, bool done);
-bool olr_client_read_snapshot_state(ConnectorType type, const char * name, const char * dstdb, bool * done);
+extern void olr_client_verified_connect(const ConnectionInfo *connection, Jsonb *proof, bool resume);
+extern uint64 olr_client_get_source_boundary(void);
 
 #endif /* SYNCHDB_OLR_CLIENT_H_ */

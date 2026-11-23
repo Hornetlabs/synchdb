@@ -186,7 +186,7 @@ BEGIN
     EXECUTE format($SQL$
         CREATE OR REPLACE VIEW %1$I.keys AS
         SELECT
-            upper(n.nspname)          AS schema,
+            n.nspname                 AS schema,
             c.relname                 AS table_name,
             con.conname               AS constraint_name,
             con.condeferrable         AS deferrable,
@@ -310,7 +310,8 @@ BEGIN
     EXECUTE format('CREATE SCHEMA IF NOT EXISTS %I', v_schema);
 
     ----------------------------------------------------------------------
-    -- 3) Foreign table for WAL LSN snapshot access
+    -- 3) Foreign table for a diagnostic WAL LSN candidate. This query does not
+    -- import a replication-slot exported snapshot into the FDW connection.
     -- NOTE: The remote Postgres must define synchdb_wal_lsn view:
     --
     --   CREATE VIEW public.synchdb_wal_lsn AS
@@ -332,5 +333,4 @@ END;
 $synchdb_create_current_lsn_ft$;
 
 COMMENT ON FUNCTION synchdb_create_current_lsn_ft(name, name) IS
-   'create PostgreSQL foreign tables for reading current LSN';
-
+   'Read a diagnostic WAL LSN candidate; it does not coordinate the FDW transaction with a replication-slot snapshot';

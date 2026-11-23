@@ -1,9 +1,34 @@
 import common
 import time
+from psycopg2.errors import UndefinedTable
 from common import restart_remote_db, run_pg_query, run_pg_query_one, run_remote_query, create_synchdb_connector, getConnectorName, getDbname, create_and_start_synchdb_connector, stop_and_delete_synchdb_connector, drop_default_pg_schema, drop_repslot_and_pub
 
 # import pytest
 # pytestmark = pytest.mark.skip(reason="跳过此文件")
+
+def _dml_delay(vendor, seconds):
+    if vendor != "olr":
+        time.sleep(seconds)
+
+
+def _dml_query(cursor, vendor, name, query, expected, timeout=300):
+    if vendor != "olr":
+        return run_pg_query(cursor, query)
+    expected_values = [(int(row[0]), str(row[1])) for row in expected]
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            rows = run_pg_query(cursor, query)
+        except UndefinedTable:
+            rows = []  # The preceding source CREATE may still be in flight.
+        if [(int(row[0]), str(row[1])) for row in rows] == expected_values:
+            return rows
+        cursor.execute("SELECT actual_state,last_error FROM synchdb_control_view WHERE name=%s", (name,))
+        state = cursor.fetchone()
+        assert state and state[0] not in ("FAILED", "RETRY_WAIT"), state
+        assert time.monotonic() < deadline, f"OLR DML did not reach its source values: {rows}"
+        time.sleep(0.2)
+
 
 def test_Insert(pg_cursor, dbvendor):
 
@@ -19,7 +44,7 @@ def test_Insert(pg_cursor, dbvendor):
         run_pg_query_one(pg_cursor, f"CREATE TABLE {dbname}.orders (order_number int primary key, order_date timestamp without time zone, purchaser int, quantity int , product_id int)")
 
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "no_data")
-    assert result == 0
+    assert result > 0
 
     if dbvendor == "mysql":
         query = """
@@ -37,7 +62,7 @@ def test_Insert(pg_cursor, dbvendor):
             @supports_net_changes = 0;
         """
     elif dbvendor == "postgres":
-        time.sleep(10)
+        _dml_delay(dbvendor, 10)
         query = """
         CREATE TABLE inserttable(
             a INT PRIMARY KEY,
@@ -52,19 +77,19 @@ def test_Insert(pg_cursor, dbvendor):
 
     run_remote_query(dbvendor, query)
     if dbvendor in ("oracle", "oracle23ai", "olr"):
-        time.sleep(30)
+        _dml_delay(dbvendor, 30)
     else:
-        time.sleep(10)
+        _dml_delay(dbvendor, 10)
    
     out=run_remote_query(dbvendor, "INSERT INTO inserttable (a, b) VALUES (1, 'Hello')")
     out=run_remote_query(dbvendor, "COMMIT")
     if dbvendor in ("oracle", "oracle23ai", "olr"):
-        time.sleep(75)
+        _dml_delay(dbvendor, 75)
     else:
-        time.sleep(15)
+        _dml_delay(dbvendor, 15)
     
     extrows = run_remote_query(dbvendor, f"SELECT a, b FROM inserttable")
-    rows = run_pg_query(pg_cursor, f"SELECT a, b FROM {dbname}.inserttable")
+    rows = _dml_query(pg_cursor, dbvendor, name, f"SELECT a, b FROM {dbname}.inserttable", extrows)
     assert len(extrows) > 0
     assert len(rows) > 0
     assert len(extrows) == len(rows)
@@ -91,7 +116,7 @@ def test_Update(pg_cursor, dbvendor):
         run_pg_query_one(pg_cursor, f"CREATE TABLE {dbname}.orders (order_number int primary key, order_date timestamp without time zone, purchaser int, quantity int , product_id int)")
 
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "no_data")
-    assert result == 0
+    assert result > 0
 
     if dbvendor == "mysql":
         query = """
@@ -109,7 +134,7 @@ def test_Update(pg_cursor, dbvendor):
             @supports_net_changes = 0;
         """
     elif dbvendor == "postgres":
-        time.sleep(10)
+        _dml_delay(dbvendor, 10)
         query = """
         CREATE TABLE updatetable(
             a INT PRIMARY KEY,
@@ -125,9 +150,9 @@ def test_Update(pg_cursor, dbvendor):
     run_remote_query(dbvendor, query)
     if dbvendor in ("oracle", "oracle23ai", "olr"):
         run_remote_query(dbvendor, "ALTER TABLE updatetable ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS")
-        time.sleep(30)
+        _dml_delay(dbvendor, 30)
     else:
-        time.sleep(10)
+        _dml_delay(dbvendor, 10)
     
     run_remote_query(dbvendor, "INSERT INTO updatetable (a, b) VALUES (1, 'Hello')")
     run_remote_query(dbvendor, "UPDATE updatetable SET a = 2")
@@ -135,12 +160,12 @@ def test_Update(pg_cursor, dbvendor):
     run_remote_query(dbvendor, "COMMIT")
 
     if dbvendor in ("oracle", "oracle23ai", "olr"):
-        time.sleep(90)
+        _dml_delay(dbvendor, 90)
     else:
-        time.sleep(10)
+        _dml_delay(dbvendor, 10)
 
     extrows = run_remote_query(dbvendor, f"SELECT a, b FROM updatetable")
-    rows = run_pg_query(pg_cursor, f"SELECT a, b FROM {dbname}.updatetable")
+    rows = _dml_query(pg_cursor, dbvendor, name, f"SELECT a, b FROM {dbname}.updatetable", extrows)
     assert len(extrows) > 0
     assert len(rows) > 0
     assert len(extrows) == len(rows)
@@ -168,7 +193,7 @@ def test_Delete(pg_cursor, dbvendor):
         run_pg_query_one(pg_cursor, f"CREATE TABLE {dbname}.orders (order_number int primary key, order_date timestamp without time zone, purchaser int, quantity int , product_id int)")
 
     result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "no_data")
-    assert result == 0
+    assert result > 0
 
     if dbvendor == "mysql":
         query = """
@@ -186,7 +211,7 @@ def test_Delete(pg_cursor, dbvendor):
             @supports_net_changes = 0;
         """
     elif dbvendor == "postgres":
-        time.sleep(10)
+        _dml_delay(dbvendor, 10)
         query = """
         CREATE TABLE deletetable(
             a INT PRIMARY KEY,
@@ -202,9 +227,9 @@ def test_Delete(pg_cursor, dbvendor):
     run_remote_query(dbvendor, query)
     if dbvendor in ("oracle", "oracle23ai", "olr"):
         run_remote_query(dbvendor, "ALTER TABLE deletetable ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS")
-        time.sleep(30)
+        _dml_delay(dbvendor, 30)
     else:
-        time.sleep(10)
+        _dml_delay(dbvendor, 10)
 
     run_remote_query(dbvendor, "INSERT INTO deletetable (a, b) VALUES (1, 'Hello')")
     run_remote_query(dbvendor, "INSERT INTO deletetable (a, b) VALUES (2, 'SynchDB')")
@@ -212,12 +237,12 @@ def test_Delete(pg_cursor, dbvendor):
     run_remote_query(dbvendor, "COMMIT")
 
     if dbvendor in ("oracle", "oracle23ai", "olr"):
-        time.sleep(90)
+        _dml_delay(dbvendor, 90)
     else:
-        time.sleep(15)
+        _dml_delay(dbvendor, 15)
 
     extrows = run_remote_query(dbvendor, f"SELECT a, b FROM deletetable")
-    rows = run_pg_query(pg_cursor, f"SELECT a, b FROM {dbname}.deletetable")
+    rows = _dml_query(pg_cursor, dbvendor, name, f"SELECT a, b FROM {dbname}.deletetable", extrows)
     assert len(extrows) > 0 and len(extrows) == 3
     assert len(rows) > 0 and len(rows) == 3
     assert len(extrows) == len(rows)
@@ -228,12 +253,12 @@ def test_Delete(pg_cursor, dbvendor):
 
     run_remote_query(dbvendor, "DELETE FROM deletetable WHERE a = 2")
     if dbvendor in ("oracle", "oracle23ai", "olr"):
-        time.sleep(80)
+        _dml_delay(dbvendor, 80)
     else:
-        time.sleep(15)
+        _dml_delay(dbvendor, 15)
 
     extrows = run_remote_query(dbvendor, f"SELECT a, b FROM deletetable")
-    rows = run_pg_query(pg_cursor, f"SELECT a, b FROM {dbname}.deletetable")
+    rows = _dml_query(pg_cursor, dbvendor, name, f"SELECT a, b FROM {dbname}.deletetable", extrows)
     assert len(rows) > 0 and len(rows) == 2
     assert len(extrows) > 0 and len(extrows) == 2
     assert len(extrows) == len(rows)

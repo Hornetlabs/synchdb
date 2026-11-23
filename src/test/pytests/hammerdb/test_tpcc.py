@@ -2,7 +2,7 @@ import os
 import subprocess
 import time
 import re
-from common import run_pg_query, run_pg_query_one, getConnectorName, create_and_start_synchdb_connector, run_remote_query
+from common import run_pg_query, run_pg_query_one, getConnectorName, create_and_start_synchdb_connector, run_remote_query, wait_for_operation
 
 def output_tpcc_buildschema_results(dbvendor, pg_diff_ms, tables, rows):
     rows_per_sec = rows * 1000 / pg_diff_ms if pg_diff_ms > 0 else 0
@@ -45,7 +45,7 @@ def test_tpcc_buildschema(pg_cursor, dbvendor, hammerdb):
     if dbvendor == "mysql":
         subprocess.run(["docker", "exec", "hammerdb", "./hammerdbcli", "auto", "/buildschema.tcl"], check=True) 
         result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial", srcdb="tpcc")
-        assert result == 0
+        assert result > 0
     elif dbvendor == "sqlserver":
         subprocess.run(["docker", "exec", "-e", "LD_LIBRARY_PATH=/usr/local/unixODBC/lib:/home/instantclient_21_18/", "-e", "TMP=/tmp", "-e", "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/mssql-tools18/bin:/opt/mssql-tools18/bin:/usr/local/unixODBC/bin", "hammerdb", "./hammerdbcli", "auto", "/buildschema.tcl"], check=True)
 
@@ -60,7 +60,7 @@ def test_tpcc_buildschema(pg_cursor, dbvendor, hammerdb):
         run_remote_query(dbvendor, "EXEC sys.sp_cdc_enable_table @source_schema = 'dbo', @source_name = 'stock', @role_name = NULL, @supports_net_changes = 0", srcdb="tpcc")
         run_remote_query(dbvendor, "EXEC sys.sp_cdc_enable_table @source_schema = 'dbo', @source_name = 'warehouse', @role_name = NULL, @supports_net_changes = 0", srcdb="tpcc")
         result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial", srcdb="tpcc")
-        assert result == 0
+        assert result > 0
     else:
         # oracle: drop orders table that were creasted as default. Hammerdb has aconflicting table
         run_remote_query(dbvendor, "DROP TABLE orders")
@@ -80,7 +80,7 @@ def test_tpcc_buildschema(pg_cursor, dbvendor, hammerdb):
         # give oracle some time to archive redo logs
         time.sleep(30)
         result = create_and_start_synchdb_connector(pg_cursor, dbvendor, name, "initial", srcdb="FREE")
-        assert result == 0
+        assert result > 0
     
     # try to get the first non-zero timestammps from synchdb_stats_view
     loopcnt=0
@@ -145,13 +145,13 @@ def test_tpcc_run(pg_cursor, dbvendor, hammerdb, tpccmode):
     
     # reset stats
     rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_reset_stats('{name}')")
-    assert rows[0] == 0
+    wait_for_operation(pg_cursor, rows[0])
 
     #subprocess.Popen(["docker", "exec", "hammerdb", "./hammerdbcli", "auto", "/runtpcc.tcl"], stdout=subprocess.DEVNULL)
     if tpccmode == "serial":
         # we pause connector first, and resume only after tpcc test run has completed 
         rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_pause_engine('{name}')")
-        assert rows[0] == 0
+        wait_for_operation(pg_cursor, rows[0])
 
         #subprocess.run(["docker", "exec", "hammerdb", "./hammerdbcli", "auto", "/runtpcc.tcl"], check=True)
         if dbvendor == "mysql":
@@ -187,7 +187,7 @@ def test_tpcc_run(pg_cursor, dbvendor, hammerdb, tpccmode):
             #    ).stdout
             #).groups())
         rows = run_pg_query_one(pg_cursor, f"SELECT synchdb_resume_engine('{name}')")
-        assert rows[0] == 0
+        wait_for_operation(pg_cursor, rows[0])
     else:
         # run tpcc test in background while synchdb is polling
         if dbvendor == "mysql":

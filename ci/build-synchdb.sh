@@ -22,6 +22,33 @@ TARGET_FLAVOR=${TARGET_FLAVOR:-postgres}
 # we'll do everything with absolute paths
 basedir="$(pwd)"
 
+function build_debezium()
+{
+	local attempt status logfile
+	logfile=$(mktemp)
+	for attempt in 1 2 3; do
+		# -U also retries artifacts whose failed resolution Maven cached.
+		if MAVEN_ARGS="${MAVEN_ARGS:-} --batch-mode --no-transfer-progress --errors --update-snapshots" \
+			make WITH_OLR=1 build_dbz > "$logfile" 2>&1; then
+			cat "$logfile"
+			rm -f "$logfile"
+			return 0
+		else
+			status=$?
+			cat "$logfile"
+		fi
+		# Retry dependency downloads, while reporting compilation/test failures
+		# immediately. Persistent resolution errors still fail the build.
+		if [ "$attempt" -eq 3 ] ||
+			! grep -Eq 'PluginResolutionException|DependencyResolutionException|UnresolvableModelException' "$logfile"; then
+			rm -f "$logfile"
+			return "$status"
+		fi
+		echo "Maven dependency resolution failed (attempt $attempt/3); retrying..." >&2
+		sleep "$((attempt * 5))"
+	done
+}
+
 function build_synchdb()
 {
 	local srcdir repo branch prefix installdir artifact pgconfig
@@ -135,11 +162,32 @@ function build_synchdb()
 		cd "${srcdir}/contrib/synchdb"
 		make oracle_parser
 		make install_oracle_parser
-		make WITH_OLR=1 build_dbz
+		build_debezium
 		make WITH_OLR=1 PROTOBUF_C_INCLUDE_DIR="${installdir}/usr/local/include" PROTOBUF_C_LIB_DIR="${installdir}/usr/local/lib"
 		make WITH_OLR=1 install
 		make WITH_OLR=1 install_dbz
 	)
+
+	# Shared-library linking permits unresolved backend symbols. Exercise the
+	# exact installed server/extension pair before publishing an artifact.
+	LD_LIBRARY_PATH="${installdir}/usr/local/lib:${LD_LIBRARY_PATH:-}" \
+		bash "${basedir}/ci/check-extension-load.sh" "${pgconfig}"
+
+	# Fail before publishing build artifacts or provisioning any source DB.
+	# These production-code event tests need only this freshly built target.
+	if [ "${SYNCHDB_CI_EVENT_TESTS:-0}" = "1" ]; then
+		(
+			cd "${srcdir}/contrib/synchdb"
+			export SYNCHDB_TARGET_BIN="${prefix}/bin"
+			export SYNCHDB_TEST_TARGET_FLAVOR="${TARGET_FLAVOR}"
+			export PROTOBUF_C_INCLUDE_DIR="${installdir}/usr/local/include"
+			export PROTOBUF_C_LIB_DIR="${installdir}/usr/local/lib"
+			export LD_LIBRARY_PATH="${installdir}/usr/local/lib:${LD_LIBRARY_PATH:-}"
+			# Both variants share object files and must run sequentially.
+			SYNCHDB_TEST_WITH_OLR=0 python3 -m pytest -q src/test/pytests/truncate
+			SYNCHDB_TEST_WITH_OLR=1 python3 -m pytest -q src/test/pytests/truncate
+		)
+	fi
 
 	cd "$installdir"
 	tar czvf "${artifact}.tar.gz" *

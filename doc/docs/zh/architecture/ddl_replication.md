@@ -29,6 +29,18 @@ SynchDB 支持以下 DDL 操作：
 
 ## **详细命令支持**
 
+### **TRUNCATE TABLE**
+
+MySQL、Oracle、PostgreSQL 的 Debezium `op=t` 事件及原生 OLR 的 Oracle `TRUNCATE TABLE` 事件会清空映射后的目标表，不需要主键或行镜像。目标端执行 PostgreSQL 的权限检查和 TRUNCATE 触发器，与同批次其他事件共用事务；后续失败会回滚清空操作，且不确认位点。成功后同时递增 `ddls` 和 `truncates`。
+
+显式单表 `tableChanges[].type=TRUNCATE` / `TRUNCATE TABLE` 和 schema-change DDL 文本也转换为同一种 TRUNCATE 事件。空 `tableChanges` 中携带 TRUNCATE SQL 时会执行清空；源数据库、模式、表名、序列化表 ID 与 SQL 限定名必须一致。SQL 只允许一条完整受支持语句；带引号的源标识符保留大小写。畸形行镜像和快照中的 TRUNCATE 在查找目标表前拒绝。
+
+默认同步 TRUNCATE。设置 `synchdb.dbz_skipped_operations = 't'` 并开始新的连接器运行可显式跳过；原生 OLR 会记录跳过日志并继续同步。
+
+每个事件只清空其捕获表，目标端使用 ONLY、CONTINUE IDENTITY、RESTRICT。Debezium 不传递源语句的级联和序列重置选项，因此不会清空其他本地表或重置目标序列；目标外键约束可能导致批次失败。PostgreSQL 多表 TRUNCATE 会产生多个逐表事件，不会通过级联绕过这些表之间的目标外键约束。
+
+原生 OLR 接受 Oracle 的 DROP STORAGE、DROP ALL STORAGE、REUSE STORAGE 子句，其物理存储设置不传递到目标；两种 SQL 文本入口均显式拒绝多表、多条 SQL、CASCADE、RESTART IDENTITY；原生 OLR 的 TRUNCATE 不依赖 Oracle parser 库。SQL Server 已启用 CDC 的源表不能执行 TRUNCATE。
+
 ### **CREATE TABLE**
 
 SynchDB 在 CREATE TABLE 事件期间捕获以下属性：

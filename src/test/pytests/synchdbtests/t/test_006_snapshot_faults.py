@@ -1,4 +1,5 @@
 import time
+import common
 import pytest
 
 from common import (
@@ -36,19 +37,7 @@ def wait_for_snapshot_complete(cursor, name, timeout=120, interval=2):
     return last
 
 
-# ---------------------------------------------------------------------------
-# fixtures (module-local)
-# ---------------------------------------------------------------------------
-
-@pytest.fixture
-def fdw_engine(pg_cursor):
-    """Switch the snapshot engine to FDW for one test, then restore debezium."""
-    update_guc_conf(pg_cursor, "synchdb.snapshot_engine", "'fdw'", True)
-    yield
-    update_guc_conf(pg_cursor, "synchdb.snapshot_engine", "'debezium'", True)
-
-
-def test_FailThenRetryFDW(pg_cursor, dbvendor, fdw_engine, target):
+def test_FailThenRestartFDW(pg_cursor, dbvendor, fdw_engine, target):
     if dbvendor == "mysql" and target.key == "ivorysql5":
         pytest.skip("TODO: IvorySQL 5.4 not support mysql_fdw yet")
 
@@ -56,7 +45,10 @@ def test_FailThenRetryFDW(pg_cursor, dbvendor, fdw_engine, target):
 
     dbname = getDbname(dbvendor).lower()
     schema = getSchema(dbvendor)
-    failed_source_table_full_name = f"{dbname}.bad_table_1" if schema is None else f"{dbname}.{schema}.bad_table_1"
+    source_prefix = getDbname(dbvendor) if schema is None else f"{getDbname(dbvendor)}.{schema}"
+    suffix = "BAD_TABLE_1.ORDER_ID" if dbvendor in ("oracle", "oracle23ai", "olr") else "bad_table_1.order_id"
+    source_column = f"{source_prefix}.{suffix}"
+    selection = ','.join(f"{schema or dbname}.bad_table_{i}" for i in range(3))
     name = getConnectorName(dbvendor) + "_fdwfailretry"
             
     if dbvendor == "mysql":
@@ -95,41 +87,54 @@ def test_FailThenRetryFDW(pg_cursor, dbvendor, fdw_engine, target):
     # Create three tables with bigint values
     for i in range(3):
         run_remote_query(dbvendor, query_pattern.format(str(i)))
+    if dbvendor in ("oracle", "oracle23ai", "olr"):
+        # Let every new table become Flashback-readable before committing its
+        # fixture data, just as in the FDW bootstrap data-copy cases.
+        time.sleep(15)
+    for i in range(3):
         run_remote_query(dbvendor, "INSERT INTO bad_table_{} values ({}, {})".format(str(i), i, BIG_VALUE))
 
-    create_synchdb_connector(pg_cursor, dbvendor, name)
+    create_synchdb_connector(pg_cursor, dbvendor, name, srctable=selection)
 
-    # 1. create wrong datatype mapping so that the snapshot will fail
-    run_pg_query(pg_cursor, f"SELECT synchdb_add_objmap('{name}','datatype','{dbname}.bad_table_1.order_id','smallint');")
+    # A failed table rolls back independently; the read session then ends.
+    run_pg_query(pg_cursor, f"SELECT synchdb_add_objmap('{name}','datatype','{source_column}','smallint');")
+    pg_cursor.execute("SELECT synchdb_start_engine_bgw(%s, 'initial_only')", (name,))
+    receipt = common.wait_for_operation(pg_cursor, pg_cursor.fetchone()[0], expected_status="FAILED")
+    assert receipt["sqlstate"] == "38000", receipt
+    result = common.get_bootstrap_result(pg_cursor, name)
+    assert result["status"] == "PARTIAL", result
+    assert result["retry_disposition"] == "RESTART_BOOTSTRAP"
+    failed = [t for t in result["tables"] if t["status"] == "FAILED"]
+    assert len(failed) == 1
+    assert failed[0]["source"]["table"].lower() == "bad_table_1"
+    assert failed[0]["sqlstate"] == "22003", failed
+    assert result["cdc_eligible"] is False
+    assert result["resources_disposition"] == "CLEANED"
+    assert run_pg_query_one(pg_cursor, f"SELECT to_regclass('{dbname}.bad_table_1')") == (None,)
+    assert run_pg_query_one(pg_cursor, f"SELECT order_id FROM {dbname}.bad_table_0") == (BIG_VALUE,)
 
-    # 2. start connector
-    run_pg_query_one(pg_cursor, f"SELECT synchdb_start_engine_bgw('{name}')")
-    stage, state, err = wait_for_snapshot_complete(pg_cursor, name, timeout=100)
-
-    if state != "paused":
-        print(f"Unexpected: stage: {stage}, state: {state}, err: {err}")
-    assert state == "paused"
-
-    assert "synchdb_fdw_snapshot_errors_" in err
-    ret = run_pg_query(pg_cursor, f"SELECT * FROM synchdb_fdw_snapshot_errors_{name};")
-    assert len(ret) == 1
-    assert ret[0][1] == failed_source_table_full_name
-
-    # 3. remove objmap then resume connector
-    run_pg_query(pg_cursor, f"SELECT synchdb_del_objmap('{name}','datatype','{dbname}.bad_table_1.order_id');")
-    run_pg_query_one(pg_cursor, f"SELECT synchdb_resume_engine('{name}')")
-
-    stage, state, err = wait_for_snapshot_complete(pg_cursor, name, timeout=100)
-    assert state == "polling"
-
-    ret = run_pg_query_one(pg_cursor, f"SELECT * from {dbname}.bad_table_1;")
-    assert ret[1] == BIG_VALUE
+    # RESUME cannot recreate the expired source read view or enter CDC.
+    pg_cursor.execute("SELECT synchdb_resume_engine(%s)", (name,))
+    receipt = common.wait_for_operation(pg_cursor, pg_cursor.fetchone()[0], expected_status="FAILED")
+    assert receipt["sqlstate"] == "0A000", receipt
+    pg_cursor.execute("SELECT synchdb_stop_engine_bgw(%s)", (name,))
+    common.wait_for_operation(pg_cursor, pg_cursor.fetchone()[0])
+    run_pg_query(pg_cursor, f"SELECT synchdb_del_objmap('{name}','datatype','{source_column}');")
+    # Discard this test's partial target before a fresh complete bootstrap.
+    drop_default_pg_schema(pg_cursor, dbvendor)
+    pg_cursor.execute("SELECT synchdb_start_engine_bgw(%s, 'initial_only')", (name,))
+    common.wait_for_operation(pg_cursor, pg_cursor.fetchone()[0])
+    retried = common.get_bootstrap_result(pg_cursor, name)
+    assert retried["status"] == "COMPLETE", retried
+    assert retried["generation"] != result["generation"]
+    for i in range(3):
+        assert run_pg_query_one(pg_cursor, f"SELECT order_id FROM {dbname}.bad_table_{i}") == (BIG_VALUE,)
 
     stop_and_delete_synchdb_connector(pg_cursor, name)
     drop_default_pg_schema(pg_cursor, dbvendor)
     drop_repslot_and_pub(dbvendor, name, "postgres")
     for i in range(3):
-        run_remote_query(dbvendor, f"DROP TABLE IF EXISTS bad_table_{i}")
+        run_remote_query(dbvendor, f"DROP TABLE bad_table_{i}")
 
 
 @pytest.mark.skip("TODO: implement after upgrade Debezium")
@@ -225,4 +230,4 @@ def test_FailThenRetryDebezium(pg_cursor, dbvendor):
     drop_default_pg_schema(pg_cursor, dbvendor)
     drop_repslot_and_pub(dbvendor, name, "postgres")
     for i in range(3):
-        run_remote_query(dbvendor, f"DROP TABLE IF EXISTS bad_table_{i}")
+        run_remote_query(dbvendor, f"DROP TABLE bad_table_{i}")
