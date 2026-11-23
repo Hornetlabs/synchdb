@@ -6,6 +6,9 @@ services:
   openlogreplicator:
     container_name: OpenLogReplicator
     image: hgneon/openlogreplicator:${OLRVER}
+    # The image wrapper tees into a root-owned log directory. Run the same
+    # binary directly so UID 54321 logs through Docker and receives SIGTERM.
+    entrypoint: ["/opt/OpenLogReplicator/OpenLogReplicator"]
     ports:
       - 7070:7070
     user: "54321:54321"
@@ -24,4 +27,3 @@ networks:
     name: synchdbnet
     driver: bridge
     internal: true
-

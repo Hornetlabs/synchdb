@@ -12,6 +12,20 @@ on:
       - 'doc/**'
       - '.github/workflows/docs-ci.yml'
 jobs:
+  test-source-helpers:
+    name: Source client contracts
+    runs-on: ubuntu-22.04
+    steps:
+    - uses: actions/checkout@v2
+    - uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+    - run: python -m pip install pytest
+    - name: Check source SQL scripts without database provisioning
+      run: python -m pytest -q src/test/pytests/source_helpers
+      env:
+        PYTHONPATH: src/test/pytests/synchdbtests
+
   params:
     runs-on: ubuntu-22.04
     name: Initialize parameters
@@ -25,7 +39,7 @@ jobs:
 
   # ----------------------------------------------------------- build (PostgreSQL)
   build-postgresql:
-    needs: params
+    needs: [params, test-source-helpers]
     name: Build for PG${{ fromJson(matrix.pg_version).major }}
     strategy:
       matrix:
@@ -47,6 +61,11 @@ jobs:
       uses: stCarolas/setup-maven@v4.5
       with:
         maven-version: 3.9.8
+    - uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+    - name: Install event regression dependencies
+      run: python -m pip install pytest psycopg2-binary
     - name: Setup Oracle Instant Client v23.9
       run: |
         mkdir -p $GITHUB_WORKSPACE/oci && cd $GITHUB_WORKSPACE/oci
@@ -75,6 +94,7 @@ jobs:
       shell: bash
       env:
         TARGET_FLAVOR: postgres
+        SYNCHDB_CI_EVENT_TESTS: '1'
     - uses: actions/upload-artifact@v4
       with:
         name: synchdb-install-${{ fromJson(matrix.pg_version).major }}
@@ -85,7 +105,7 @@ jobs:
   # IvorySQL is a PG fork; reuse build-synchdb.sh with TARGET_FLAVOR=ivorysql.
   # 3.x=PG16-compat, 4.x=PG17-compat, 5.x=PG18-compat.
   build-ivorysql:
-    needs: params
+    needs: [params, test-source-helpers]
     name: Build for IvorySQL ${{ matrix.ivy.major }}
     strategy:
       matrix:
@@ -98,6 +118,7 @@ jobs:
       TARGET_FLAVOR: ivorysql
       IVORYSQL_TAG: ${{ matrix.ivy.tag }}
       IVORYSQL_MAJOR: ${{ matrix.ivy.major }}
+      SYNCHDB_CI_EVENT_TESTS: '1'
     steps:
     - uses: actions/checkout@v2
     - name: Set up JDK 22
@@ -111,6 +132,11 @@ jobs:
       uses: stCarolas/setup-maven@v4.5
       with:
         maven-version: 3.9.8
+    - uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+    - name: Install event regression dependencies
+      run: python -m pip install pytest psycopg2-binary
     - name: Setup Oracle Instant Client v23.9
       run: |
         mkdir -p $GITHUB_WORKSPACE/oci && cd $GITHUB_WORKSPACE/oci
@@ -230,6 +256,11 @@ jobs:
         name: synchdb-test-outputs-${{ matrix.source }}-pg${{ matrix.major }}
         path: |-
           ./synchdb_testdir
+    - uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: synchdb-source-setup-${{ matrix.source }}-pg${{ matrix.major }}
+        path: ./source-setup-logs
 
   # ----------------------------------------------------------- test (IvorySQL 4)
   # Decoupled from the PG test job so a flaky IvorySQL build never blocks PG CI.
@@ -322,3 +353,8 @@ jobs:
         name: synchdb-test-outputs-${{ matrix.source }}-ivorysql${{ matrix.major }}
         path: |-
           ./synchdb_testdir
+    - uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: synchdb-source-setup-${{ matrix.source }}-ivorysql${{ matrix.major }}
+        path: ./source-setup-logs

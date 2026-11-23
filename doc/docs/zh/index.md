@@ -19,6 +19,12 @@ SynchDB 的核心集成了 Debezium 嵌入式引擎，这是一个基于 Java �
 
 🔗 了解更多关于 Debezium 的信息，请点击此处 (https://debezium.io/documentation/reference/stable/index.html)。
 
+## **从 v1.4 迁移到 v1.5**
+
+已有 v1.4 部署升级到 v1.5 时，需要按迁移步骤更新扩展目录和同步状态，并保留原连接配置、目标表、密码及同步位点。请先阅读迁移手册，不要只替换共享库或 Java 包。
+
+英文迁移手册在源码仓库中的路径：`upgrade-v1.4-to-v1.5/README.md`。升级所需工具也放在同一目录中。
+
 ## **主要特性**
 
 - 高效的数据同步

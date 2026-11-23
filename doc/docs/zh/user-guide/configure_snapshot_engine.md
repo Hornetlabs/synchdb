@@ -34,6 +34,12 @@ SynchDB 支援兩種快照引擎，每種引擎支援多種連接器類型：
 * 在呼叫 `synchdb_start_engine_bgw()` 時自動觸發，快照模式要求執行快照，完成後不會再執行。
 * 必須有對應的 FDW 可用。
 
+### MySQL 和 SQL Server 的來源表讀鎖
+
+在 PostgreSQL 的 `postgresql.conf` 設定 `synchdb.fdw_snapshot_lock_tables = on` 並重新載入設定，對後續 FDW 資料快照生效。預設為 `off`。開啟時，入選表在複製期間可讀，寫入須等到快照讀完或失敗後才繼續。MySQL 帳號需有 `SELECT` 和 `LOCK TABLES` 權限；SQL Server 使用交易內的共用表鎖。請在快照期間暫停相關 DDL。
+
+關閉時照常複製，並允許成功的完整快照接續 CDC，即使跨表資料可能來自不同時間點。兩種設定都沿用原有 CDC 位點邏輯。啟用讀鎖時，SynchDB 直接使用來源 FDW 已載入的用戶端函式庫。建置 SynchDB 無須另裝 MySQL 或 FreeTDS 開發套件。
+
 ## **Oracle 和 OLR 連接器的 FDW 快照**
 
 可以使用 oracle_fdw 為 Oracle 和 OLR 連接器執行初始快照，速度比 Debezium 的同類工具快得多。 SynchDB 整合了 [oracle_fdw](https://github.com/laurenz/oracle_fdw) 2.8.0 版本，其底層驅動程式為 OCI v23.9.0。這只是測試版本，更舊或更新的版本可能也適用。

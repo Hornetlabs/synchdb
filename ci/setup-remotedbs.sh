@@ -18,37 +18,50 @@ else
   exit 1
 fi
 
+function container_readiness_failed()
+{
+	local name=$1
+	local reason=$2
+
+	echo "$reason" >&2
+	echo "Container state for $name:" >&2
+	docker inspect --format '{{json .State}}' "$name" >&2 || true
+	echo "Last 100 log lines for $name:" >&2
+	docker logs --tail 100 "$name" >&2 || true
+	# Some setup functions call this with errexit disabled. Do not continue
+	# configuring the source database after a failed readiness check.
+	exit 1
+}
+
 function wait_for_container_ready()
 {
-	name=$1
-	keyword=$2
-	ready=0
-
-	set +e
-	if ! docker inspect $name >/dev/null 2>&1; then
-		echo "$name is not running or failed to start!"
-		return
-	fi	
+	local name=$1
+	local keyword=$2
+	local state status exit_code oom_killed started_at i
 
 	for ((i=1; i<=MAX_TRIES; i++));
 	do
-		docker logs "$name" 2>&1 | grep "$keyword"
-		if [ $? -eq 0 ]; then
-		#if docker logs "$name" 2>/dev/null | grep "$keyword"; then
-			echo "$name is ready to use"
-			ready=1
-			break
-		else
-			echo "Still waiting for $name to become ready..."
-			sleep 10
+		if ! state=$(docker inspect --format '{{.State.Status}} {{.State.ExitCode}} {{.State.OOMKilled}} {{.State.StartedAt}}' "$name"); then
+			container_readiness_failed "$name" "$name is missing or its state could not be inspected."
 		fi
+		read -r status exit_code oom_killed started_at <<< "$state"
+		if [[ "$oom_killed" == true || "$status" == exited || "$status" == dead || "$status" == removing ]]; then
+			container_readiness_failed "$name" "$name stopped before becoming ready (state=$status, exit_code=$exit_code, OOMKilled=$oom_killed)."
+		fi
+
+		# Ignore readiness messages left by an earlier container start.
+		if [[ "$status" == running ]] && docker logs --since "$started_at" "$name" 2>&1 | grep -F -- "$keyword"; then
+			echo "$name is ready to use"
+			# Preserve the existing contract: source configuration after a
+			# successful wait must stop on errors, including after a restart.
+			set -e
+			return 0
+		fi
+		echo "Still waiting for $name to become ready..."
+		sleep 10
 	done
 
-	if [ $ready -ne 1 ]; then
-		echo "giving up after $MAX_TRIES on $name..."
-		exit 1
-	fi
-	set -e
+	container_readiness_failed "$name" "giving up after $MAX_TRIES attempts on $name..."
 }
 
 function setup_mysql()
@@ -628,6 +641,28 @@ EOF
 
 }
 
+function prepare_ora19c_capture_logs()
+{
+	# ALL snapshot boundaries inspect MIN(FIRST_CHANGE#) from every V$LOG
+	# group, but mine only CURRENT redo and archived logs. After enabling
+	# ARCHIVELOG, cycle every group so no pre-ARCHIVELOG inactive group can
+	# supply an SCN absent from that minable set. Keep the consistency check.
+	docker exec -i ora19c sqlplus -S / as sysdba <<'EOF'
+WHENEVER OSERROR EXIT FAILURE;
+WHENEVER SQLERROR EXIT SQL.SQLCODE;
+DECLARE
+    log_groups PLS_INTEGER;
+BEGIN
+    SELECT COUNT(*) INTO log_groups FROM v$log;
+    FOR i IN 1..log_groups LOOP
+        EXECUTE IMMEDIATE 'ALTER SYSTEM ARCHIVE LOG CURRENT';
+    END LOOP;
+END;
+/
+EXIT;
+EOF
+}
+
 function setup_hammerdb()
 {
 	which=${WHICH:?please provide which hammerdb type, mysql, sqlserver or oracle}
@@ -697,6 +732,33 @@ function setup_olr()
 			echo "OpenLogReplicator in unknown state. Remove it and try again..."
         fi
     fi
+	# Do not hand tests an exited container's "invalid IP". The published
+	# 1.8.5 image can fail before main() in ASan initialization; retry only
+	# that recognizable startup failure, with a fixed limit.
+	local attempt olr_ip startup_retries=0
+	for attempt in $(seq 1 120); do
+		state=$(docker inspect -f '{{.State.Status}}' OpenLogReplicator)
+		if [ "$state" = "exited" ]; then
+			if [ "$startup_retries" -lt 3 ] &&
+				docker logs --tail 30 OpenLogReplicator 2>&1 | grep -q 'AddressSanitizer:DEADLYSIGNAL'; then
+				startup_retries=$((startup_retries + 1))
+				echo "retrying OLR sanitizer startup ($startup_retries/3)..."
+				docker start OpenLogReplicator >/dev/null
+			else
+				docker logs --tail 40 OpenLogReplicator >&2
+				return 1
+			fi
+		elif [ "$state" = "running" ]; then
+			olr_ip=$(docker inspect -f '{{(index .NetworkSettings.Networks "synchdbnet").IPAddress}}' OpenLogReplicator)
+			if python3 -c 'import socket,sys; socket.create_connection((sys.argv[1],7070),1).close()' "$olr_ip" 2>/dev/null; then
+				echo "OpenLogReplicator is accepting connections"
+				return 0
+			fi
+		fi
+		sleep 1
+	done
+	docker logs --tail 40 OpenLogReplicator >&2
+	return 1
 }
 
 function setup_postgres()
@@ -740,6 +802,7 @@ function setup_remotedb()
 			;;
 		"ora19c")
 			setup_ora19c "notolr"
+			prepare_ora19c_capture_logs || exit 1
 			;;
 		"hammerdb")
 			setup_hammerdb
@@ -748,6 +811,7 @@ function setup_remotedb()
 			OLRVER=${OLRVER:?please provide OLR version via OLRVER env variable}
 			setup_oradata
 			setup_ora19c "olr"
+			prepare_ora19c_capture_logs || exit 1
 			setup_olr
 			;;
 		"postgres")

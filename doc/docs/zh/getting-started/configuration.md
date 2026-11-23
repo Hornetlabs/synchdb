@@ -14,7 +14,7 @@ SynchDB 在 postgresql.conf 中支持以下 GUC 变量。这些是适用于 Sync
 | synchdb.dbz_queue_size | integer | 8192 | Debezium 嵌入式引擎的变更事件队列的最大大小（以变更事件数衡量）。应将其设置为 `synchdb.dbz_batch_size` 的至少两倍 |
 | synchdb.dbz_connect_timeout_ms | integer | 30000 | Debezium 嵌入式引擎与远程数据库建立初始连接的超时值（以毫秒为单位） |
 | synchdb.dbz_query_timeout_ms | integer | 600000 | Debezium 嵌入式引擎在远程数据库上执行查询的超时值（以毫秒为单位） |
-| synchdb.dbz_skipped_oeprations | string | “t” | Debezium 在处理更改事件时应跳过的操作的逗号分隔列表。 “c” 表示插入，“u” 表示更新，“d” 表示删除，“t” 表示截断 |
+| synchdb.dbz_skipped_operations | string | “none” | 流式同步中跳过的操作：c 为插入，u 为更新，d 为删除，t 为 TRUNCATE。none 或空字符串表示不跳过，默认同步 TRUNCATE。旧拼写 synchdb.dbz_skipped_oeprations 仍兼容；同时配置时以正确拼写为准。变更作用于新接受的连接器运行。 |
 | synchdb.jvm_max_heap_size | integer | 1024 | 启动连接器时分配给 Java 虚拟机 (JVM) 的最大heap内存大小（以 MB 为单位）。 |
 | synchdb.dbz_snapshot_thread_num | integer | 2 | Debezium 嵌入式连接器在初始快照期间应产生的线程数。请注意，根据 Debezium，多线程快照是一项“孵化功能” |
 | synchdb.dbz_snapshot_fetch_size | integer | 0 | Debezium 嵌入式连接器在初始快照期间应一次获取的行数。将其设置为 0 以让引擎自动选择 |

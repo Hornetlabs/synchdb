@@ -2,8 +2,9 @@ CREATE OR REPLACE FUNCTION synchdb_apply_column_mappings(
     p_src_schema      name,             -- e.g. 'psql_stage'
     p_connector_name  name,             -- connector name to filter objmap
     p_desired_db      name,             -- e.g. 'free' or 'wrongdb'
-    p_desired_schema  name DEFAULT NULL, -- optional: e.g. 'dbzuser'; NULL = don't enforce
-	p_case_strategy   text DEFAULT 'asis'
+    p_desired_schema  name,              -- e.g. 'dbzuser'; NULL = don't enforce
+    p_case_strategy   text,
+    p_table_names     name[]
 ) RETURNS void
 LANGUAGE plpgsql
 AS $$
@@ -34,6 +35,10 @@ DECLARE
   dt_len     int;
   dtype_sql  text;   -- rendered SQL type, e.g. 'varchar(128)' or 'text'
 BEGIN
+  -- Scope names are actual, already normalized materialized table names.
+  IF p_table_names IS NOT NULL AND cardinality(p_table_names) = 0 THEN
+    RETURN;
+  END IF;
   ---------------------------------------------------------------------------
   -- Pass 1: COLUMN RENAME mappings (unchanged)
   ---------------------------------------------------------------------------
@@ -74,6 +79,11 @@ BEGIN
     IF p_desired_schema IS NOT NULL
        AND s_schema IS NOT NULL
        AND s_schema <> p_desired_schema THEN
+      CONTINUE;
+    END IF;
+
+    IF p_table_names IS NOT NULL
+       AND (s_table::name = ANY(p_table_names)) IS NOT TRUE THEN
       CONTINUE;
     END IF;
 
@@ -134,11 +144,11 @@ BEGIN
     END IF;
 
     IF p_case_strategy = 'lower' THEN
-      s_col := lower(s_col);
-      s_table := lower(s_table);
+      dt_col := lower(dt_col);
+      dt_table := lower(dt_table);
     ELSIF p_case_strategy = 'upper' THEN
-      s_col := upper(s_col);
-      s_table := upper(s_table);
+      dt_col := upper(dt_col);
+      dt_table := upper(dt_table);
     ELSE
       -- 'asis' → leave untouched
       NULL;
@@ -154,6 +164,11 @@ BEGIN
       CONTINUE;
     END IF;
 
+    IF p_table_names IS NOT NULL
+       AND (dt_table::name = ANY(p_table_names)) IS NOT TRUE THEN
+      CONTINUE;
+    END IF;
+
     IF NOT EXISTS (
       SELECT 1
       FROM information_schema.tables
@@ -165,15 +180,15 @@ BEGIN
     END IF;
 
     -- If a COLUMN mapping exists for same srcobj, use its dst column name
-    SELECT (regexp_split_to_array(lower(m2.dstobj), '\.'))[
-             array_length(regexp_split_to_array(lower(m2.dstobj), '\.'), 1)
+    SELECT (regexp_split_to_array(m2.dstobj, '\.'))[
+             array_length(regexp_split_to_array(m2.dstobj, '\.'), 1)
            ]
     INTO target_col
     FROM synchdb_objmap m2
     WHERE m2.objtype = 'column'
       AND m2.enabled
       AND m2.name = p_connector_name
-      AND lower(m2.srcobj) = lower(rdt.srcobj)
+      AND m2.srcobj = rdt.srcobj
     LIMIT 1;
 
     IF target_col IS NULL OR btrim(target_col) = '' THEN
@@ -216,13 +231,28 @@ BEGIN
     EXCEPTION
       WHEN others THEN
         -- If the cast is not binary-coercible, a USING clause may be needed.
-        RAISE NOTICE 'Failed to alter datatype for %.% column % to %: %',
-                     p_src_schema, dt_table, target_col, dtype_sql, SQLERRM;
+        RAISE;
     END;
   END LOOP;
 END;
 $$;
 
+COMMENT ON FUNCTION synchdb_apply_column_mappings(name, name, name, name, text, name[]) IS
+   'transform column mappings for the supplied materialized table names; NULL means all tables';
+
+CREATE OR REPLACE FUNCTION synchdb_apply_column_mappings(
+    p_src_schema name,
+    p_connector_name name,
+    p_desired_db name,
+    p_desired_schema name DEFAULT NULL,
+    p_case_strategy text DEFAULT 'asis'
+) RETURNS void LANGUAGE plpgsql AS $$
+BEGIN
+  PERFORM synchdb_apply_column_mappings(p_src_schema, p_connector_name,
+                                        p_desired_db, p_desired_schema,
+                                        p_case_strategy, NULL::name[]);
+END;
+$$;
+
 COMMENT ON FUNCTION synchdb_apply_column_mappings(name, name, name, name, text) IS
    'transform column name mappings based on synchdb_objmap';
-

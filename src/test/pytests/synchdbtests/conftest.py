@@ -1,11 +1,12 @@
 import os
 import subprocess
+import sys
 import time
 import shutil
 import psycopg2
 import pytest
 
-from common import TEST_DATA_DIR
+from common import TEST_DATA_DIR, update_guc_conf
 
 PG_PORT = "14141"
 PG_HOST = "127.0.0.1"
@@ -281,6 +282,29 @@ def pg_cursor(target_instance):
     conn.close()
 
 
+@pytest.fixture
+def fdw_config(pg_cursor):
+    """Restore the snapshot provider even when a bootstrap assertion fails."""
+    pg_cursor.execute("SHOW synchdb.snapshot_engine")
+    previous = pg_cursor.fetchone()[0]
+    update_guc_conf(pg_cursor, "synchdb.snapshot_engine", "'fdw'", True)
+    try:
+        yield
+    finally:
+        update_guc_conf(pg_cursor, "synchdb.snapshot_engine", f"'{previous}'", True)
+
+
+@pytest.fixture
+def fdw_engine(pg_cursor, dbvendor, fdw_config):
+    extension = {
+        "mysql": "mysql_fdw", "sqlserver": "tds_fdw", "postgres": "postgres_fdw",
+    }.get(dbvendor, "oracle_fdw")
+    pg_cursor.execute("SELECT EXISTS (SELECT 1 FROM pg_available_extensions WHERE name = %s)",
+                      (extension,))
+    if not pg_cursor.fetchone()[0]:
+        pytest.skip(f"{extension} is not available for install")
+
+
 @pytest.fixture(scope="session", autouse=True)
 def setup_remote_instance(source: Source, request):
     # Provisioning stays on the proven ci/setup-remotedbs.sh, keyed by setup_key.
@@ -290,9 +314,31 @@ def setup_remote_instance(source: Source, request):
     env["OLRVER"]   = source.version or ""
     env["INTERNAL"] = "1" if source.internal else "0"
 
-    subprocess.run(["bash", "./ci/setup-remotedbs.sh"],
-                   check=True, env=env, stdout=subprocess.DEVNULL)
+    # Source preparation can fail before target_instance creates its data
+    # directory. Keep this log outside that directory so initdb/cleanup cannot
+    # remove it, and CI can upload it even when this fixture never yields.
+    log_dir = "source-setup-logs"
+    os.makedirs(log_dir, exist_ok=True)
+    log_path = os.path.join(log_dir, source.key + ".log")
+    try:
+        with open(log_path, "wb") as log:
+            subprocess.run(["bash", "./ci/setup-remotedbs.sh"],
+                           check=True, env=env, stdout=log,
+                           stderr=subprocess.STDOUT)
+    except subprocess.CalledProcessError:
+        print(f"Source setup failed; full log: {log_path}", file=sys.stderr)
+        try:
+            with open(log_path, "rb") as log:
+                log.seek(max(0, os.fstat(log.fileno()).st_size - 64 * 1024))
+                tail = log.read().decode("utf-8", errors="replace").splitlines()[-120:]
+            print("\n".join(tail), file=sys.stderr)
+        except OSError as error:
+            print(f"Could not read source setup log: {error}", file=sys.stderr)
+        raise
     yield
+    if request.session.testsfailed and os.environ.get("SYNCHDB_KEEP_FAILED_SOURCE") == "1":
+        print(f"test failed: source container kept at {source.container}")
+        return
     _teardown_remote_instance(source.setup_key)
 
 

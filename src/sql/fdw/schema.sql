@@ -2,7 +2,7 @@ CREATE OR REPLACE FUNCTION synchdb_materialize_schema(
     p_connector_name name,            -- connector name for stats
     p_src_schema     name,            -- e.g. 'ora_stage'
     p_dst_schema     name,            -- e.g. 'psql_stage'
-    p_on_exists      text DEFAULT 'skip'  -- 'skip' | 'replace'
+    p_on_exists      text DEFAULT 'error' -- only 'error' is supported for final targets
 ) RETURNS void
 LANGUAGE plpgsql
 AS $$
@@ -13,6 +13,13 @@ DECLARE
   v_dst_oid   oid;
   v_upd_count bigint;
 BEGIN
+  IF p_on_exists IN ('skip', 'replace', 'drop') THEN
+    RAISE EXCEPTION 'Target policy "%" is not supported until target readiness and safe publication are available', p_on_exists
+      USING ERRCODE = '0A000';
+  ELSIF p_on_exists IS NULL OR p_on_exists <> 'error' THEN
+    RAISE EXCEPTION 'Unknown p_on_exists value: %, use "error"', p_on_exists
+      USING ERRCODE = '22023';
+  END IF;
   -- ensure destination schema exists
   EXECUTE format('CREATE SCHEMA IF NOT EXISTS %I', p_dst_schema);
 
@@ -33,14 +40,8 @@ BEGIN
     ) INTO v_exists;
 
     IF v_exists THEN
-      IF p_on_exists = 'skip' THEN
-        RAISE NOTICE 'Skipping %.% (already exists)', p_dst_schema, r.tbl;
-        CONTINUE;
-      ELSIF p_on_exists = 'replace' THEN
-        EXECUTE format('DROP TABLE %I.%I CASCADE', p_dst_schema, r.tbl);
-      ELSE
-        RAISE EXCEPTION 'Unknown p_on_exists value: %, use "skip" or "replace"', p_on_exists;
-      END IF;
+      RAISE EXCEPTION 'Destination table %.% already exists', p_dst_schema, r.tbl
+        USING ERRCODE = '42P07';
     END IF;
 
     -- create empty materialized table with same columns
@@ -108,7 +109,9 @@ COMMENT ON FUNCTION synchdb_materialize_schema(name, name, name, text) IS
 CREATE OR REPLACE FUNCTION synchdb_migrate_primary_keys(
     p_oraobj_schema name,          -- e.g. 'ora_obj'  (holds table "keys")
     p_dst_schema    name,          -- e.g. 'psql_stage'
-    p_case_strategy text DEFAULT 'asis'  -- 'upper' | 'lower' | 'asis'
+    p_case_strategy text,
+    p_source_owner name,
+    p_table_names name[]
 ) RETURNS void
 LANGUAGE plpgsql
 AS $$
@@ -122,7 +125,12 @@ DECLARE
   v_case_strategy text;
   v_tbl_expr      text;
   v_col_expr      text;
+  v_collision    text;
 BEGIN
+  -- NULL retains the standalone helper's full scope; an empty scope is a no-op.
+  IF p_table_names IS NOT NULL AND cardinality(p_table_names) = 0 THEN
+    RETURN;
+  END IF;
   ----------------------------------------------------------------------
   -- Resolve case strategy for table/column names
   -- p_case_strategy: 'lower' | 'upper' | 'asis'
@@ -138,13 +146,13 @@ BEGIN
   END IF;
 
   IF v_case_strategy = 'lower' THEN
-    v_tbl_expr := 'lower(table_name)';
+    v_tbl_expr := 'lower(table_name)::name';
     v_col_expr := 'lower(column_name)';
   ELSIF v_case_strategy = 'upper' THEN
-    v_tbl_expr := 'upper(table_name)';
+    v_tbl_expr := 'upper(table_name)::name';
     v_col_expr := 'upper(column_name)';
   ELSE
-    v_tbl_expr := 'table_name';
+    v_tbl_expr := 'table_name::name';
     v_col_expr := 'column_name';
   END IF;
 
@@ -152,6 +160,20 @@ BEGIN
   -- Iterate PK definitions from <p_oraobj_schema>.keys
   -- Apply the same case strategy to table and column names
   ----------------------------------------------------------------------
+  EXECUTE format($q$
+    SELECT tbl FROM (
+      SELECT "schema", table_name, %1$s AS tbl FROM %2$I.keys
+       WHERE is_primary = true
+         AND (%3$L IS NULL OR upper("schema") = upper(%3$L))
+         AND (%4$L::name[] IS NULL OR %1$s = ANY(%4$L::name[]))
+       GROUP BY "schema", table_name, %1$s
+    ) source_tables
+    GROUP BY tbl HAVING count(*) > 1 LIMIT 1
+  $q$, v_tbl_expr, p_oraobj_schema, p_source_owner, p_table_names) INTO v_collision;
+  IF v_collision IS NOT NULL THEN
+    RAISE EXCEPTION 'Ambiguous source schemas for primary key of table %', v_collision;
+  END IF;
+
   FOR r IN
     EXECUTE format($q$
       SELECT
@@ -159,8 +181,10 @@ BEGIN
         string_agg(quote_ident(%2$s), ', ' ORDER BY position) AS cols
       FROM %3$I.keys
       WHERE is_primary = true
-      GROUP BY %1$s
-    $q$, v_tbl_expr, v_col_expr, p_oraobj_schema)
+        AND (%4$L IS NULL OR upper("schema") = upper(%4$L))
+        AND (%5$L::name[] IS NULL OR %1$s = ANY(%5$L::name[]))
+      GROUP BY "schema", %1$s
+    $q$, v_tbl_expr, v_col_expr, p_oraobj_schema, p_source_owner, p_table_names)
   LOOP
     -- Only act if destination table exists (relkind 'r' = ordinary table)
     SELECT EXISTS (
@@ -194,14 +218,39 @@ BEGIN
       WHEN SQLSTATE '42P16' THEN  -- multiple primary keys not allowed
         RAISE NOTICE 'Skipping %.%: a primary key already exists', p_dst_schema, r.tbl;
       WHEN duplicate_object THEN   -- constraint name already exists
-        RAISE NOTICE 'Skipping %.%: constraint % already exists', p_dst_schema, r.tbl, v_cname;
+        RAISE;
       WHEN OTHERS THEN
-        RAISE WARNING 'Failed to add PK on %.%: %', p_dst_schema, r.tbl, SQLERRM;
+        RAISE;
     END;
   END LOOP;
 END;
 $$;
 
-COMMENT ON FUNCTION synchdb_migrate_primary_keys(name, name, text) IS
+COMMENT ON FUNCTION synchdb_migrate_primary_keys(name, name, text, name, name[]) IS
+   'migrate primary keys for the supplied materialized table names; NULL means all tables';
+
+CREATE OR REPLACE FUNCTION synchdb_migrate_primary_keys(
+    p_oraobj_schema name,
+    p_dst_schema name,
+    p_case_strategy text,
+    p_source_owner name
+) RETURNS void LANGUAGE plpgsql AS $$
+BEGIN
+  PERFORM synchdb_migrate_primary_keys(p_oraobj_schema, p_dst_schema,
+                                      p_case_strategy, p_source_owner, NULL::name[]);
+END;
+$$;
+
+COMMENT ON FUNCTION synchdb_migrate_primary_keys(name, name, text, name) IS
    'migrate primary keys from staging to destination schema';
 
+CREATE OR REPLACE FUNCTION synchdb_migrate_primary_keys(
+    p_oraobj_schema name,
+    p_dst_schema name,
+    p_case_strategy text DEFAULT 'asis'
+) RETURNS void LANGUAGE plpgsql AS $$
+BEGIN
+  PERFORM synchdb_migrate_primary_keys(p_oraobj_schema, p_dst_schema,
+                                      p_case_strategy, NULL::name);
+END;
+$$;

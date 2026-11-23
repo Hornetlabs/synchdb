@@ -17,6 +17,8 @@ SynchDB supports the following general DDL operations for Debezium based connect
 ✅ ALTER [table] ALTER COLUMN  
 ✅ DROP [table]
 
+✅ TRUNCATE [table] (MySQL, Oracle and PostgreSQL)
+
 For Openlog Replicator based connector these Oracle DDL syntax is supported: 
 
 ✅ CREATE [table]
@@ -26,8 +28,42 @@ For Openlog Replicator based connector these Oracle DDL syntax is supported:
 ✅ ALTER [table] DROP COLUMN
 ✅ ALTER [table] ADD CONSTRAINT
 ✅ ALTER [table] DROP CONSTRAINT
+✅ TRUNCATE [table]
 
 ## **Detailed Command Support**
+
+### **TRUNCATE TABLE**
+
+MySQL, Oracle and PostgreSQL Debezium `op=t` events and native OLR Oracle
+`TRUNCATE TABLE` events clear the mapped target table. No primary key or row
+images are required. The operation uses PostgreSQL TRUNCATE permissions and
+triggers and runs in the same target transaction as the rest of the batch.
+A later batch error rolls back the truncate and prevents acknowledgement.
+Successful events increment both `ddls` and `truncates`.
+
+Explicit single-table `tableChanges[].type = TRUNCATE` / `TRUNCATE TABLE` and
+schema-change DDL text also produce the same typed truncate event. Empty
+`tableChanges` containing TRUNCATE SQL is applied rather than treated as metadata.
+Source database/schema/table, the serialized table ID and any SQL qualification
+must agree. SQL text must contain exactly one supported statement. Quoted source
+case is preserved, and malformed row images or snapshot truncates are rejected
+before looking up a target.
+
+TRUNCATE is enabled by default. Set `synchdb.dbz_skipped_operations = 't'`
+and start a new connector run to skip it. Native OLR logs the explicit skip
+and continues without treating the event as a failure.
+
+Each event applies to its captured table only (`ONLY`, `CONTINUE IDENTITY`,
+`RESTRICT` on the target). Debezium does not convey source CASCADE or identity
+restart options, so target sequences and additional local tables are not
+changed. Target foreign keys can cause the batch to fail. PostgreSQL statements
+that truncate several tables arrive as separate per-table events; target FK
+dependencies between those tables are not resolved by cascading.
+
+Native OLR accepts Oracle `DROP STORAGE`, `DROP ALL STORAGE` and `REUSE STORAGE`
+clauses; their physical allocation settings are not transferred to PostgreSQL.
+Both SQL-text paths reject multiple tables, SQL batches, CASCADE and RESTART IDENTITY explicitly. Native OLR TRUNCATE does not require the Oracle parser library.
+SQL Server prohibits TRUNCATE on CDC-enabled source tables.
 
 ### **CREATE TABLE**
 
@@ -161,6 +197,4 @@ GO
 ```
 
 The above example should allow SynchDB to receive an ALTER TABLE ADD COLUMN and an INSERT events. There is no need to restart both SQL Server or SynchDB to capture such events. The same apply to ALTER TABLE DROP COLUMN and ALTER TABLE ALTER COLUMN events as well.
-
-
 
